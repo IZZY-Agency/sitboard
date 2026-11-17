@@ -362,6 +362,21 @@ if [[ -n "$dl_fail" ]]; then
 else
   echo "ok   make-denylist: threshold, public names, hand-added words, reminder"
 fi
+# R7b. Sources are read as bytes, whatever the locale: a Codex working folder
+# that is not UTF-8 (a Latin-1 byte) still gives its words, and the run ends well.
+dlb_home="$work/dlb-home"
+dlb_cfg="$work/dlb-cfg"
+mkdir -p "$dlb_home/.codex/sessions/2026" "$dlb_cfg/sitboard-dev"
+printf '{"type":"session_meta","payload":{"cwd":"/x/caf\351-zelquorin"}}\n' > "$dlb_home/.codex/sessions/2026/rollout-1.jsonl"
+dlb_out="$(LC_ALL=en_US.UTF-8 HOME="$dlb_home" XDG_CONFIG_HOME="$dlb_cfg" PATH="/usr/bin:/bin" bash "$here/make-denylist.sh" 2>&1)"
+dlb_rc=$?
+if ((dlb_rc == 0)) && grep -qx zelquorin "$dlb_cfg/sitboard-dev/denylist" 2>/dev/null; then
+  echo "ok   make-denylist: a working folder that is not UTF-8 still gives its words"
+else
+  echo "FAIL make-denylist: a working folder that is not UTF-8 (exit $dlb_rc)"
+  printf '%s\n' "$dlb_out" | sed 's/^/    /'
+  failures=$((failures + 1))
+fi
 
 # S5. make-denylist.sh: ordinary words skipped, short existing words counted,
 # --rebuild re-filters them, an unreadable list stops the run.

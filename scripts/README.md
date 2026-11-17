@@ -29,7 +29,9 @@ The version lives in one place: `RELEASE_VERSION` in the Makefile. `CHANGELOG.md
    ```
 
    It refuses before touching anything when:
-   - the export set holds a `.claude`, `.codex` or `docs` folder, the website's top-level folder, a `.env*`, `*.pem`, `*.key`, `CLAUDE.md` or `AGENTS.md` file, or a tracked file that `.gitignore` ignores (the website is not published here; workflows are exported by name, `ci.yml` only, so the website's workflow never is);
+   - the export set holds a `.claude`, `.codex` or `docs` folder, the website's top-level folder, a `.env*`, `*.pem`, `*.key`, `CLAUDE.md` or `AGENTS.md` file, or a tracked file that `.gitignore` ignores (the website is not published here; of `.github`, two files are exported, each by name: the workflow `ci.yml` and the README's banner `sitboard-banner.svg`, so the website's workflow never is);
+   - an allowlisted path below the top level is not exactly one tracked file (a folder of that name would export what is inside it);
+   - an exported `.github` SVG is not plain drawing only, checked with line breaks and tabs read as spaces: an element other than `svg`, `g`, `rect`, `path`, `text` and `tspan` (`SVG_TAGS`), an attribute not used by the banner itself (`SVG_ATTRS`, exact spelling) or without a quoted value, or, ignoring case, any `<!` (doctype, entity, comment, CDATA), `<?`, `&`, `url(`, event attribute (`on…=`), prefixed attribute (`xmlns:x=`, `xlink:href=`), `href`, `data:`, `style`, script, image, `foreignObject`, metadata, or Inkscape or Sodipodi residue (`SVG_REFUSED` in `publish.sh`);
    - the target is, contains or sits inside this repository (by file identity), shares its git folder, or holds its history;
    - the target has uncommitted changes or stray files.
 

@@ -133,6 +133,9 @@ EOF
   echo 'a spike note' > "$p/$dd/spikes/1.md"
   mkdir -p "$p/$ss"; echo '<!doctype html><title>sitboard.com</title>' > "$p/$ss/index.html"
   printf 'name: website\njobs:\n  deploy:\n    runs-on: ubuntu-latest\n' > "$p/.github/workflows/site.yml"
+  # The README's banner is exported by name; a second picture beside it is not.
+  echo '<svg xmlns="http://www.w3.org/2000/svg"/>' > "$p/.github/sitboard-banner.svg"
+  echo '<svg xmlns="http://www.w3.org/2000/svg"/>' > "$p/.github/draft-banner.svg"
   git -C "$p" init -q -b main
   commit_all "$p" init
   echo "$p"
@@ -175,11 +178,12 @@ case_insensitive() { [ "$(upper "$1")" != "$1" ] && [ -e "$(upper "$1")" ] && [ 
 p="$(make_private p1)"; t="$(make_target p1)"
 echo 'loose' > "$p/notes.txt"
 expect "rehearsal stages the export and commits nothing" 0 "staged only" rehearse "$p/scripts/publish.sh" "$t"
-got="$(git -C "$t" ls-files | sort | tr '\n' ' ')"
+got="$(git -C "$t" ls-files | LC_ALL=C sort | tr '\n' ' ')"
 want="$(cd "$p" && git ls-files -- cmd internal web scripts Makefile go.mod go.sum README.md LICENSE THIRD_PARTY_NOTICES.md CHANGELOG.md \
-  .github/workflows/ci.yml .gitignore testdata test .golangci.yml notices.go notices_test.go | sort | tr '\n' ' ')"
-if [[ "$got" == "$want" && "$got" != *"$dd/"* && "$got" != *notes.txt* && "$got" != *"$ss/"* && "$got" != *site.yml* ]]; then
-  ok "the export is the allowlist, without docs, the website, its workflow or untracked files"
+  .github/workflows/ci.yml .github/sitboard-banner.svg .gitignore testdata test .golangci.yml notices.go notices_test.go | LC_ALL=C sort | tr '\n' ' ')"
+if [[ "$got" == "$want" && "$got" == *".github/sitboard-banner.svg"* && "$got" != *"$dd/"* && "$got" != *notes.txt* && "$got" != *"$ss/"* \
+      && "$got" != *site.yml* && "$got" != *draft-banner.svg* ]]; then
+  ok "the export is the allowlist with the README banner, without docs, the website, its workflow, another .github file or untracked files"
 else
   bad "the export is the allowlist, without docs or untracked files" "got:  $got
 want: $want"
@@ -289,6 +293,30 @@ for f in cmd/server.pem.go web/src/id_rsa_backup.ts cmd/x.key.go; do
   mkdir -p "$(dirname "$p/$f")"; echo 'package x' > "$p/$f"; commit_all "$p"
   expect "a name containing a key marker is refused: $f" 1 "a private kind of file" rehearse "$p/scripts/publish.sh" "$t"
 done
+# The binary test is git's: a NUL byte in the first 8000 bytes, counted byte
+# by byte whatever the locale. Under a UTF-8 locale macOS tr stops at the first
+# byte that is not UTF-8 and says "Illegal byte sequence".
+# The four fonts export without a word from tr.
+p="$(make_private p5-fonts)"; t="$(make_target p5-fonts)"
+mkdir -p "$p/web/src/fonts"; cp "$repo"/web/src/fonts/*.woff2 "$p/web/src/fonts/"; commit_all "$p"
+expect "the four fonts export as allowed binary files" 0 "staged only" env LC_ALL=en_US.UTF-8 PUBLISH_TEST_TARGET=1 bash "$p/scripts/publish.sh" "$t"
+[[ "$LAST_OUT" != *"Illegal byte sequence"* ]] && ok "the binary test reads the fonts without an illegal byte sequence" \
+  || bad "the binary test stumbled on the fonts" "$(grep -m3 'Illegal byte sequence' <<<"$LAST_OUT")"
+[[ "$(git -C "$t" ls-files web/src/fonts | wc -l | tr -d ' ')" == 4 ]] && ok "the four fonts are in the export" \
+  || bad "fonts missing from the export" "$(git -C "$t" ls-files web/src/fonts)"
+# Text that is not UTF-8 but has no NUL byte is text, on macOS as on Linux.
+p="$(make_private p5-latin1)"; t="$(make_target p5-latin1)"
+printf 'caf\351 au lait\n' > "$p/web/src/latin1.txt"; commit_all "$p"
+expect "a Latin-1 text file without a NUL byte is not binary" 0 "staged only" env LC_ALL=en_US.UTF-8 PUBLISH_TEST_TARGET=1 bash "$p/scripts/publish.sh" "$t"
+git -C "$t" ls-files --error-unmatch web/src/latin1.txt >/dev/null 2>&1 && ok "the Latin-1 file is in the export" \
+  || bad "the Latin-1 file is missing from the export" "$(git -C "$t" ls-files web/src)"
+# A path that is not UTF-8 is still checked whole: a docs folder below it is
+# refused. The path lives in the index only (macOS file systems refuse it).
+p="$(make_private p5-path)"; t="$(make_target p5-path)"
+blob="$(echo 'export const y = 2;' | git -C "$p" hash-object -w --stdin)"
+git -C "$p" update-index --add --cacheinfo "100644,$blob,web/x"$'\377'"/$dd/a.ts"
+git -C "$p" -c user.name=test -c user.email=test@example.com -c commit.gpgsign=false commit -q -m 'a path that is not UTF-8'
+expect "a docs folder below a path that is not UTF-8 is refused" 1 "inside a .claude, .codex or $dd folder" env LC_ALL=en_US.UTF-8 PUBLISH_TEST_TARGET=1 bash "$p/scripts/publish.sh" "$t"
 p="$(make_private p5-big)"; t="$(make_target p5-big)"
 head -c 1100000 /dev/zero | tr '\0' 'a' > "$p/web/src/big.json"; commit_all "$p"
 expect "export refuses a file over the size cap" 1 "more than 1048576" rehearse "$p/scripts/publish.sh" "$t"
@@ -296,12 +324,103 @@ p="$(make_private p5-ign)"; t="$(make_target p5-ign)"
 echo '{}' > "$p/internal/server/dist/app.json"; git -C "$p" add -f internal/server/dist/app.json; commit_all "$p"
 expect "export refuses a tracked file that .gitignore ignores" 1 "that .gitignore ignores" rehearse "$p/scripts/publish.sh" "$t"
 
+# P1b. The banner is exported by its exact name: another picture in .github is
+# refused even when someone adds it to the allowlist.
+p="$(make_private p1b)"; t="$(make_target p1b)"
+sed -i.bak 's|^  \.github/sitboard-banner\.svg$|  .github/sitboard-banner.svg .github/draft-banner.svg|' "$p/scripts/publish.sh"
+rm -f "$p/scripts/publish.sh.bak"; commit_all "$p"
+grep -q 'draft-banner.svg' "$p/scripts/publish.sh" || bad "P1b did not plant the second picture in the allowlist" ""
+expect "another .github picture is refused even when allowlisted" 1 "draft-banner.svg: not a kind of file this folder exports" rehearse "$p/scripts/publish.sh" "$t"
+
+# P1c. A file named in the allowlist below the top level is one file: a folder
+# of that name (git matches a path as a folder prefix too) is refused, for the
+# banner and for the workflow, whatever is inside.
+for named in .github/sitboard-banner.svg .github/workflows/ci.yml; do
+  p="$(make_private "p1c-${named##*/}")"; t="$(make_target "p1c-${named##*/}")"
+  rm -f "$p/$named"; mkdir -p "$p/$named"
+  echo 'name: evil' > "$p/$named/evil.yml"; echo '<svg xmlns="http://www.w3.org/2000/svg"/>' > "$p/$named/sitboard-banner.svg"
+  commit_all "$p"
+  before="$(state "$t")"
+  expect "a folder named $named is refused" 1 "allowlisted file is not one tracked file: $named" rehearse "$p/scripts/publish.sh" "$t"
+  [[ "$(state "$t")" == "$before" ]] && ok "the refused folder $named left nothing in the target" || bad "the folder $named touched the target" ""
+done
+# P1d. A "=" kind is an exact path below its folder: a banner of the same name
+# deeper in .github is refused even when someone allowlists it.
+p="$(make_private p1d)"; t="$(make_target p1d)"
+mkdir -p "$p/.github/x"; echo '<svg xmlns="http://www.w3.org/2000/svg"/>' > "$p/.github/x/sitboard-banner.svg"
+sed -i.bak 's|^  \.github/sitboard-banner\.svg$|  .github/sitboard-banner.svg .github/x/sitboard-banner.svg|' "$p/scripts/publish.sh"
+rm -f "$p/scripts/publish.sh.bak"; commit_all "$p"
+grep -q '\.github/x/sitboard-banner\.svg' "$p/scripts/publish.sh" || bad "P1d did not plant the deeper banner in the allowlist" ""
+expect "a same-named banner deeper in .github is refused" 1 ".github/x/sitboard-banner.svg: not a kind of file this folder exports" rehearse "$p/scripts/publish.sh" "$t"
+
+# P1e. The banner is plain drawing only: script in any spelling (a prefixed
+# element, an event attribute, an entity, a newline or a tab inside a tag),
+# links, external paint, embedded images and HTML, metadata, comments, data
+# URLs, editor residue, CSS, any element or attribute beyond the listed ones
+# and an unquoted value are refused, and the target is left as it was.
+svg_bad=(
+  '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'
+  '<svg xmlns="http://www.w3.org/2000/svg"><a href="https://example.com"><rect width="1" height="1"/></a></svg>'
+  '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"><use xlink:HREF="#a"/></svg>'
+  '<svg xmlns="http://www.w3.org/2000/svg"><IMAGE width="1" height="1"/></svg>'
+  '<svg xmlns="http://www.w3.org/2000/svg"><foreignObject><p>hi</p></foreignObject></svg>'
+  '<svg xmlns="http://www.w3.org/2000/svg"><metadata>who made it</metadata></svg>'
+  '<svg xmlns="http://www.w3.org/2000/svg"><!-- a note --></svg>'
+  '<svg xmlns="http://www.w3.org/2000/svg"><rect fill="url(data:image/png;base64,AAAA)"/></svg>'
+  '<svg xmlns="http://www.w3.org/2000/svg" xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"/>'
+  '<svg xmlns="http://www.w3.org/2000/svg" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"/>'
+  '<svg xmlns="http://www.w3.org/2000/svg"><rect Style="fill:red"/></svg>'
+  '<svg xmlns="http://www.w3.org/2000/svg" xmlns:s="http://www.w3.org/2000/svg"><s:script>alert(1)</s:script></svg>'
+  '<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"/>'
+  '<!DOCTYPE svg [<!ENTITY s "&#60;s&#99;ript&#62;alert(1)&#60;/s&#99;ript&#62;">]><svg xmlns="http://www.w3.org/2000/svg">&s;</svg>'
+  '<svg xmlns="http://www.w3.org/2000/svg"><rect fill="url(https://example.com/x.svg#g)"/></svg>'
+  '<svg xmlns="http://www.w3.org/2000/svg"><circle r="1"/></svg>'
+  $'<svg xmlns="http://www.w3.org/2000/svg"\nonload\n="document.documentElement.setAttribute(\'data-ran\',\'x\')"><rect width="9" height="9"/></svg>'
+  $'<svg xmlns="http://www.w3.org/2000/svg"><rect\nxml:base="https://x/" width="1"/></svg>'
+  '<svg xmlns="http://www.w3.org/2000/svg"><rect OnClick="alert(1)" width="1"/></svg>'
+  '<svg xmlns="http://www.w3.org/2000/svg"><rect id="a" width="1"/></svg>'
+  '<svg xmlns="http://www.w3.org/2000/svg"><rect width=1 height="1"/></svg>'
+  $'<svg xmlns="http://www.w3.org/2000/svg"><rect\tonclick="x" width="1"/></svg>'
+)
+for i in "${!svg_bad[@]}"; do
+  p="$(make_private "p1e-$i")"; t="$(make_target "p1e-$i")"
+  printf '%s\n' "${svg_bad[$i]}" > "$p/.github/sitboard-banner.svg"; commit_all "$p"
+  before="$(state "$t")"
+  expect "a banner with refused content is refused ($i)" 1 ".github/sitboard-banner.svg: an SVG that is not plain drawing" \
+    rehearse "$p/scripts/publish.sh" "$t"
+  [[ "$(state "$t")" == "$before" ]] || bad "the refused banner ($i) touched the target" ""
+done
+# A NUL byte past git's 8000-byte binary window, then an unlisted element:
+# refused on every awk (macOS awk ends a record at the NUL).
+p="$(make_private p1e-nul)"; t="$(make_target p1e-nul)"
+{ printf '<svg xmlns="http://www.w3.org/2000/svg"><text x="1">'; head -c 8100 /dev/zero | LC_ALL=C tr '\0' 'a'
+  printf '\000</text><iframe xmlns="http://www.w3.org/1999/xhtml" src="https://t.example/"></iframe></svg>\n'; } > "$p/.github/sitboard-banner.svg"
+commit_all "$p"
+before="$(state "$t")"
+expect "a banner with a NUL byte past the binary window is refused" 1 ".github/sitboard-banner.svg: an SVG that is not plain drawing" \
+  rehearse "$p/scripts/publish.sh" "$t"
+[[ "$(state "$t")" == "$before" ]] || bad "the banner with a NUL byte touched the target" ""
+# The real banner passes the same gate, and exports as it is.
+p="$(make_private p1e-real)"; t="$(make_target p1e-real)"
+cp "$repo/.github/sitboard-banner.svg" "$p/.github/sitboard-banner.svg"; commit_all "$p"
+expect "the README banner is plain drawing and exports" 0 "staged only" rehearse "$p/scripts/publish.sh" "$t"
+cmp -s "$repo/.github/sitboard-banner.svg" "$t/.github/sitboard-banner.svg" \
+  && ok "the exported banner is the README banner, byte for byte" || bad "the exported banner differs from the README banner" ""
+# P1f. An allowlisted file below the top level with a non-ASCII name is one
+# file like any other (git quotes such names unless asked for raw bytes).
+p="$(make_private p1f)"; t="$(make_target p1f)"
+echo 'name: other' > "$p/.github/workflows/caf"$'\xc3\xa9'".yml"
+sed -i.bak 's|^  \.github/workflows/ci\.yml$|  .github/workflows/ci.yml .github/workflows/caf'$'\xc3\xa9''.yml|' "$p/scripts/publish.sh"
+rm -f "$p/scripts/publish.sh.bak"; commit_all "$p"
+grep -q 'workflows/caf' "$p/scripts/publish.sh" || bad "P1f did not plant the non-ASCII name in the allowlist" ""
+expect "an allowlisted file with a non-ASCII name exports" 0 "staged only" rehearse "$p/scripts/publish.sh" "$t"
+
 # P6 (review 3). The target's own ignore rules cannot drop an exported file.
 p="$(make_private p6)"; t="$(make_target p6)"
 printf 'LICENSE\nCHANGELOG.md\n' > "$t/.git/info/exclude"
 expect "an export into a target that ignores files" 0 "staged only" rehearse "$p/scripts/publish.sh" "$t"
 git -C "$t" ls-files --error-unmatch LICENSE CHANGELOG.md >/dev/null 2>&1 \
-  && [[ "$(git -C "$t" ls-files | wc -l)" == "$(git -C "$p" ls-files -- cmd internal web scripts Makefile go.mod go.sum README.md LICENSE THIRD_PARTY_NOTICES.md CHANGELOG.md .github/workflows/ci.yml .gitignore testdata test .golangci.yml notices.go notices_test.go | wc -l)" ]] \
+  && [[ "$(git -C "$t" ls-files | wc -l)" == "$(git -C "$p" ls-files -- cmd internal web scripts Makefile go.mod go.sum README.md LICENSE THIRD_PARTY_NOTICES.md CHANGELOG.md .github/workflows/ci.yml .github/sitboard-banner.svg .gitignore testdata test .golangci.yml notices.go notices_test.go | wc -l)" ]] \
   && ok "the target's ignore rules dropped nothing" || bad "files dropped by the target's ignore rules" "$(git -C "$t" ls-files | wc -l)"
 
 # Review 2.9: a non-ASCII file name exports like any other.
@@ -820,6 +939,16 @@ if grep -qx '  .github' <(sed -n '/^ALLOWLIST=(/,/^)/p' "$here/publish.sh" | tr 
 else
   ok "the allowlist names ci.yml and not the whole .github folder"
 fi
+# The README's banner is the one other .github file, by exact name: the kinds
+# of .github stay workflows (.yml) plus that one file, never every picture.
+gh_allowed="$(sed -n '/^ALLOWLIST=(/,/^)/p' "$here/publish.sh" | sed -e 's/#.*//' | tr ' ' '\n' | grep '^\.github' | LC_ALL=C sort | tr '\n' ' ')"
+gh_kinds="$(sed -n '/^KINDS=(/,/^)/p' "$here/publish.sh" | grep '"\.github[:=]' | tr -d ' "' | LC_ALL=C sort | tr '\n' ' ')"
+[[ "$gh_allowed" == ".github/sitboard-banner.svg .github/workflows/ci.yml " && "$gh_kinds" == ".github:.yml .github=sitboard-banner.svg " ]] \
+  && ok "of .github, only ci.yml and the README banner are exported, each by name" \
+  || bad "the .github export set changed" "allowlist: $gh_allowed
+kinds: $gh_kinds"
+grep -qF '<img src=".github/sitboard-banner.svg"' "$repo/README.md" \
+  && ok "the README shows the banner the export carries" || bad "the README does not show .github/sitboard-banner.svg" ""
 grep -qE "^  ($ss|website|pages|deploy-$ss)[a-z-]*:" "$repo/.github/workflows/ci.yml" \
   && bad "ci.yml has a website job" "$(grep -nE '^  [a-z-]+:' "$repo/.github/workflows/ci.yml")" \
   || ok "ci.yml has no website job"

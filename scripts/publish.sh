@@ -127,6 +127,8 @@ ALLOWLIST=(
   # The tool's workflows, by name: the website and its workflow are never
   # published here.
   .github/workflows/ci.yml
+  # The README's banner, by name too, and nothing else from that folder.
+  .github/sitboard-banner.svg
   # Beyond the agreed list, needed so the public tree passes `make check`:
   testdata       # fixtures the adapter tests read
   test           # the end-to-end test package
@@ -135,21 +137,37 @@ ALLOWLIST=(
 )
 
 # The kinds of file each top-level folder may export: "<folder>:<extensions>"
-# and, for files without an extension, "<folder>=<exact names>". "." is the
-# repository root, whose files are the allowlist's own names. Anything else
-# stops the run and names the file.
+# and, for files without an extension or one file let out by name,
+# "<folder>=<exact paths below that folder>". "." is the repository root,
+# whose files are the allowlist's own names. Anything else stops the run and
+# names the file.
 KINDS=(
   ".:.go .md .mod .sum .yml"
   ".=Makefile LICENSE .gitignore"
   ".github:.yml"
+  ".github=sitboard-banner.svg"
   "cmd:.go"
   "internal:.go .json .txt"
-  "internal=.keep"
+  "internal=server/dist/.keep"
   "scripts:.md .mjs .sh .tmpl"
   "test:.go"
   "testdata:.json .jsonl .md"
   "web:.css .html .js .json .mjs .svelte .svg .ts .txt .woff2"
 )
+# An exported .github SVG is plain drawing only (svg_plain below):
+# - its tags are these elements and no other, spelled exactly (the banner
+#   uses all of them and nothing else);
+SVG_TAGS="svg g rect path text tspan"
+# - its attributes are these names and no other, spelled exactly (again the
+#   banner's own), each with a quoted value;
+SVG_ATTRS="aria-label d fill fill-opacity font-family font-size font-weight height letter-spacing role rx stroke transform viewBox width x xmlns y"
+# - and it holds none of these, ignoring case: "<!" (doctype, entity, comment,
+#   CDATA), "<?", "&" (any entity or character reference), url( (paint or
+#   anything else from elsewhere), an on...= event attribute, a prefixed
+#   attribute such as xmlns:x= or xlink:href= (the plain xmlns="..." is the one
+#   namespace declaration), and, kept from before the allowlist, script, href,
+#   image, foreignObject, metadata, data:, Inkscape/Sodipodi residue and style.
+SVG_REFUSED='<!|<\?|&|url\(|(^|[^a-z0-9:_.-])on[a-z]+[[:space:]]*=|[[:space:]][a-z_][a-z0-9._-]*:[a-z_][a-z0-9._-]*[[:space:]]*=|<script|href|<image|<foreignobject|<metadata|data:|sodipodi|inkscape|style'
 # No exported file is larger than this, unless named here.
 MAX_BYTES=1048576
 SIZE_EXCEPTIONS=()
@@ -240,19 +258,87 @@ fi
 
 for p in "${ALLOWLIST[@]}"; do
   pgit ls-files --error-unmatch -- "$p" > /dev/null 2>&1 || fail "allowlisted path is not tracked: $p"
+  # An entry below the top level names one file, and a path is also a folder
+  # prefix to git: it must list exactly itself, never files under a folder of
+  # that name.
+  case "$p" in
+    */*) [ "$(pgit ls-files -z -- "$p" | LC_ALL=C tr '\0' '\n')" = "$p" ] || fail "allowlisted file is not one tracked file: $p (a folder of that name?)" ;;
+  esac
 done
+
+# svg_plain <file>: the SVG is plain drawing only (SVG_TAGS, SVG_ATTRS,
+# SVG_REFUSED). XML lets a newline or a tab stand between any two parts of a
+# tag, so every check reads a flattened copy, CR, LF and tab turned into
+# spaces. It reads files, not pipes, so an early exit of grep cannot turn
+# into a pass.
+svg_plain() {
+  local flat="$1.flat" all nonul
+  # No NUL byte anywhere, past git's 8000-byte binary window too: some awks
+  # (macOS) end a record at a NUL and would never see what follows it.
+  all="$(wc -c < "$1")"; nonul="$(LC_ALL=C tr -d '\000' < "$1" | wc -c)"
+  [ "$((all))" -eq "$((nonul))" ] || return 1
+  LC_ALL=C tr '\r\n\t' '   ' < "$1" > "$flat" || return 1
+  LC_ALL=C grep -aqiE -- "$SVG_REFUSED" "$flat" && return 1
+  # Every "<" starts a tag or an end tag's name.
+  LC_ALL=C grep -aqE -- '<([^A-Za-z/]|/[^A-Za-z]|/?$)' "$flat" && return 1
+  # Walk the tags: each name is in SVG_TAGS, each attribute name in SVG_ATTRS
+  # (exact spelling), each attribute is name="value" or name='value' with the
+  # quote closed, and a tag ends with > or />. Quotes count inside tags only.
+  LC_ALL=C awk -v tags="$SVG_TAGS" -v attrs="$SVG_ATTRS" -v sq="'" '
+    BEGIN {
+      nt = split(tags, t, " "); for (k = 1; k <= nt; k++) T[t[k]] = 1
+      na = split(attrs, a, " "); for (k = 1; k <= na; k++) A[a[k]] = 1
+    }
+    {
+      s = s $0
+    }
+    END {
+      n = length(s); i = 1; tagsseen = 0
+      while (i <= n) {
+        if (substr(s, i, 1) != "<") { i++; continue }
+        i++; endtag = 0
+        if (substr(s, i, 1) == "/") { endtag = 1; i++ }
+        j = i; while (i <= n && substr(s, i, 1) ~ /[A-Za-z0-9_.:-]/) i++
+        name = substr(s, j, i - j)
+        if (!(name in T)) exit 1
+        tagsseen++
+        while (1) {
+          while (i <= n && substr(s, i, 1) == " ") i++
+          if (i > n) exit 1
+          c = substr(s, i, 1)
+          if (c == ">") { i++; break }
+          if (c == "/" && !endtag && substr(s, i + 1, 1) == ">") { i += 2; break }
+          if (endtag) exit 1
+          j = i; while (i <= n && substr(s, i, 1) ~ /[A-Za-z0-9_.:-]/) i++
+          an = substr(s, j, i - j)
+          if (an == "" || !(an in A)) exit 1
+          while (i <= n && substr(s, i, 1) == " ") i++
+          if (substr(s, i, 1) != "=") exit 1
+          i++; while (i <= n && substr(s, i, 1) == " ") i++
+          q = substr(s, i, 1)
+          if (q != "\"" && q != sq) exit 1
+          k = index(substr(s, i + 1), q)
+          if (k == 0) exit 1
+          i = i + 1 + k
+        }
+      }
+      if (tagsseen == 0) exit 1
+      exit 0
+    }' "$flat" || return 1
+  return 0
+}
 
 # kind_ok <path>: the file is of a kind listed for its top-level folder.
 kind_ok() {
-  local f="$1" top base ext k
-  case "$f" in */*) top="${f%%/*}" ;; *) top="." ;; esac
+  local f="$1" top rest base ext k
+  case "$f" in */*) top="${f%%/*}"; rest="${f#*/}" ;; *) top="."; rest="$f" ;; esac
   base="${f##*/}"
   ext=""
   case "$base" in ?*.*) ext=".${base##*.}" ;; esac
   for k in "${KINDS[@]}"; do
     case "$k" in
       "$top:"*) [ -n "$ext" ] && [[ " ${k#*:} " == *" $ext "* ]] && return 0 ;;
-      "$top="*) [[ " ${k#*=} " == *" $base "* ]] && return 0 ;;
+      "$top="*) [[ " ${k#*=} " == *" $rest "* ]] && return 0 ;;
     esac
   done
   return 1
@@ -266,7 +352,9 @@ while IFS= read -r -d '' entry; do
   rest="${entry#* }"
   blob="${rest%% *}"
   f="${entry#*$'\t'}"
-  lc="$(printf '%s' "$f" | tr '[:upper:]' '[:lower:]')"
+  # Bytes, not characters (LC_ALL=C): a path that is not UTF-8 is lowercased
+  # whole, so the checks below see all of it.
+  lc="$(printf '%s' "$f" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
   base="${lc##*/}"
   case "$mode" in 100644|100755) ;; *) bad="$bad$f: not a regular file (symlink or submodule)"$'\n'; continue ;; esac
   case "/$lc/" in */.claude/*|*/.codex/*|*/docs/*) bad="$bad$f: inside a .claude, .codex or docs folder"$'\n' ;; esac
@@ -278,8 +366,18 @@ while IFS= read -r -d '' entry; do
       bad="$bad$f: a private kind of file"$'\n' ;;
   esac
   kind_ok "$f" || bad="$bad$f: not a kind of file this folder exports (KINDS in scripts/publish.sh)"$'\n'
+  # A picture in .github is shown on the repository page: plain drawing only.
+  case "$lc" in
+    .github/*.svg)
+      pgit cat-file blob "$blob" > "$WORK/svg" || fail "could not read $f"
+      svg_plain "$WORK/svg" \
+        || bad="$bad$f: an SVG that is not plain drawing (SVG_TAGS, SVG_ATTRS and SVG_REFUSED in scripts/publish.sh)"$'\n' ;;
+  esac
+  # git's binary test: a NUL byte in the first 8000 bytes. Counted in bytes
+  # (LC_ALL=C): under a UTF-8 locale macOS tr stops at the first byte that is
+  # not UTF-8, which would call such text binary.
   all="$(pgit cat-file blob "$blob" | head -c 8000 | wc -c || true)"
-  nonul="$(pgit cat-file blob "$blob" | head -c 8000 | tr -d '\000' | wc -c || true)"
+  nonul="$(pgit cat-file blob "$blob" | head -c 8000 | LC_ALL=C tr -d '\000' | wc -c || true)"
   if [ "$all" != "$nonul" ] && [[ " ${BINARY_ALLOWED[*]} " != *" $f "* ]]; then
     bad="$bad$f: binary content (BINARY_ALLOWED in scripts/publish.sh)"$'\n'
   fi
@@ -426,7 +524,7 @@ if [ "$MODE" = --update ]; then
     grep -qF $'\t'"refs/tags/$name" "$rrefs" && continue   # already public
     case "$name" in *-*|*/*) ;; *) [ ${#name} -gt 8 ] || continue ;; esac
     if grep -qiwF -- "$name" <<<"$ARG"; then fail "the subject names '$name', a private branch or tag"; fi
-  done < <(ref_names | sort -u)
+  done < <(ref_names | LC_ALL=C sort -u)
 fi
 
 tag="v$version"
@@ -479,7 +577,7 @@ write_tree() {
   "$g" read-tree --empty || fail "could not reset the index"
   "$g" update-index -z --index-info < "$WORK/index-info" || fail "could not build the index"
   LC_ALL=C sort "$WORK/exported" > "$WORK/exported.sorted"
-  "$g" ls-files -z | tr '\0' '\n' | LC_ALL=C sort > "$WORK/staged.sorted"
+  "$g" ls-files -z | LC_ALL=C tr '\0' '\n' | LC_ALL=C sort > "$WORK/staged.sorted"
   cmp -s "$WORK/exported.sorted" "$WORK/staged.sorted" \
     || { diff "$WORK/exported.sorted" "$WORK/staged.sorted" >&2 || true; fail "the staged files are not exactly the exported files"; }
 }
@@ -513,7 +611,11 @@ git -C "$build" init -q -b main
 git -C "$build" add -A
 git -C "$build" -c core.hooksPath=/dev/null -c user.name=publish-gate -c user.email=gate@example.com \
   -c commit.gpgsign=false commit -q -m "snapshot" || fail "could not commit the clean copy"
-if ! (cd "$build" && env -u CI make check PRIVATE_FLAGS=--no-denylist && make build) > "$WORK/build.log" 2>&1; then
+# A make that started this script must not steer the clean copy's: its flags
+# and its level would come along (GNU make then also prints "Entering
+# directory" lines, which would push the result out of the summary below).
+if ! (cd "$build" && unset MAKEFLAGS MFLAGS GNUMAKEFLAGS MAKEFILES MAKELEVEL \
+  && env -u CI make check PRIVATE_FLAGS=--no-denylist && make build) > "$WORK/build.log" 2>&1; then
   tail -40 "$WORK/build.log" >&2
   fail "the exported tree does not pass make check / make build (log above): something it needs is not exported"
 fi

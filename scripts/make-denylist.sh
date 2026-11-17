@@ -20,6 +20,10 @@
 # ordinary words, add short real names.
 # It prints only a count, never the words. It reads and writes no git setting.
 set -euo pipefail
+# Every source is read as bytes, as check-private.sh reads files: under a UTF-8
+# locale a byte that is not UTF-8 would make grep skip the line and tr stop,
+# and the words around it would be lost without a word.
+export LC_ALL=C
 
 rebuild=0
 case "${1:-}" in
@@ -234,7 +238,7 @@ filter() {
 short="$(grep -cvE '^.{6,}$' "$tmp/existing" || true)"
 {
   if ((rebuild)); then filter < "$tmp/existing"; else cat "$tmp/existing"; fi
-  # ASCII on purpose (LC_ALL=C in check-private.sh): only ASCII letters are folded.
+  # ASCII on purpose (LC_ALL=C above, as in check-private.sh): only ASCII letters are folded.
   # shellcheck disable=SC2018,SC2019
   sed -E 's/"[a-z]+" *: *"//; s/"$//' "$raw" \
     | tr -cs 'A-Za-z0-9' '\n' \
