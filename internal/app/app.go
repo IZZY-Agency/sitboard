@@ -1,0 +1,42 @@
+// Package app is the seam between the core and the server.
+//
+// Frozen seam: internal/core implements Board; internal/server consumes it.
+// Changes go through the coordinator.
+package app
+
+import (
+	"context"
+
+	"github.com/IZZY-Agency/sitboard/internal/contract"
+)
+
+// Board is the derived, read-mostly view the server serves. All methods are
+// safe for concurrent use.
+type Board interface {
+	// Snapshot returns the current board. Slices in it are never nil.
+	Snapshot() contract.Snapshot
+
+	// Subscribe delivers the latest snapshot after each change, until ctx
+	// ends; then the channel is closed. Bursts are coalesced: a slow reader
+	// gets the newest snapshot, never a backlog. It does not send the current
+	// snapshot on subscribe.
+	//
+	// Order for callers: Subscribe first, then read Snapshot(). The other
+	// order loses a change made between the two calls. Because of this order
+	// the channel may then deliver a snapshot whose Seq the caller already
+	// has (or an older one); callers drop any snapshot whose Seq is not
+	// higher than the last one they sent.
+	Subscribe(ctx context.Context) <-chan contract.Snapshot
+
+	Catchup(ctx context.Context) (contract.Catchup, error)
+	Leftovers(ctx context.Context) (contract.Leftovers, error)
+
+	// MarkSeen marks a card seen. Unknown card ids are an error.
+	MarkSeen(cardID string) error
+	// MarkCatchupRead moves the catch-up marker to now.
+	MarkCatchupRead() error
+
+	// TerminalFor resolves a card to its agterm session id. ok is false when
+	// the card is unknown or has no terminal in the current tree.
+	TerminalFor(cardID string) (terminalID string, ok bool)
+}

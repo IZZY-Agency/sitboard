@@ -1,0 +1,334 @@
+// Command sitboard starts a local board of the AI coding agents on this machine.
+//
+// It wires the adapters, the core and the server, listens on 127.0.0.1 only,
+// prints the opening link (with the per-run token) once, and opens the browser
+// unless --no-open is given.
+package main
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"log"
+	"net"
+	"net/http"
+	"os"
+	"os/exec"
+	"os/signal"
+	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/IZZY-Agency/sitboard"
+	"github.com/IZZY-Agency/sitboard/internal/adapters/agterm"
+	"github.com/IZZY-Agency/sitboard/internal/adapters/claude"
+	"github.com/IZZY-Agency/sitboard/internal/adapters/codex"
+	"github.com/IZZY-Agency/sitboard/internal/adapters/github"
+	"github.com/IZZY-Agency/sitboard/internal/adapters/gitsrc"
+	"github.com/IZZY-Agency/sitboard/internal/buildinfo"
+	"github.com/IZZY-Agency/sitboard/internal/core"
+	"github.com/IZZY-Agency/sitboard/internal/server"
+	"github.com/IZZY-Agency/sitboard/internal/source"
+	"github.com/IZZY-Agency/sitboard/internal/state"
+)
+
+const defaultPort = 4317
+
+// shutdownGrace bounds how long requests in flight may hold up exit. Event
+// streams end at once (their context is cancelled first). After the grace the
+// rest is closed: Shutdown alone waits up to 5 s for connections a browser
+// opened ahead of time without sending a request.
+const shutdownGrace = time.Second
+
+func main() { os.Exit(mainCode()) }
+
+// printLicenses writes sitboard's licence and the third-party notices.
+func printLicenses(w io.Writer) {
+	_, _ = io.WriteString(w, sitboard.Text())
+}
+
+func mainCode() int {
+	cfg, err := parseArgs(os.Args[1:], os.Stderr)
+	if errors.Is(err, flag.ErrHelp) {
+		return 0
+	}
+	if err != nil {
+		return 2
+	}
+	if cfg.version {
+		fmt.Printf("sitboard %s (%s)\n", buildinfo.Version, buildinfo.Commit)
+		return 0
+	}
+	if cfg.licenses {
+		printLicenses(os.Stdout)
+		return 0
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, "sitboard: no home folder:", err)
+		return 1
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	env := runEnv{
+		home:    home,
+		out:     os.Stdout,
+		sources: realSources,
+		open:    openBrowser,
+		goos:    runtime.GOOS,
+		getenv:  os.Getenv,
+	}
+	if err := run(ctx, cfg, env); err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, "sitboard:", err)
+		return 1
+	}
+	return 0
+}
+
+type config struct {
+	port       int
+	portSet    bool // --port was given: never fall back to another port
+	noOpen     bool
+	noGitHub   bool
+	roots      []string
+	staleAfter time.Duration
+	version    bool
+	licenses   bool
+}
+
+func parseArgs(args []string, stderr io.Writer) (config, error) {
+	var cfg config
+	var roots string
+	fs := flag.NewFlagSet("sitboard", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	fs.IntVar(&cfg.port, "port", defaultPort, "port on 127.0.0.1; 0 picks a free one")
+	fs.BoolVar(&cfg.noOpen, "no-open", false, "do not open the browser")
+	fs.BoolVar(&cfg.noGitHub, "no-github", false, "never call gh: no pull request lookups, no network traffic")
+	fs.StringVar(&roots, "roots", "", "comma-separated folders; only agents working under them are shown")
+	fs.DurationVar(&cfg.staleAfter, "stale-after", 20*time.Minute, "a busy agent with no activity for this long is flagged stale")
+	fs.BoolVar(&cfg.version, "version", false, "print the version and exit")
+	fs.BoolVar(&cfg.licenses, "licenses", false, "print sitboard's licence and the third-party notices and exit")
+	if err := fs.Parse(args); err != nil {
+		return cfg, err
+	}
+	if fs.NArg() > 0 {
+		_, _ = fmt.Fprintf(stderr, "sitboard: unexpected argument %q\n", fs.Arg(0))
+		return cfg, errors.New("unexpected argument")
+	}
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "port" {
+			cfg.portSet = true
+		}
+	})
+	if cfg.port < 0 || cfg.port > 65535 {
+		_, _ = fmt.Fprintln(stderr, "sitboard: --port must be between 0 and 65535")
+		return cfg, errors.New("bad port")
+	}
+	if cfg.staleAfter <= 0 {
+		_, _ = fmt.Fprintln(stderr, "sitboard: --stale-after must be positive")
+		return cfg, errors.New("bad stale-after")
+	}
+	cfg.roots = splitRoots(roots)
+	return cfg, nil
+}
+
+// sources are the adapters, built per run.
+type sources struct {
+	watchers []source.Watcher
+	repos    source.RepoResolver
+	prs      source.PRProvider
+	jumper   source.Jumper
+}
+
+func realSources(cfg config, home string) sources {
+	term := agterm.New(agterm.Options{})
+	return sources{
+		watchers: []source.Watcher{
+			claude.New(claude.Options{Home: home}),
+			codex.New(codex.Options{Home: home}),
+			term,
+		},
+		repos:  gitsrc.New(gitsrc.Options{}),
+		prs:    github.New(github.Options{Off: cfg.noGitHub}),
+		jumper: term,
+	}
+}
+
+// runEnv is what run takes from the outside world, so tests can replace it.
+type runEnv struct {
+	home    string
+	out     io.Writer
+	sources func(config, string) sources
+	open    func(link string) error
+	goos    string
+	getenv  func(string) string
+}
+
+// run serves the board until ctx ends.
+func run(ctx context.Context, cfg config, env runEnv) error {
+	st, err := state.Open(stateFile(env.home, env.goos, env.getenv))
+	if err != nil {
+		return err
+	}
+	src := env.sources(cfg, env.home)
+
+	board := core.New(core.Options{
+		Repos:      src.repos,
+		PRs:        src.prs,
+		State:      st,
+		StaleAfter: cfg.staleAfter,
+		Roots:      cfg.roots,
+	})
+	statuses := make([]source.Status, 0, len(src.watchers)+2)
+	for _, w := range src.watchers {
+		statuses = append(statuses, w.Probe(ctx))
+	}
+	statuses = append(statuses, src.repos.Probe(ctx), src.prs.Probe(ctx))
+	board.SetSources(statuses)
+
+	ln, note, err := listen(cfg.port, cfg.portSet)
+	if err != nil {
+		return err
+	}
+	addr := ln.Addr().String()
+	token := newToken()
+
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	// A watcher that stops with an error takes its facts with it and shows
+	// as failing. Sources are probed once: one missing at startup is not
+	// picked up until sitboard restarts (accepted for the proof of concept).
+	for _, w := range src.watchers {
+		go func() {
+			if err := w.Run(runCtx, board.Apply); err != nil && runCtx.Err() == nil {
+				log.Printf("%s: %v", w.Kind(), err)
+				board.DropSource(w.Kind(), "stopped with an error; restart sitboard")
+			}
+		}()
+	}
+	go func() {
+		if err := board.Run(runCtx); err != nil {
+			log.Printf("core: %v", err)
+		}
+	}()
+
+	srv := newHTTPServer(runCtx, server.New(server.Options{
+		Board:    board,
+		Jumper:   src.jumper,
+		Token:    token,
+		Addr:     addr,
+		Assets:   server.Dist(),
+		Licenses: sitboard.Text(),
+	}))
+
+	// The token is per run and dies with the process; this is the only place it is printed.
+	link := "http://" + addr + "/?" + server.TokenParam + "=" + token
+	if note != "" {
+		_, _ = fmt.Fprintln(env.out, "sitboard:", note)
+	}
+	_, _ = fmt.Fprintln(env.out, "sitboard:", link)
+	_, _ = fmt.Fprintln(env.out, "sitboard: press Ctrl-C to stop")
+	if !cfg.noOpen && env.open != nil {
+		if err := env.open(link); err != nil {
+			_, _ = fmt.Fprintln(env.out, "sitboard: could not open the browser; open the link above")
+		}
+	}
+
+	errc := make(chan error, 1)
+	go func() { errc <- srv.Serve(ln) }()
+	select {
+	case err := <-errc:
+		return err
+	case <-ctx.Done():
+	}
+	cancel() // ends event streams, watchers and the clock
+	shutdown, done := context.WithTimeout(context.Background(), shutdownGrace)
+	defer done()
+	if err := srv.Shutdown(shutdown); err != nil {
+		if !errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
+		_ = srv.Close()
+	}
+	return nil
+}
+
+// newHTTPServer sets the timeouts. There is no ReadTimeout or WriteTimeout:
+// the event stream stays open; the POST handlers bound their own body reads.
+func newHTTPServer(ctx context.Context, h http.Handler) *http.Server {
+	return &http.Server{
+		Handler:           h,
+		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		BaseContext:       func(net.Listener) context.Context { return ctx },
+	}
+}
+
+// listen binds 127.0.0.1 only. When the default port is taken (most often by
+// another sitboard) it falls back to a free port and says so; a port given
+// with --port is never replaced.
+func listen(port int, explicit bool) (net.Listener, string, error) {
+	ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if err == nil {
+		return ln, "", nil
+	}
+	if explicit {
+		return nil, "", fmt.Errorf("cannot listen on 127.0.0.1:%d (is another sitboard running? try --port 0): %w", port, err)
+	}
+	ln, err2 := net.Listen("tcp", "127.0.0.1:0")
+	if err2 != nil {
+		return nil, "", fmt.Errorf("cannot listen on 127.0.0.1: %w", err2)
+	}
+	_, got, _ := net.SplitHostPort(ln.Addr().String())
+	return ln, fmt.Sprintf("port %d is taken (another sitboard?), using %s", port, got), nil
+}
+
+// stateFile follows each platform's convention: macOS Application Support,
+// elsewhere $XDG_STATE_HOME (default ~/.local/state).
+func stateFile(home, goos string, getenv func(string) string) string {
+	if goos == "darwin" {
+		return filepath.Join(home, "Library", "Application Support", "sitboard", "state.json")
+	}
+	base := getenv("XDG_STATE_HOME")
+	if base == "" || !filepath.IsAbs(base) {
+		base = filepath.Join(home, ".local", "state")
+	}
+	return filepath.Join(base, "sitboard", "state.json")
+}
+
+func splitRoots(s string) []string {
+	var out []string
+	for r := range strings.SplitSeq(s, ",") {
+		if r = strings.TrimSpace(r); r != "" {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func newToken() string {
+	b := make([]byte, 32)
+	_, _ = rand.Read(b) // crypto/rand.Read never fails on supported platforms
+	return hex.EncodeToString(b)
+}
+
+// openBrowser hands the link to the platform's opener. It never prints anything.
+func openBrowser(link string) error {
+	name := "xdg-open"
+	if runtime.GOOS == "darwin" {
+		name = "open"
+	}
+	cmd := exec.Command(name, link)
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	go func() { _ = cmd.Wait() }()
+	return nil
+}

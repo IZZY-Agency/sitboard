@@ -1,0 +1,1 @@
+{"ok":true,"result":{"windows":[{"id":"AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA","zoomed":false,"geometry":{"y":30,"x":0,"width":1400,"height":1200,"display":0},"fullscreen":false,"active":true,"minimized":false,"sidebarVisible":true,"open":true,"autoFollowMs":30000,"name":"window 1"},{"id":"BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB","active":false,"open":false,"name":"window 2"}]}}

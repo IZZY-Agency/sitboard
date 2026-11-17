@@ -1,0 +1,49 @@
+{
+  "marker": "2026-11-17T08:00:00Z",
+  "items": [
+    {
+      "at": "2026-11-17T09:55:00Z",
+      "kind": "turn_finished",
+      "cardId": "claude:11111111-1111-4111-8111-111111111111",
+      "projectId": "p_5b0ca1eb8975",
+      "agentName": "coordinator-a",
+      "title": "coordinator-a"
+    },
+    {
+      "at": "2026-11-17T09:20:00Z",
+      "kind": "pr_opened",
+      "cardId": "claude:44444444-4444-4444-8444-444444444444",
+      "projectId": "p_5b0ca1eb8975",
+      "agentName": "worker-c",
+      "title": "Placeholder pull request title",
+      "pullRequest": {
+        "repo": "example-org/example-repo",
+        "number": 101,
+        "title": "Placeholder pull request title",
+        "url": "https://github.com/example-org/example-repo/pull/101",
+        "state": "open",
+        "checks": "failing",
+        "review": "review_required",
+        "draft": false
+      }
+    },
+    {
+      "at": "2026-11-17T08:25:00Z",
+      "kind": "pr_merged",
+      "cardId": "",
+      "projectId": "p_5b0ca1eb8975",
+      "agentName": "worker-f",
+      "title": "Another placeholder title",
+      "pullRequest": {
+        "repo": "example-org/example-repo",
+        "number": 102,
+        "title": "Another placeholder title",
+        "url": "https://github.com/example-org/example-repo/pull/102",
+        "state": "merged",
+        "checks": "passing",
+        "review": "approved",
+        "draft": false
+      }
+    }
+  ]
+}

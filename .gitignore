@@ -1,0 +1,13 @@
+# agent worktrees and local agent state
+.claude/
+
+# build output and dependencies
+/bin/
+node_modules/
+
+# the web build lands here and is embedded; only the placeholder is tracked
+/internal/server/dist/*
+!/internal/server/dist/.keep
+
+# Finder metadata
+.DS_Store

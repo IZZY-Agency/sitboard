@@ -1,0 +1,50 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { flushSync } from 'svelte';
+import { BoardState, dedupe, FLASH_TTL } from './store.svelte';
+import { card, project, snapshot } from '../test/fixtures';
+import { feedOf, recordActions } from '../test/render';
+
+afterEach(() => vi.useRealTimers());
+
+describe('store', () => {
+  it('an arrival in Needs you can flash only for a short while, so a remount does not replay it', () => {
+    vi.useFakeTimers();
+    const c = card({ column: 'working' });
+    const f = feedOf({ conn: 'live', snapshot: snapshot([c], [project(c.projectId, 'one')]) });
+    const b = new BoardState(() => recordActions().actions);
+    const stop = b.start(f.feed);
+    f.push({ conn: 'live', snapshot: snapshot([{ ...c, column: 'needs_you' }], [project(c.projectId, 'one')]) });
+    expect(b.arrivals.get(c.id)).toBeGreaterThan(0);
+    vi.advanceTimersByTime(FLASH_TTL);
+    flushSync();
+    expect(b.arrivals.has(c.id)).toBe(false);
+    stop();
+  });
+
+  it('records when the connection was lost, and clears it once live again', () => {
+    let t = 1000;
+    const s = snapshot([card()], []);
+    const f = feedOf({ conn: 'live', snapshot: s });
+    const b = new BoardState(() => recordActions().actions, () => t);
+    b.start(f.feed);
+    expect(b.lostAt).toBeNull();
+    t = 5000;
+    f.push({ conn: 'reconnecting', snapshot: s });
+    t = 9000;
+    f.push({ conn: 'reconnecting', snapshot: s });
+    expect(b.lostAt).toBe(5000);
+    f.push({ conn: 'live', snapshot: s });
+    expect(b.lostAt).toBeNull();
+  });
+
+  it('drops duplicate ids so a keyed list never throws', () => {
+    const c = card();
+    const s = snapshot([c, { ...c, title: 'duplicate' }], [project('p_a', 'a'), project('p_a', 'a')]);
+    const d = dedupe(s);
+    expect(d.cards).toHaveLength(1);
+    expect(d.cards[0].title).toBe(c.title);
+    expect(d.projects).toHaveLength(1);
+    const clean = snapshot([card()], []);
+    expect(dedupe(clean)).toBe(clean);
+  });
+});

@@ -1,0 +1,316 @@
+{
+  "version": 3,
+  "seq": 42,
+  "generatedAt": "2026-11-17T10:00:00Z",
+  "sources": [
+    {
+      "kind": "claude",
+      "state": "ok",
+      "version": "2.1.326",
+      "detail": "",
+      "tested": true,
+      "ready": true
+    },
+    {
+      "kind": "codex",
+      "state": "ok",
+      "version": "0.167.2",
+      "detail": "status unknown for Codex sessions",
+      "tested": true,
+      "ready": false
+    },
+    {
+      "kind": "agterm",
+      "state": "ok",
+      "version": "1.0.0",
+      "detail": "",
+      "tested": false,
+      "ready": true
+    },
+    {
+      "kind": "git",
+      "state": "ok",
+      "version": "2.50.0",
+      "detail": "",
+      "tested": true,
+      "ready": true
+    },
+    {
+      "kind": "github",
+      "state": "failing",
+      "version": "2.80.0",
+      "detail": "not logged in",
+      "tested": true,
+      "ready": true
+    }
+  ],
+  "projects": [
+    {
+      "id": "p_5b0ca1eb8975",
+      "name": "alpha",
+      "path": "~/projects/alpha",
+      "repo": "example-org/example-repo",
+      "parentId": "",
+      "area": "projects",
+      "counts": {
+        "working": 1,
+        "needsYou": 1,
+        "inReview": 1,
+        "stale": 1
+      }
+    },
+    {
+      "id": "p_563eb325a545",
+      "name": "beta",
+      "path": "~/projects/beta",
+      "repo": "",
+      "parentId": "",
+      "area": "projects",
+      "counts": {
+        "working": 0,
+        "needsYou": 1,
+        "inReview": 0,
+        "stale": 0
+      }
+    }
+  ],
+  "cards": [
+    {
+      "id": "claude:11111111-1111-4111-8111-111111111111",
+      "projectId": "p_5b0ca1eb8975",
+      "title": "coordinator-a",
+      "titleSource": "session",
+      "column": "needs_you",
+      "attention": [
+        "unseen"
+      ],
+      "seen": false,
+      "agent": {
+        "tool": "claude",
+        "name": "coordinator-a",
+        "model": "claude-opus-4-7",
+        "status": "finished",
+        "statusSince": "2026-11-17T09:55:00Z",
+        "startedAt": "2026-11-17T08:00:00Z",
+        "lastActivity": "2026-11-17T09:55:00Z",
+        "live": "yes",
+        "folder": "~/projects/alpha",
+        "parent": "none",
+        "parentCardId": "",
+        "terminalId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "workspace": "alpha"
+      },
+      "pullRequests": [],
+      "issues": [],
+      "subagents": 2
+    },
+    {
+      "id": "claude:22222222-2222-4222-8222-222222222222",
+      "projectId": "p_5b0ca1eb8975",
+      "title": "worker-a",
+      "titleSource": "session",
+      "column": "working",
+      "attention": [
+        "stale"
+      ],
+      "seen": true,
+      "agent": {
+        "tool": "claude",
+        "name": "worker-a",
+        "model": "claude-opus-4-7",
+        "status": "busy",
+        "statusSince": "2026-11-17T09:10:00Z",
+        "startedAt": "2026-11-17T09:00:00Z",
+        "lastActivity": "2026-11-17T09:35:00Z",
+        "live": "yes",
+        "folder": "~/projects/alpha/.worktrees/worker-a",
+        "parent": "known",
+        "parentCardId": "claude:11111111-1111-4111-8111-111111111111",
+        "terminalId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "workspace": "alpha"
+      },
+      "pullRequests": [],
+      "issues": [],
+      "subagents": 0
+    },
+    {
+      "id": "claude:33333333-3333-4333-8333-333333333333",
+      "projectId": "p_5b0ca1eb8975",
+      "title": "worker-b",
+      "titleSource": "session",
+      "column": "with_coordinator",
+      "attention": [],
+      "seen": false,
+      "agent": {
+        "tool": "claude",
+        "name": "worker-b",
+        "model": "claude-opus-4-7",
+        "status": "finished",
+        "statusSince": "2026-11-17T09:50:00Z",
+        "startedAt": "2026-11-17T09:00:00Z",
+        "lastActivity": "2026-11-17T09:50:00Z",
+        "live": "yes",
+        "folder": "~/projects/alpha/.worktrees/worker-b",
+        "parent": "known",
+        "parentCardId": "claude:11111111-1111-4111-8111-111111111111",
+        "terminalId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "workspace": "alpha"
+      },
+      "pullRequests": [],
+      "issues": [],
+      "subagents": 0
+    },
+    {
+      "id": "claude:44444444-4444-4444-8444-444444444444",
+      "projectId": "p_5b0ca1eb8975",
+      "title": "Placeholder pull request title",
+      "titleSource": "pr",
+      "column": "in_review",
+      "attention": [
+        "failing_checks"
+      ],
+      "seen": true,
+      "agent": {
+        "tool": "claude",
+        "name": "worker-c",
+        "model": "claude-opus-4-7",
+        "status": "finished",
+        "statusSince": "2026-11-17T09:40:00Z",
+        "startedAt": "2026-11-17T09:00:00Z",
+        "lastActivity": "2026-11-17T09:40:00Z",
+        "live": "yes",
+        "folder": "~/projects/alpha/.worktrees/worker-c",
+        "parent": "known",
+        "parentCardId": "claude:11111111-1111-4111-8111-111111111111",
+        "terminalId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        "workspace": "alpha"
+      },
+      "pullRequests": [
+        {
+          "repo": "example-org/example-repo",
+          "number": 101,
+          "title": "Placeholder pull request title",
+          "url": "https://github.com/example-org/example-repo/pull/101",
+          "state": "open",
+          "checks": "failing",
+          "review": "review_required",
+          "draft": false
+        }
+      ],
+      "issues": [
+        {
+          "repo": "example-org/example-repo",
+          "number": 7,
+          "url": "https://github.com/example-org/example-repo/issues/7"
+        }
+      ],
+      "subagents": 0
+    },
+    {
+      "id": "claude:55555555-5555-4555-8555-555555555555",
+      "projectId": "p_5b0ca1eb8975",
+      "title": "Another placeholder title",
+      "titleSource": "pr",
+      "column": "done",
+      "attention": [],
+      "seen": true,
+      "agent": {
+        "tool": "claude",
+        "name": "worker-d",
+        "model": "claude-opus-4-7",
+        "status": "ended",
+        "statusSince": "2026-11-17T08:30:00Z",
+        "startedAt": "2026-11-17T07:00:00Z",
+        "lastActivity": "2026-11-17T08:30:00Z",
+        "live": "no",
+        "folder": "~/projects/alpha/.worktrees/worker-d",
+        "parent": "known",
+        "parentCardId": "claude:11111111-1111-4111-8111-111111111111",
+        "terminalId": "",
+        "workspace": ""
+      },
+      "pullRequests": [
+        {
+          "repo": "example-org/example-repo",
+          "number": 102,
+          "title": "Another placeholder title",
+          "url": "https://github.com/example-org/example-repo/pull/102",
+          "state": "merged",
+          "checks": "passing",
+          "review": "approved",
+          "draft": false
+        }
+      ],
+      "issues": [],
+      "subagents": 0
+    },
+    {
+      "id": "claude:66666666-6666-4666-8666-666666666666",
+      "projectId": "p_563eb325a545",
+      "title": "solo-a",
+      "titleSource": "session",
+      "column": "needs_you",
+      "attention": [
+        "blocked"
+      ],
+      "seen": false,
+      "agent": {
+        "tool": "claude",
+        "name": "solo-a",
+        "model": "claude-opus-4-7",
+        "status": "blocked",
+        "statusSince": "2026-11-17T09:58:00Z",
+        "startedAt": "2026-11-17T09:30:00Z",
+        "lastActivity": "2026-11-17T09:58:00Z",
+        "live": "yes",
+        "folder": "~/projects/beta",
+        "parent": "none",
+        "parentCardId": "",
+        "terminalId": "",
+        "workspace": ""
+      },
+      "pullRequests": [],
+      "issues": [],
+      "subagents": 0
+    },
+    {
+      "id": "codex:77777777-7777-4777-8777-777777777777",
+      "projectId": "p_563eb325a545",
+      "title": "beta",
+      "titleSource": "folder",
+      "column": "idle",
+      "attention": [],
+      "seen": true,
+      "agent": {
+        "tool": "codex",
+        "name": "worker-e",
+        "model": "",
+        "status": "unknown",
+        "lastActivity": "2026-11-17T07:45:00Z",
+        "live": "unknown",
+        "folder": "~/projects/beta",
+        "parent": "unknown",
+        "parentCardId": "",
+        "terminalId": "",
+        "workspace": ""
+      },
+      "pullRequests": [],
+      "issues": [],
+      "subagents": 0
+    }
+  ],
+  "plainShells": 3,
+  "counts": {
+    "working": 1,
+    "needsYou": 2,
+    "inReview": 1,
+    "stale": 1
+  },
+  "agtermPresent": true,
+  "build": {
+    "version": "dev",
+    "commit": "unknown",
+    "os": "darwin",
+    "arch": "arm64"
+  }
+}

@@ -1,0 +1,53 @@
+/* Design tokens, from the design doc section 8. Dark only. */
+:root {
+  color-scheme: dark;
+
+  /* Grounds */
+  --bg: #0a0b10;
+  --surface: #101219;
+  --border: #2e3148;
+  --border-hover: #4a4f6e;
+  --rule: rgb(221 218 207 / 10%);
+  --rule-strong: rgb(221 218 207 / 16%);
+
+  /* Text */
+  --fg: #dddacf;
+  --fg-body: #bcc1cb;
+  --muted: #8b92a5;
+
+  /* Accent */
+  --amber: #f5c542;
+  --amber-hover: #ffd35c;
+  --amber-line: rgb(245 197 66 / 55%);
+  --amber-soft: rgb(245 197 66 / 8%);
+  --amber-edge: rgb(245 197 66 / 40%);
+
+  /* States: a word always goes with the colour */
+  --state-needs: #f5c542;
+  --state-working: #8fc79a;
+  --state-coordinator: #98aabe;
+  --state-review: #8fb8f2;
+  --state-done: #b0a6ee;
+  --state-idle: #8b92a5;
+  --state-failing: #ec7c7c;
+  --failing-line: rgb(236 124 124 / 55%);
+
+  /* Type */
+  --font-ui: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+  --font-title: 'Space Grotesk', system-ui, sans-serif;
+  --text-xs: 11px;
+  --text-s: 11.5px;
+  --text-m: 12px;
+  --text-base: 13px;
+  --text-title: 14px;
+  --text-lead: 15px;
+  --label-tracking: 0.12em;
+
+  /* Motion */
+  --move: 220ms;
+  --press: 120ms;
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+
+  /* Space */
+  --gutter: 24px;
+}

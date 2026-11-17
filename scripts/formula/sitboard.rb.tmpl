@@ -1,0 +1,40 @@
+class Sitboard < Formula
+  desc "Live local board of your AI coding agents, their pull requests and checks"
+  homepage "https://sitboard.com"
+  license "MIT"
+
+  livecheck do
+    url :stable
+    strategy :github_latest
+  end
+
+  on_macos do
+    on_arm do
+      url "https://github.com/IZZY-Agency/sitboard/releases/download/v{{VERSION}}/sitboard-{{VERSION}}-macos-arm64.tar.gz"
+      sha256 "{{SHA_MACOS_ARM64}}"
+    end
+    on_intel do
+      url "https://github.com/IZZY-Agency/sitboard/releases/download/v{{VERSION}}/sitboard-{{VERSION}}-macos-x86_64.tar.gz"
+      sha256 "{{SHA_MACOS_X86_64}}"
+    end
+  end
+
+  on_linux do
+    on_arm do
+      url "https://github.com/IZZY-Agency/sitboard/releases/download/v{{VERSION}}/sitboard-{{VERSION}}-linux-arm64.tar.gz"
+      sha256 "{{SHA_LINUX_ARM64}}"
+    end
+    on_intel do
+      url "https://github.com/IZZY-Agency/sitboard/releases/download/v{{VERSION}}/sitboard-{{VERSION}}-linux-x86_64.tar.gz"
+      sha256 "{{SHA_LINUX_X86_64}}"
+    end
+  end
+
+  def install
+    bin.install "sitboard"
+  end
+
+  test do
+    assert_match version.to_s, shell_output("#{bin}/sitboard --version")
+  end
+end

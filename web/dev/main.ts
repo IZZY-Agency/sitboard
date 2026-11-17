@@ -1,0 +1,61 @@
+// Dev harness: the real App, fed with placeholder data. Served by `npm run dev`
+// at /dev/; never part of the build.
+import { mount } from 'svelte';
+import App from '../src/App.svelte';
+import Harness from './Harness.svelte';
+import { initial, SCENARIOS, step, type Scenario } from './scenarios';
+import type { Feed, FeedState } from '../src/data/client';
+import type { Actions } from '../src/data/actions';
+import type { Snapshot } from '../src/contract.gen';
+import '../src/styles/fonts.css';
+import '../src/styles/tokens.css';
+import '../src/styles/base.css';
+
+const params = new URLSearchParams(location.search);
+const sc = (SCENARIOS as readonly string[]).includes(params.get('s') ?? '') ? (params.get('s') as Scenario) : 'golden';
+const liveMode = params.get('live') === '1';
+
+let current = initial(sc);
+let push: ((s: FeedState) => void) | null = null;
+
+const feed: Feed = {
+  start(on) {
+    push = on;
+    const conn: FeedState['conn'] =
+      sc === 'loading' ? 'connecting' : sc === 'unreachable' ? 'unreachable' : sc === 'unauthorized' ? 'unauthorized' : sc === 'outdated' ? 'outdated' : sc === 'reconnecting' ? 'reconnecting' : 'live';
+    on({ conn, snapshot: current, retryAt: sc === 'unreachable' ? Date.now() + 8000 : undefined });
+    let n = 0;
+    const t = liveMode && current ? setInterval(() => publish(step(current as Snapshot, n++)), 2500) : undefined;
+    return () => clearInterval(t);
+  },
+};
+
+function publish(s: Snapshot) {
+  current = s;
+  push?.({ conn: 'live', snapshot: s });
+}
+
+const actions: Actions = {
+  async jump(id) {
+    const c = current?.cards.find((x) => x.id === id);
+    if (!c?.agent.terminalId) return { ok: false, kind: 'no_terminal' };
+    if (params.get('fail') === '1') return { ok: false, kind: 'failed', message: 'sitboard answered 500' };
+    return { ok: true };
+  },
+  async seen(id) {
+    if (!current) return { ok: true };
+    const next = JSON.parse(JSON.stringify(current)) as Snapshot;
+    const c = next.cards.find((x) => x.id === id);
+    if (c) {
+      c.attention = c.attention.filter((a) => a !== 'unseen');
+      c.seen = true;
+      if (c.column === 'needs_you' && c.agent.status === 'finished') c.column = 'idle';
+      next.seq++;
+      setTimeout(() => publish(next), 300);
+    }
+    return { ok: true };
+  },
+};
+
+mount(Harness, { target: document.getElementById('harness')!, props: { scenario: sc, scenarios: SCENARIOS, live: liveMode } });
+mount(App, { target: document.getElementById('app')!, props: { feed, actions } });

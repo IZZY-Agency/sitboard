@@ -1,0 +1,56 @@
+{
+  "items": [
+    {
+      "kind": "worktree",
+      "projectId": "p_5b0ca1eb8975",
+      "path": "~/projects/alpha/.worktrees/worker-d",
+      "branch": "worker-d/feature",
+      "cardId": "",
+      "pullRequest": {
+        "repo": "example-org/example-repo",
+        "number": 102,
+        "title": "Another placeholder title",
+        "url": "https://github.com/example-org/example-repo/pull/102",
+        "state": "merged",
+        "checks": "passing",
+        "review": "approved",
+        "draft": false
+      }
+    },
+    {
+      "kind": "branch",
+      "projectId": "p_5b0ca1eb8975",
+      "path": "",
+      "branch": "worker-f/feature",
+      "cardId": "",
+      "pullRequest": {
+        "repo": "example-org/example-repo",
+        "number": 103,
+        "title": "Third placeholder title",
+        "url": "https://github.com/example-org/example-repo/pull/103",
+        "state": "merged",
+        "checks": "passing",
+        "review": "approved",
+        "draft": false
+      }
+    },
+    {
+      "kind": "session",
+      "projectId": "p_5b0ca1eb8975",
+      "path": "",
+      "branch": "",
+      "cardId": "claude:33333333-3333-4333-8333-333333333333",
+      "pullRequest": {
+        "repo": "example-org/example-repo",
+        "number": 104,
+        "title": "Fourth placeholder title",
+        "url": "https://github.com/example-org/example-repo/pull/104",
+        "state": "merged",
+        "checks": "passing",
+        "review": "approved",
+        "draft": false
+      },
+      "idleSince": "2026-11-17T06:00:00Z"
+    }
+  ]
+}
