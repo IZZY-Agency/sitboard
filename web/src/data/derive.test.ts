@@ -10,13 +10,18 @@ import {
   laneColumns,
   laneNote,
   lanes,
+  modelFamily,
   modelLabel,
+  modelUnknown,
   needsYouArrivals,
   overviewWords,
   prLine,
   prSummary,
   cardPrs,
   cardPrSummary,
+  artifactHref,
+  artifactTitle,
+  cardArtifacts,
   closesText,
   projectTabs,
   roleLine,
@@ -27,7 +32,7 @@ import {
   timeInState,
 } from './derive';
 import { card, golden, project, snapshot } from '../test/fixtures';
-import type { PullRequest, SourceStatus } from '../contract.gen';
+import type { Artifact, PullRequest, SourceStatus } from '../contract.gen';
 
 const NOW = Date.parse('2026-11-17T10:00:00Z');
 const pr = (number: number, over: Partial<PullRequest> = {}): PullRequest => ({
@@ -73,7 +78,7 @@ describe('words', () => {
     const unknown = g.cards.find((c) => c.agent.status === 'unknown');
     expect(unknown).toBeDefined();
     expect(stateWord(unknown!)).toBe('Status unknown');
-    expect(laneNote(unknown!, indexOf(g)).text).toContain('status unknown');
+    expect(laneNote(unknown!, indexOf(g)).head).toContain('status unknown');
   });
   it('state word follows the column otherwise', () => {
     expect(stateWord(card({ column: 'with_coordinator' }))).toBe('With coordinator');
@@ -84,6 +89,70 @@ describe('words', () => {
     expect(modelLabel('claude-fable-5-2')).toBe('Fable 5.2');
     expect(modelLabel('claude-haiku-4-5-20251001')).toBe('Haiku 4.5');
     expect(modelLabel('gpt-5.4-codex')).toBe('gpt-5.4-codex');
+  });
+  it.each([
+    ['claude-opus-5-5', 'opus', 'today\'s form'],
+    ['claude-fable-5-2', 'fable', 'today\'s form'],
+    ['claude-sonnet-5-5', 'sonnet', 'today\'s form'],
+    ['claude-haiku-5-5', 'haiku', 'today\'s form'],
+    ['claude-opus-9-1', 'opus', 'a version the page has never seen'],
+    ['claude-haiku-4-5-20251001', 'haiku', 'a dated id'],
+    ['claude-3-5-sonnet-20241022', 'sonnet', 'the old form, version before family'],
+    ['claude-3-opus-20240229', 'opus', 'the old form, one version number'],
+    ['claude-opus-4-6[1m]', 'opus', 'a context-size suffix'],
+    ['claude-sonnet-4-5@20250929', 'sonnet', 'Vertex AI'],
+    ['us.anthropic.claude-sonnet-4-5-20250929-v1:0', 'sonnet', 'Bedrock'],
+    ['anthropic.claude-3-5-sonnet-20240620-v1:0', 'sonnet', 'Bedrock, old form'],
+    ['arn:aws:bedrock:us-east-1:000000000000:inference-profile/us.anthropic.claude-opus-4-1-20250805-v1:0', 'opus', 'a Bedrock profile ARN'],
+    ['anthropic/claude-opus-4.1', 'opus', 'a router prefix'],
+    ['Claude-Fable-5-2', 'fable', 'upper case'],
+    [' claude-opus-5-5\u200b', 'opus', 'invisible characters around it'],
+  ])('model family: %s is %s (%s)', (id, family) => {
+    expect(modelFamily(id)).toBe(family);
+  });
+  it.each([
+    ['', 'empty'],
+    ['   ', 'blank'],
+    ['gpt-5.4-codex', 'not a Claude model'],
+    ['opus-mt-en-de', 'a family word without "claude"'],
+    ['claude-2', 'a Claude model with no family'],
+    ['claude-instant-1', 'a family the page does not know'],
+    ['claude-newfamily-6-0', 'a new family'],
+    ['claudeopus', 'no word boundary'],
+    ['claude-opus4', 'family and version run together: not an Anthropic id, and the family must be a whole word'],
+    ['Qwen3-14B-Claude-Opus-4.5-Distill', 'another maker\'s model trained on Claude output: "claude" follows "14b", not a provider prefix'],
+    ['deepseek-claude-sonnet-distill', 'another maker\'s distilled model: "claude" follows "deepseek"'],
+    ['gemini-claude-opus', 'another maker\'s name in front of "claude"'],
+    ['claude-latest-opus', 'a word that is not a version between "claude" and the family'],
+  ])('model family: %s has none (%s), so it keeps the neutral chip', (id) => {
+    expect(modelFamily(id)).toBe('');
+  });
+  it('a model is unknown only when there is no id at all', () => {
+    expect(modelUnknown('')).toBe(true);
+    expect(modelUnknown(' \u200b ')).toBe(true);
+    expect(modelUnknown('gpt-5.4-codex')).toBe(false);
+    expect(modelUnknown('claude-opus-5-5')).toBe(false);
+  });
+  it('the lane note carries the model apart from head and tail, with its hue in a muted note', () => {
+    const boss = card({ title: 'plan', agent: { name: 'boss', model: 'claude-fable-5-2', status: 'unknown' } });
+    const w = card({ title: 'do it', agent: { parent: 'known', parentCardId: boss.id, model: 'claude-sonnet-5-5' } });
+    const ix = indexOf(snapshot([boss, w], [project(boss.projectId, 'one')]));
+    expect(laneNote(boss, ix)).toMatchObject({ tone: 'muted', head: 'coordinator · status unknown', model: 'Fable 5.2', hue: 'fable', tail: '1 worker · plan' });
+    expect(laneNote(w, ix)).toMatchObject({ tone: 'muted', head: '', model: 'Sonnet 5.5', hue: 'sonnet', tail: 'for boss · do it' });
+    const lone = card({ title: '', agent: { name: 'x', model: '' } });
+    expect(laneNote(lone, indexOf(snapshot([lone], [project(lone.projectId, 'one')])))).toMatchObject({
+      head: '',
+      model: 'model unknown',
+      hue: '',
+      tail: '',
+    });
+  });
+  it('in a needs-you or failing lane note the model takes the note\'s tone, not its hue', () => {
+    const needs = card({ column: 'needs_you', agent: { model: 'claude-opus-5-5' } });
+    const failing = card({ column: 'in_review', attention: ['failing_checks'], agent: { model: 'claude-haiku-5-5' } });
+    const ix = indexOf(snapshot([needs, failing], [project(needs.projectId, 'one')]));
+    expect(laneNote(needs, ix)).toMatchObject({ tone: 'needs', model: 'Opus 5.5', hue: '' });
+    expect(laneNote(failing, ix)).toMatchObject({ tone: 'failing', model: 'Haiku 5.5', hue: '' });
   });
   it('time in state falls back to the last activity and is empty when unknown', () => {
     expect(timeInState(card({ agent: { statusSince: '2026-11-17T09:47:00Z' } }), NOW)).toBe('13m');
@@ -206,7 +275,7 @@ describe('words', () => {
     const a = card({ attention: ['failing_checks'], pullRequests: [pr(5, { checks: 'failing' })], issues: [issue(7)] });
     const n = laneNote(a, homeIx(a));
     expect(n.tone).toBe('failing');
-    expect(n.text).toMatch(/#5 open · checks failing$/);
+    expect(n.tail).toMatch(/#5 open · checks failing$/);
     expect(n.closes).toBe('closes #7');
     const b = card({ pullRequests: [], issues: [issue(7)] });
     expect(laneNote(b, homeIx(b)).closes).toBe('');
@@ -351,5 +420,41 @@ describe('sources', () => {
   it('claude code counts its live sessions', () => {
     const s = snapshot([card(), card(), card({ agent: { live: 'no' } })], []);
     expect(sourceLine({ kind: 'claude', state: 'ok', version: '2', detail: '', tested: true, ready: true }, s).text).toBe('2 live');
+  });
+});
+
+describe('artifacts', () => {
+  const art = (n: number, title = `Placeholder ${n}`): Artifact => ({ title, url: `https://claude.ai/artifact/exampleArtifact${String(n).padStart(4, '0')}` });
+
+  it('links only a claude.ai artifact address', () => {
+    expect(artifactHref('https://claude.ai/artifact/exampleArtifact0001')).toBe('https://claude.ai/artifact/exampleArtifact0001');
+    expect(artifactHref('https://claude.ai/code/artifact/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa')).not.toBeNull();
+    for (const bad of [
+      'javascript:alert(1)',
+      'http://claude.ai/artifact/exampleArtifact0001',
+      'https://claude.ai.example/artifact/exampleArtifact0001',
+      'https://claude.ai/artifact/exampleArtifact0001?x',
+      'https://claude.ai/artifact/exampleArtifact0001\n',
+      '//claude.ai/artifact/exampleArtifact0001',
+      '',
+    ])
+      expect(artifactHref(bad)).toBeNull();
+  });
+
+  it('a blank title says so; a title is cleaned', () => {
+    expect(artifactTitle(art(1, ''))).toBe('Untitled artifact');
+    expect(artifactTitle(art(1, ' \u202e '))).toBe('Untitled artifact');
+    expect(artifactTitle(art(1, 'Placeholder\u0007 plan'))).toBe('Placeholder plan');
+  });
+
+  it('three lines at most, the last one "+N more", like pull requests', () => {
+    const list = [1, 2, 3, 4, 5, 6].map((n) => art(n));
+    expect(cardArtifacts(list.slice(0, 3))).toEqual({ shown: list.slice(0, 3), more: null });
+    expect(cardArtifacts(list)).toEqual({ shown: list.slice(0, 2), more: '+4 more' });
+  });
+
+  it('leaves out a link that is not an artifact address, and counts only the rest', () => {
+    const list = [art(1), { title: 'x', url: 'javascript:alert(1)' }, art(2), art(3)];
+    expect(cardArtifacts(list)).toEqual({ shown: [art(1), art(2), art(3)], more: null });
   });
 });

@@ -8,6 +8,15 @@
 //     <sessionId>/subagents/*.jsonl beside it. These are tailed in the
 //     background, from a remembered offset, for derived facts only.
 //
+// Artifacts come from the session's own Artifact publishes (action "publish"
+// or none, not an asset upload) whose result line carries one tool result and
+// a structured toolUseResult object with the artifact's url and title. The url
+// must be a claude.ai artifact address (model.ArtifactURLPattern). The same
+// url is the same artifact; the latest publish's title wins. Seen in real
+// records on 2.1.322 to 2.1.326. Deletes are not followed: no real record of
+// a whole artifact's delete exists to model, so a deleted artifact stays
+// listed.
+//
 // All facts are emitted from one goroutine, so a fact and a gone for one
 // session never swap. Nothing from a transcript but derived fields leaves this
 // package, and only one environment variable is read from a live process.
@@ -46,6 +55,7 @@ type adapter struct {
 	tick     time.Duration // transcript growth (stat only) and re-adding the watch
 	liveTick time.Duration // full rescan with ps: liveness
 	debounce time.Duration
+	prober   *prober // folder lookups (procProber; tests have their own)
 	// beforeIndex, when set, runs in the indexer before each batch (tests).
 	beforeIndex func()
 }
@@ -60,6 +70,7 @@ func New(opts Options) source.Watcher {
 		opts: opts, root: filepath.Join(opts.Home, ".claude"), now: now,
 		starts: defaultStarts(), termID: readAgtermID,
 		tick: 3 * time.Second, liveTick: 10 * time.Second, debounce: 100 * time.Millisecond,
+		prober: procProber,
 	}
 }
 
@@ -432,6 +443,7 @@ func (r *registry) fact(id string, s *sess) model.SessionFact {
 		TerminalID:  s.termID,
 		Subagents:   s.subagents,
 		CreatedPRs:  slices.Clone(s.d.CreatedPRs),
+		Artifacts:   slices.Clone(s.d.Artifacts),
 		WorkerHint:  workerHint(s.d),
 	}
 	if f.Folder == "" {

@@ -9,6 +9,7 @@
   import { ms, VIEW_MS } from '../motion';
   import Count from './Count.svelte';
   import Dots from './Dots.svelte';
+  import ForgetGrouping from './ForgetGrouping.svelte';
   import GroupSwitch from './GroupSwitch.svelte';
   import PartsRow, { type PartChip } from './PartsRow.svelte';
 
@@ -18,12 +19,15 @@
     onselect,
     mode,
     onmode,
+    onforget,
   }: {
     g: Grouping;
     sel: Sel;
     onselect: (s: Sel) => void;
     mode: Mode;
     onmode: (m: Mode) => void;
+    /** Forgets a project's grouping; resolves true when the server did. */
+    onforget?: (p: { id: string; name: string }) => Promise<boolean>;
   } = $props();
 
   const band = $derived(tileBand(g));
@@ -60,6 +64,14 @@
     void band;
     keeper.after();
   });
+
+  // After forgetting, focus goes back to the project's tile; the parts row
+  // leaves with the next snapshot.
+  async function forget(p: { id: string; name: string }) {
+    const ok = (await onforget?.(p)) ?? false;
+    if (ok) (strip?.querySelector<HTMLElement>('[aria-pressed="true"]') ?? strip?.querySelector<HTMLElement>('button'))?.focus();
+    return ok;
+  }
 
   function pickChip(key: string) {
     const [kind, id] = [key.slice(0, key.indexOf(':')), key.slice(key.indexOf(':') + 1)];
@@ -126,7 +138,14 @@
 
 {#if top && parts.length}
   <div class="parts" transition:slide={{ duration: ms(VIEW_MS) }}>
-    <PartsRow label="Parts of {top.name}" {chips} active={chipActive} onselect={pickChip} />
+    <PartsRow label="Parts of {top.name}" {chips} active={chipActive} onselect={pickChip}>
+      {#snippet end()}
+        {#if onforget && top.parts.length}
+          {@const p = { id: top.id, name: top.name }}
+          {#key top.id}<ForgetGrouping name={top.name} onforget={() => forget(p)} />{/key}
+        {/if}
+      {/snippet}
+    </PartsRow>
   </div>
 {/if}
 

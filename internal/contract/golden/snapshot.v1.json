@@ -1,5 +1,5 @@
 {
-  "version": 3,
+  "version": 5,
   "seq": 42,
   "generatedAt": "2026-11-17T10:00:00Z",
   "sources": [
@@ -102,6 +102,16 @@
       },
       "pullRequests": [],
       "issues": [],
+      "artifacts": [
+        {
+          "title": "Placeholder plan, second draft",
+          "url": "https://claude.ai/artifact/exampleArtifact0002"
+        },
+        {
+          "title": "Placeholder deck",
+          "url": "https://claude.ai/artifact/exampleArtifact0001"
+        }
+      ],
       "subagents": 2
     },
     {
@@ -131,6 +141,7 @@
       },
       "pullRequests": [],
       "issues": [],
+      "artifacts": [],
       "subagents": 0
     },
     {
@@ -158,6 +169,7 @@
       },
       "pullRequests": [],
       "issues": [],
+      "artifacts": [],
       "subagents": 0
     },
     {
@@ -204,6 +216,7 @@
           "url": "https://github.com/example-org/example-repo/issues/7"
         }
       ],
+      "artifacts": [],
       "subagents": 0
     },
     {
@@ -242,6 +255,7 @@
         }
       ],
       "issues": [],
+      "artifacts": [],
       "subagents": 0
     },
     {
@@ -271,6 +285,12 @@
       },
       "pullRequests": [],
       "issues": [],
+      "artifacts": [
+        {
+          "title": "",
+          "url": "https://claude.ai/artifact/exampleArtifact0003"
+        }
+      ],
       "subagents": 0
     },
     {
@@ -296,6 +316,7 @@
       },
       "pullRequests": [],
       "issues": [],
+      "artifacts": [],
       "subagents": 0
     }
   ],

@@ -35,16 +35,27 @@ dd="docs"   # the unexported folder, never spelled as a path in this exported fi
 ss="site"   # the website's folder: never exported, never spelled as a path here
 deny_word="zorblaxian"
 
+# No script prints an address with the host twice (issue 45): expect checks
+# every output it captures, and host_twice the outputs captured without it.
+DOUBLED_HOST="github.com/github.com"
 failures=0
 ok()  { echo "ok   $1"; }
 bad() { echo "FAIL $1"; printf '%s\n' "$2" | sed 's/^/    /'; failures=$((failures + 1)); }
+# host_twice <name> <output>: fails <name> when <output> has the host twice.
+host_twice() {
+  [[ "$2" == *"$DOUBLED_HOST"* ]] || return 1
+  bad "$1" "an address has the host twice ($DOUBLED_HOST):
+$2"
+}
 # expect <name> <exit> <needle or -> <command...>: the command exits <exit>
 # and, unless the needle is "-", prints the needle.
 expect() {
   local name="$1" want="$2" needle="$3" out rc
   shift 3
   out="$("$@" 2>&1)"; rc=$?
-  if [[ "$rc" == "$want" && ( "$needle" == "-" || "$out" == *"$needle"* ) ]]; then
+  if host_twice "$name" "$out"; then
+    :
+  elif [[ "$rc" == "$want" && ( "$needle" == "-" || "$out" == *"$needle"* ) ]]; then
     ok "$name"
   else
     bad "$name" "exit $rc, want $want; want output: $needle
@@ -439,8 +450,15 @@ expect "an export into a target with an fsmonitor hook" 0 "staged only" rehearse
 # does not even update the target's tracking ref.
 p="$(make_private p6i)"; t="$(seeded_target p6i)"
 before="$(state "$t")"
+# The case proves that an interrupt stops the run with 130 and puts the target
+# back as it was. publish.sh interrupts itself with SIGINT. A non-interactive
+# shell starts its background jobs with SIGINT ignored, and a signal ignored
+# at start stays ignored (POSIX): run as `scripts/release_test.sh &`, the
+# interrupt would do nothing. perl puts SIGINT back to its default before
+# publish.sh starts, so the case runs the same in the foreground or not.
+with_sigint() { perl -e '$SIG{INT} = "DEFAULT"; exec { $ARGV[0] } @ARGV or die "exec $ARGV[0]: $!\n"' "$@"; }
 expect "an interrupted write stops the run" 130 "put back as it was" \
-  env PUBLISH_TEST_INTERRUPT_AFTER=3 PUBLISH_TEST_TARGET=1 bash "$p/scripts/publish.sh" "$t"
+  with_sigint env PUBLISH_TEST_INTERRUPT_AFTER=3 PUBLISH_TEST_TARGET=1 bash "$p/scripts/publish.sh" "$t"
 [[ "$(state "$t")" == "$before" ]] && ok "the interrupted write left the target as it was" || bad "interrupted write changed the target" "$(git -C "$t" status --short | head)"
 p="$(make_private p6t)"; t="$(make_remote_target p6t)"; b6t="$work/bare-p6t.git"
 seed="$work/seed-p6t"; git init -q -b main "$seed"; echo old > "$seed/OLD.md"; commit_all "$seed" "old"
@@ -546,6 +564,9 @@ git -C "$p" checkout -q -- README.md
 expect "committing needs PUBLISH_IDENT" 1 "PUBLISH_IDENT" \
   env PUBLISH_TEST_REMOTE="$b" bash "$p/scripts/publish.sh" "$t" --commit
 expect "a release commits and tags v$V" 0 "tagged v$V" real --commit
+[[ "$LAST_OUT" == *"history mode, all refs"* ]] \
+  && ok "the gate's history scan reads every ref of the target, not a branch scope" \
+  || bad "the gate's history scan is not the full one" "$LAST_OUT"
 subject="$(git -C "$t" log -1 --format=%s)"
 body="$(git -C "$t" log -1 --format=%b)"
 who="$(git -C "$t" log -1 --format='%an <%ae>|%cn <%ce>')"
@@ -724,16 +745,23 @@ expect "package refuses NOTARY_PROFILE without SIGN_IDENTITY" 1 "NOTARY_PROFILE 
 s1="$(printf 'a%.0s' $(seq 1 64))"; s2="$(printf 'b%.0s' $(seq 1 64))"
 s3="$(printf 'c%.0s' $(seq 1 64))"; s4="$(printf 'd%.0s' $(seq 1 64))"
 formula="$(bash "$here/render-formula.sh" 1.2.3 "$s1" "$s2" "$s3" "$s4" 2>&1)"
+host_twice "the rendered formula" "$formula"
+# The address tap.sh downloads the archives from, as tap.sh builds it: the
+# formula must point at the same files, and the host must be there once.
+# shellcheck disable=SC2034 # VERSION is read by the evaluated DL line
+tap_dl="$(VERSION=1.2.3; eval "$(sed -n -e '/^REPO=/p' -e '/^DL=/p' "$here/tap.sh")"; echo "${DL:-}")"
+[[ "$tap_dl" == "https://github.com/IZZY-Agency/sitboard/releases/download/v1.2.3" ]] \
+  && ok "tap.sh downloads from the release's own address" || bad "tap.sh download address" "'$tap_dl'"
 f_fail=""
 for needle in 'class Sitboard < Formula' 'homepage "https://sitboard.com"' 'license "MIT"' \
   'strategy :github_latest' 'bin.install "sitboard"' 'shell_output("#{bin}/sitboard --version")' \
-  "releases/download/v1.2.3/sitboard-1.2.3-macos-arm64.tar.gz\"
+  "url \"$tap_dl/sitboard-1.2.3-macos-arm64.tar.gz\"
       sha256 \"$s1\"" \
-  "releases/download/v1.2.3/sitboard-1.2.3-macos-x86_64.tar.gz\"
+  "url \"$tap_dl/sitboard-1.2.3-macos-x86_64.tar.gz\"
       sha256 \"$s2\"" \
-  "releases/download/v1.2.3/sitboard-1.2.3-linux-arm64.tar.gz\"
+  "url \"$tap_dl/sitboard-1.2.3-linux-arm64.tar.gz\"
       sha256 \"$s3\"" \
-  "releases/download/v1.2.3/sitboard-1.2.3-linux-x86_64.tar.gz\"
+  "url \"$tap_dl/sitboard-1.2.3-linux-x86_64.tar.gz\"
       sha256 \"$s4\""; do
   [[ "$formula" == *"$needle"* ]] || f_fail="$f_fail
 missing: $needle"
@@ -827,6 +855,7 @@ if [[ "$(id -u)" != 0 ]]; then
   tap8="$(make_tap t8)"
   chmod 555 "$tap8"   # Formula/ stays writable: the formula is written, then the README update aborts
   out="$(tap_env t8 bash "$p/scripts/tap.sh" "$tap8" 2>&1)"; rc=$?
+  host_twice "the aborted tap run" "$out"
   chmod 755 "$tap8"
   [[ "$rc" != 0 && -z "$(git -C "$tap8" status --porcelain)" && ! -e "$tap8/Formula/sitboard.rb" ]] \
     && ok "an abort after the formula is written restores the tap" || bad "abort left the tap dirty" "exit $rc: $(git -C "$tap8" status --short)
@@ -860,7 +889,8 @@ rel() { env PATH="$fakebin:$PATH" RELEASE_TEST_REMOTE="$pubb" SIGN_IDENTITY="Dev
 expect "release.sh is a dry run by default" 0 "dry run: nothing was built or published" rel
 r_fail=""
 for needle in "make release" "make verify-release REQUIRE_SIGNATURE=1" "gh release create v$V" \
-  "--repo github.com/IZZY-Agency/sitboard" "sitboard-$V-linux-x86_64.tar.gz.sha256" "First release." "scripts/tap.sh"; do
+  "--repo github.com/IZZY-Agency/sitboard" "sitboard-$V-linux-x86_64.tar.gz.sha256" "First release." "scripts/tap.sh" \
+  "release page: https://github.com/IZZY-Agency/sitboard/releases/tag/v$V"; do
   [[ "$LAST_OUT" == *"$needle"* ]] || r_fail="$r_fail; missing: $needle"
 done
 [[ "$LAST_OUT" == *Older* ]] && r_fail="$r_fail; notes hold the older entry"
@@ -868,6 +898,31 @@ grep -q 'release create' "$ghlog" && r_fail="$r_fail; gh release create was call
 [[ -e "$p/bin/release" ]] && r_fail="$r_fail; something was built"
 [[ -z "$r_fail" ]] && ok "the dry run prints the plan and the notes, and runs nothing" || bad "dry run" "${r_fail#; }
 $LAST_OUT"
+# Issue 45: --go cannot run here (it needs real signing and refuses a
+# stand-in), so its release address is checked in the script's text.
+rs="$here/release.sh"
+lines_of() { grep -nE -- "$1" "$rs" | cut -d: -f1 | tr '\n' ' ' | sed 's/ $//'; }
+# (a) REPO holds the host: no code line puts it in again after a scheme.
+twice="$(grep -nE '^[[:space:]]*[^#[:space:]].*[a-z]+://[^[:space:]"]*github\.com/\$\{?REPO' "$rs")"
+[[ -z "$twice" ]] && ok "release.sh never builds an address with the host before \$REPO" || bad "release.sh adds the host to \$REPO" "$twice"
+# (b) PAGE is set once, at top level, before the dry run and --go split, so
+# both paths have it.
+split="$(lines_of '^if \(\(GO == 0\)\); then$')"
+page_all="$(lines_of '^[[:space:]]*((local|export|readonly|declare)[[:space:]]+)?PAGE=')"
+page_top="$(lines_of '^PAGE=')"
+[[ "$split" =~ ^[0-9]+$ && "$page_top" =~ ^[0-9]+$ && "$page_all" == "$page_top" ]] && ((page_top < split)) \
+  && ok "release.sh sets PAGE once, at top level, before the dry run and --go split" \
+  || bad "PAGE in release.sh" "split at '$split', PAGE set at '$page_all', at top level '$page_top'"
+# (c) --go prints PAGE after the release is created, at top level with no
+# exit before it.
+create="$(lines_of '^gh release create ')"
+released="$(lines_of '^[[:space:]]*step "released: \$\{?PAGE\}?"$')"
+released_top="$(lines_of '^step "released: \$\{?PAGE\}?"$')"
+exits="$(awk -v a="${create:-0}" -v b="${released_top:-0}" 'NR > a && NR < b && /^exit([[:space:]]|$)/ { print NR }' "$rs")"
+[[ "$split" =~ ^[0-9]+$ && "$create" =~ ^[0-9]+$ && "$released_top" =~ ^[0-9]+$ && "$released" == "$released_top" && -z "$exits" ]] \
+  && ((split < create && create < released_top)) \
+  && ok "release.sh --go prints PAGE after the release is created" \
+  || bad "the --go release line" "split '$split', gh release create '$create', released lines '$released' (top level '$released_top'), exits between '$exits'"
 if grep -q '^||release view v'"$V"' --repo github.com/IZZY-Agency/sitboard' "$ghlog"; then
   ok "gh is called with the host in --repo and no GH_HOST or GH_REPO"
 else

@@ -134,6 +134,25 @@ button {
   --tone: var(--fg-body);
 }
 
+/* A model name's family (modelFamily); without one, each place falls back
+   to its own neutral colour. */
+.model-fable {
+  --model: var(--model-fable);
+  --model-line: var(--model-fable-line);
+}
+.model-opus {
+  --model: var(--model-opus);
+  --model-line: var(--model-opus-line);
+}
+.model-sonnet {
+  --model: var(--model-sonnet);
+  --model-line: var(--model-sonnet-line);
+}
+.model-haiku {
+  --model: var(--model-haiku);
+  --model-line: var(--model-haiku-line);
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

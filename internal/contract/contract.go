@@ -12,7 +12,10 @@
 //   - An empty string means "none" or "unknown", as each field says.
 //   - Every string can come from session records, git or GitHub and is
 //     untrusted: the page renders it as text, never as markup.
-//   - No transcript content, no absolute path, no token ever appears here.
+//   - No transcript content, no absolute path, no token ever appears here,
+//     with one exception: Artifact.Title is text taken from the session's
+//     transcript (the title its own publish reported), cleaned of control
+//     and invisible characters and capped like every other title.
 //     Every path is home-relative ("~/..."). A folder outside the home folder
 //     is given by its base name only ("alpha", never "/srv/alpha").
 package contract
@@ -31,7 +34,7 @@ import (
 
 // Version of the API. The page stops and shows "reload the page" when a
 // snapshot carries a different version than it was built for.
-const Version = 3
+const Version = 5
 
 // HTTP surface, all under one origin.
 const (
@@ -42,7 +45,14 @@ const (
 	PathJump        = "/api/v1/jump"         // POST CardRequest: focus the card's terminal
 	PathSeen        = "/api/v1/seen"         // POST CardRequest: mark the card seen
 	PathCatchupRead = "/api/v1/catchup/read" // POST, empty body: move the catch-up marker
+	// POST ProjectRequest: forget the grouping of a project that has parts.
+	PathForgetGrouping = "/api/v1/grouping/forget"
 )
+
+// ArtifactURLPattern is the only form of Artifact.URL: a claude.ai artifact
+// address. The page links only a URL that matches it. Equal to
+// model.ArtifactURLPattern, which the adapters check against.
+const ArtifactURLPattern = `^https://claude\.ai/(?:artifact/[A-Za-z0-9_-]{8,64}|code/artifact/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$`
 
 // EventSnapshot is the server-sent event name; its data is a Snapshot.
 // The server sends one on connect, then one after each change.
@@ -74,6 +84,12 @@ func ParseCardID(id string) (tool Tool, sessionID string, ok bool) {
 	}
 	return Tool(t), sid, true
 }
+
+var projectIDPattern = regexp.MustCompile(`^p_[0-9a-f]{12}$`)
+
+// ValidProjectID reports whether id has the form ProjectID produces. Ids that
+// come back from the page are checked with it before they are looked up.
+func ValidProjectID(id string) bool { return projectIDPattern.MatchString(id) }
 
 // ProjectID is "p_" plus the first 12 hex characters of the SHA-256 of the main
 // repo root (the folder itself when there is no repo). Stable across restarts,
@@ -348,6 +364,7 @@ type Card struct {
 	Agent        Agent         `json:"agent"`
 	PullRequests []PullRequest `json:"pullRequests"`
 	Issues       []Issue       `json:"issues"`
+	Artifacts    []Artifact    `json:"artifacts"` // most recently published first
 	Subagents    int           `json:"subagents"` // in-process subagents, shown as a count
 }
 
@@ -378,6 +395,13 @@ type PullRequest struct {
 	Checks Checks  `json:"checks"`
 	Review Review  `json:"review"`
 	Draft  bool    `json:"draft"`
+}
+
+// Artifact is a claude.ai artifact the card's session published itself. The
+// link is private to the owner, like everything else here.
+type Artifact struct {
+	Title string `json:"title"` // as the session's latest publish of it reported; "" when none
+	URL   string `json:"url"`   // matches ArtifactURLPattern
 }
 
 // Issue a linked pull request closes.
@@ -424,4 +448,10 @@ type Leftover struct {
 // is ignored; in particular a terminal id sent by the page is never used.
 type CardRequest struct {
 	CardID string `json:"cardId"`
+}
+
+// ProjectRequest is the body of POST PathForgetGrouping. Any other field is
+// ignored; the server resolves the folder from the project id itself.
+type ProjectRequest struct {
+	ProjectID string `json:"projectId"`
 }

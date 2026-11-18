@@ -112,8 +112,17 @@ func (e *env) transcript(folder, id, fixtureName string) string {
 	return p
 }
 
+// newAdapter is New for a test: the adapter gets a prober of the test's own
+// (staticProber), never the process's.
+func newAdapter(t *testing.T, opts Options) *adapter {
+	t.Helper()
+	a := New(opts).(*adapter)
+	a.prober = staticProber(t)
+	return a
+}
+
 func (e *env) adapter() *adapter {
-	a := New(Options{Home: e.home, Now: func() time.Time { return fixedNow }}).(*adapter)
+	a := newAdapter(e.t, Options{Home: e.home, Now: func() time.Time { return fixedNow }})
 	a.starts = e.starts
 	a.termID = e.termID
 	a.tick = 50 * time.Millisecond
@@ -182,7 +191,6 @@ func run(t *testing.T, a *adapter) *collector {
 }
 
 func TestParsesSessionFile(t *testing.T) {
-	staticFolders(t)
 	e := newEnv(t)
 	e.setProc(4242, procStart)
 	e.record(4242, nil)
@@ -328,7 +336,6 @@ func TestStatusChangeEmitsWithinOneSecond(t *testing.T) {
 }
 
 func TestLiveSessionsEmittedBeforeIndexingFinishes(t *testing.T) {
-	staticFolders(t)
 	e := newEnv(t)
 	e.setProc(4242, procStart)
 	e.record(4242, nil)
@@ -460,7 +467,7 @@ func TestReadsOnlyTheAgtermVariable(t *testing.T) {
 }
 
 func TestProbe(t *testing.T) {
-	st := New(Options{Home: t.TempDir()}).Probe(context.Background())
+	st := newAdapter(t, Options{Home: t.TempDir()}).Probe(context.Background())
 	if st.State != source.StateMissing || st.Kind != source.KindClaude {
 		t.Fatalf("missing: %+v", st)
 	}
@@ -478,7 +485,8 @@ func TestProbe(t *testing.T) {
 
 func TestRunWithoutClaudeReturnsAtOnce(t *testing.T) {
 	done := make(chan error, 1)
-	go func() { done <- New(Options{Home: t.TempDir()}).Run(context.Background(), func(model.Fact) {}) }()
+	a := newAdapter(t, Options{Home: t.TempDir()})
+	go func() { done <- a.Run(context.Background(), func(model.Fact) {}) }()
 	select {
 	case err := <-done:
 		if err != nil {

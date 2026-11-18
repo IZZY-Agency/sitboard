@@ -32,6 +32,21 @@
   --state-failing: #ec7c7c;
   --failing-line: rgb(236 124 124 / 55%);
 
+  /* Model families, on the model name's text and chip border (line: the hue
+     at half strength). The name is always written, so the hue only helps the
+     eye. Each stays at least 17 (CIEDE2000) from every text and state colour
+     above, at least 9 from the two ambers to red-green colour-blind eyes, and
+     reads at 8:1 or more on the page and on a card. A model with no family
+     keeps the neutral chip. */
+  --model-fable: #54d1d1;
+  --model-fable-line: rgb(84 209 209 / 50%);
+  --model-opus: #e8a87c;
+  --model-opus-line: rgb(232 168 124 / 50%);
+  --model-sonnet: #f1adcc;
+  --model-sonnet-line: rgb(241 173 204 / 50%);
+  --model-haiku: #a8b04f;
+  --model-haiku-line: rgb(168 176 79 / 50%);
+
   /* Type */
   --font-ui: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
   --font-title: 'Space Grotesk', system-ui, sans-serif;

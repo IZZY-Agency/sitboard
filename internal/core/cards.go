@@ -91,7 +91,7 @@ func (b *Board) deriveLocked(now time.Time) (view, map[string]model.SessionKey) 
 		}
 	}
 
-	v.umbrellas = b.groupLocked(projects, mainRoots, plainLive, b.qualifiedLocked(shown, parents, plainLive), now)
+	v.umbrellas, v.groupings = b.groupLocked(projects, mainRoots, plainLive, b.qualifiedLocked(shown, parents, plainLive), now)
 
 	for _, c := range v.cards {
 		p := projects[c.ProjectID]
@@ -205,6 +205,7 @@ func (b *Board) cardLocked(s model.SessionFact, parent model.Known[model.Session
 		Seen:         seen,
 		PullRequests: []contract.PullRequest{},
 		Issues:       []contract.Issue{},
+		Artifacts:    cardArtifacts(s.Artifacts),
 		Subagents:    max(s.Subagents, 0),
 		Agent: contract.Agent{
 			Tool:         contract.Tool(s.Key.Tool),
@@ -364,6 +365,29 @@ func prOrder(a, c model.PullRequest) int {
 	return cmp.Compare(a.Repo, c.Repo)
 }
 
+// cardArtifacts are the session's artifacts for the page: only addresses that
+// pass the check, most recently published first (an unknown time last), with
+// clean titles.
+func cardArtifacts(refs []model.ArtifactRef) []contract.Artifact {
+	refs = slices.Clone(refs)
+	slices.SortStableFunc(refs, func(a, c model.ArtifactRef) int {
+		if a.PublishedAt.IsZero() != c.PublishedAt.IsZero() {
+			if a.PublishedAt.IsZero() {
+				return 1
+			}
+			return -1
+		}
+		return c.PublishedAt.Compare(a.PublishedAt)
+	})
+	out := []contract.Artifact{}
+	for _, r := range refs {
+		if model.ValidArtifactURL(r.URL) {
+			out = append(out, contract.Artifact{Title: clean(r.Title), URL: r.URL})
+		}
+	}
+	return out
+}
+
 // repoLocked is what git said about a folder, or the folder itself.
 func (b *Board) repoLocked(folder string) model.Repo {
 	if r, ok := b.repos[folder]; ok {
@@ -473,8 +497,10 @@ func latest(a, c time.Time) time.Time {
 	return a
 }
 
-// clean makes an untrusted string safe to carry: valid UTF-8, no control or
-// bidirectional-override characters, at most maxText runes.
+// clean makes an untrusted string safe to carry: valid UTF-8, no control,
+// bidirectional-override, zero-width-space or byte-order-mark characters
+// (line and paragraph separators become spaces, like a newline), at most
+// maxText runes. The zero-width joiner stays: emoji sequences need it.
 func clean(s string) string {
 	if s == "" {
 		return ""
@@ -482,8 +508,8 @@ func clean(s string) string {
 	var sb strings.Builder
 	n := 0
 	for _, r := range strings.ToValidUTF8(s, "�") {
-		if unicode.IsControl(r) || isBidiControl(r) {
-			if r == '\t' || r == '\n' || r == '\r' {
+		if unicode.IsControl(r) || isBidiControl(r) || r == '\u200B' || r == '\uFEFF' || r == '\u2028' || r == '\u2029' {
+			if r == '\t' || r == '\n' || r == '\r' || r == '\u2028' || r == '\u2029' {
 				r = ' '
 			} else {
 				continue

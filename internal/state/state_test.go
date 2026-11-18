@@ -5,11 +5,12 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/IZZY-Agency/sitboard/internal/cpucost"
 )
 
 var t0 = time.Date(2026, 11, 17, 10, 0, 0, 0, time.UTC)
@@ -372,22 +373,17 @@ func TestUmbrellasCappedAndClampedAtLoad(t *testing.T) {
 }
 
 // Loading is linear (one pass and one sort): 4 times the entries take about
-// 4 times as long, a quadratic step 16 times. The median of three loads at n
-// and 4n is compared, so a slow machine or the race detector does not fail
-// it; the absolute bound only catches a hang.
+// 4 times as long, a quadratic step 16 times. The least CPU time of three
+// loads at n and 4n is compared, so a loaded machine or the race detector
+// does not fail it; the absolute bound only catches a hang.
 func TestUmbrellaLoadIsLinear(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	timeOf := func(file string) time.Duration {
-		var runs []time.Duration
-		for range 3 {
-			start := time.Now()
+		return cpucost.Of(3, func() {
 			if _, err := Open(file); err != nil {
 				t.Fatal(err)
 			}
-			runs = append(runs, time.Since(start))
-		}
-		slices.Sort(runs)
-		return runs[1]
+		})
 	}
 	t1 := timeOf(writeUmbrellaFile(t, 25000, now))
 	t4 := timeOf(writeUmbrellaFile(t, 100000, now))

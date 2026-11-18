@@ -12,6 +12,7 @@ Use only these values:
 | Repository | `example-org/example-repo` |
 | Folders | `/home/dev/projects/alpha`, `/home/dev/projects/beta`, `/home/dev/projects/gamma` (home-relative on the page: `~/projects/alpha`) |
 | Pull request URL | `https://github.com/example-org/example-repo/pull/101` (other numbers allowed) |
+| Artifact URL | `https://claude.ai/artifact/exampleArtifact0001` (other digits allowed); an artifact title starts with `Placeholder` |
 | Session ids | UUID-shaped values made of a repeated digit, for example `11111111-1111-4111-8111-111111111111` |
 | Model ids | as they appear in real records |
 

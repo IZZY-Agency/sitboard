@@ -32,6 +32,9 @@ type fakeBoard struct {
 	terminals map[string]string
 	seen      []string
 	catchup   int
+	groupings map[string]bool // project id -> it has parts
+	forgotten []string        // project ids ForgetGrouping accepted
+	forgetErr error           // what ForgetGrouping returns for a grouping
 }
 
 var _ app.Board = (*fakeBoard)(nil)
@@ -108,6 +111,24 @@ func (f *fakeBoard) MarkCatchupRead() error {
 	f.mu.Lock()
 	f.catchup++
 	f.mu.Unlock()
+	return nil
+}
+
+func (f *fakeBoard) ForgetGrouping(id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.groupings[id] {
+		for _, p := range f.snap.Projects {
+			if p.ID == id {
+				return app.ErrNotGrouping
+			}
+		}
+		return app.ErrUnknownProject
+	}
+	if f.forgetErr != nil {
+		return f.forgetErr
+	}
+	f.forgotten = append(f.forgotten, id)
 	return nil
 }
 

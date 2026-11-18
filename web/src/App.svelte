@@ -55,6 +55,8 @@
       return `${n.why === 'no_agterm' ? 'agterm not found' : 'Not in agterm'}. Folder ${n.folder || 'unknown'}. Session ${n.name || 'unnamed'}.`;
     return `${n.what} failed: ${n.message}.`;
   });
+  const said = $derived(announce || board.said);
+  const onforget = (p: { id: string; name: string }) => board.forgetGrouping(p);
   function onkeydown(e: KeyboardEvent) {
     if (e.key === 'Escape' && board.notice) board.dismiss();
   }
@@ -119,9 +121,9 @@
         {#key grouping}
           <div class="grouping" in:fade={{ duration: ms(VIEW_MS) }}>
             {#if grouping === 'tiles'}
-              <ProjectTiles g={grp} {sel} onselect={select} mode={grouping} onmode={setGrouping} />
+              <ProjectTiles g={grp} {sel} onselect={select} mode={grouping} onmode={setGrouping} {onforget} />
             {:else}
-              <ProjectRail g={grp} {sel} onselect={select} mode={grouping} onmode={setGrouping} />
+              <ProjectRail g={grp} {sel} onselect={select} mode={grouping} onmode={setGrouping} {onforget} />
             {/if}
           </div>
         {/key}
@@ -144,7 +146,7 @@
 
   <StatusBar snapshot={board.conn === 'unauthorized' ? null : snap} />
 
-  <div class="visually-hidden" role="status" aria-live="polite">{announce}</div>
+  <div class="visually-hidden" role="status" aria-live="polite">{said}</div>
   {#if board.notice}
     <ActionNotice notice={board.notice} ondismiss={() => board.dismiss()} />
   {/if}

@@ -46,7 +46,7 @@ func (e *groupEnv) reopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.testEnv.state = st
-	e.board = New(Options{Repos: e.repos, PRs: e.prs, State: st, Now: e.clock.Now, StaleAfter: 20 * time.Minute})
+	e.board = newBoard(t, Options{Repos: e.repos, PRs: e.prs, State: st, Now: e.clock.Now, StaleAfter: 20 * time.Minute})
 }
 
 // dir creates a folder under home and returns its path.
@@ -524,8 +524,7 @@ func TestGoneCheckTimeoutAndShutdown(t *testing.T) {
 	e.board.mu.Lock()
 	e.board.closed = true // Run returned
 	e.board.mu.Unlock()
-	close(release)
-	statFolder = os.Stat
+	close(release) // from now on statFolder is os.Stat; it is never written while a check may read it
 	for range umbrellaMisses + 1 {
 		e.board.mu.Lock()
 		busy := e.board.goneBusy

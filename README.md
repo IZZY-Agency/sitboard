@@ -29,8 +29,10 @@ cannot tell something, it says "unknown" instead of guessing.
 ## What it does
 
 - **A card per session.** Each card shows the session's name or title, its
-  project, status and model, how long it has been in that state, and the pull
-  requests it opened with their checks and review.
+  project, status and model (a Claude model in its family's colour: Fable,
+  Opus, Sonnet, Haiku), how long it has been in that state, the pull requests
+  it opened with their checks and review, and, on the Board, links to the
+  claude.ai artifacts it published.
 - **Board** (the default view). One column per state, in this order: Needs
   you, Working, With coordinator, In review, Done · 24h, Idle.
 - **Lanes.** One row per project, with a "Needs you" strip on top.
@@ -38,7 +40,8 @@ cannot tell something, it says "unknown" instead of guessing.
   one panel of solo agents.
 - **Project tiles or a side rail.** You choose which; they pick the projects
   every view shows. A project that spans several repositories shows as one
-  entry with its parts.
+  entry with its parts. A grouping you do not want can be forgotten from the
+  page; that folder stays apart until no agent has sat in it for two minutes.
 - **A jump to the terminal.** With [agterm](https://github.com/umputun/agterm),
   one click jumps to the session's terminal, and cards get better titles;
   without it, clicking a card shows the session's folder and name to copy.
@@ -48,7 +51,7 @@ cannot tell something, it says "unknown" instead of guessing.
 - **Local only.** sitboard listens on `127.0.0.1`, never on your network.
 - **A private link.** It prints a link that carries a secret for this run; your browser swaps it for a cookie. Requests without it, and requests from other websites, are refused.
 - **Nothing leaves your machine**, except read-only GitHub lookups for pull request state, made through your own `gh` command. sitboard never reads or stores a GitHub token. With `--no-github` there is no network traffic at all.
-- **Names, titles, folder paths, states and pull request links, never session text.** The page gets session names and titles, home-relative folder paths, repository names, states, and pull request numbers with their check status. Prompt text, code and tool output are never shown and never served.
+- **No prompts, code or tool output.** The page gets session names and titles, home-relative folder paths, repository names with their owner ("owner/name"), agterm workspace names, pull request numbers and titles with their state, checks, review and draft flag, the numbers of the issues they close, and the links and titles of the artifacts a session published, plus derived fields such as states, times, model ids, subagent counts, the versions of the tools it reads, and sitboard's own version, commit, operating system and architecture. A session's name is the one Claude Code records for it or, when it has none, its agterm terminal's name. A session's title is its open pull request's title or, with agterm, the short title Claude Code puts on its terminal, which is Claude Code's own summary of the task; without either, it is the session's name, its terminal's name or its folder's name. Prompt text, code and tool output are never shown and never served. The only free text the page gets from a transcript is an artifact's title (the title its own publish reported), cleaned and shortened.
 - **No telemetry**, no update check, no crash reports.
 
 ## Install

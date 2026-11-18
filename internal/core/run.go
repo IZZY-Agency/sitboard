@@ -43,10 +43,15 @@ func (b *Board) Run(ctx context.Context) error {
 // tick is one beat of the clock, without a caller context, that also waits
 // for the git lookups it started. Tests drive it with a fake clock.
 // markClosed records that Run returned, so a gone check still running
-// changes nothing and writes nothing.
+// changes nothing and writes nothing, and no snapshot is published any more:
+// a scheduled publish is cancelled.
 func (b *Board) markClosed() {
 	b.mu.Lock()
 	b.closed = true
+	if b.pubTimer != nil {
+		b.pubTimer.Stop()
+		b.pubTimer = nil
+	}
 	b.mu.Unlock()
 }
 

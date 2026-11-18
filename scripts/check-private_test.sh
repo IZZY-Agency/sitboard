@@ -542,10 +542,10 @@ want_out() {
 # G1. make private runs the history scan too, with the deny-list.
 if command -v make >/dev/null 2>&1; then
   make_out="$(make -s -n -C "$here/.." private 2>&1)"
-  if [[ "$make_out" == *"check-private.sh --history"* ]]; then
-    echo "ok   make private runs --history"
+  if [[ "$make_out" == *"check-private.sh --history --scope=branch"* ]]; then
+    echo "ok   make private runs --history, scoped to the branch"
   else
-    echo "FAIL make private does not run --history: $make_out"
+    echo "FAIL make private does not run --history --scope=branch: $make_out"
     failures=$((failures + 1))
   fi
 else
@@ -838,6 +838,120 @@ for fine in "_auth""Token=\${NPM_TOKEN}" "pass""word = \"\"" "pass""word = \$DB_
             "pass""word = <your password>" "// check the pass""word field" "-----BEGIN ""PUBLIC KEY-----"; do
   run_case "not a secret: ${fine:0:20}" 0 "$(tree_with "$fine")" "$cfg_empty" "" --no-denylist
 done
+
+# B1. --history --scope=branch reads HEAD, main, origin/main and the tags,
+# each back to its root, and says what it left out; plain --history reads
+# every ref.
+# Both incidents that made this: a home path, and a stray binary carrying one
+# (a Go binary embeds its build folder), each on a neighbour's branch.
+sb="$work/b1"
+new_repo "$sb"
+printf 'clean\n' > "$sb/a.txt"
+commit_all "$sb" "$ok_email_a"
+git -C "$sb" branch -q -M main
+git -C "$sb" checkout -q -b neighbour
+printf 'see %s\n' "$home_path" > "$sb/notes.txt"
+printf 'ELF\000\001\002%s\000\377' "$users_path" > "$sb/sitboard-bin"
+commit_msg "$sb" "neighbour work"
+git -C "$sb" checkout -q main
+git -C "$sb" checkout -q -b mine
+printf 'mine\n' > "$sb/b.txt"
+commit_msg "$sb" "my work"
+run_case "scoped history: findings only on a neighbour's branch do not count" 0 "$sb" "$cfg_with_list" "" --history --scope=branch
+want_out "scoped history names its scope" "branch scope: HEAD, main, 0 tag(s);"
+want_out "scoped history says how many refs it left out" "1 other ref(s) not scanned"
+run_case "full history: the neighbour's branch is scanned" 1 "$sb" "$cfg_with_list" "" --history
+want_out "full history says it read every ref" "all refs"
+# The same files on HEAD, added and removed again: the scoped scan reads the
+# branch's whole history, not only its tip.
+git -C "$sb" checkout -q neighbour -- notes.txt sitboard-bin
+commit_msg "$sb" "picked up"
+git -C "$sb" rm -q notes.txt sitboard-bin
+commit_msg "$sb" "dropped"
+run_case "scoped history: findings in HEAD's history count" 1 "$sb" "$cfg_with_list" "" --history --scope=branch
+if [[ "$(grep -c '^history blob .*home path' <<<"$LAST_OUT")" -ge 2 ]]; then
+  echo "ok   scoped history finds both the text file and the binary"
+else
+  echo "FAIL scoped history missed one of the two files: $LAST_OUT"
+  failures=$((failures + 1))
+fi
+want_out "a scoped finding still names its scope" "branch scope: HEAD, main, 0 tag(s);"
+run_case "full history: findings in HEAD's history count" 1 "$sb" "$cfg_with_list" "" --history
+# In main's history behind HEAD's fork point (so in HEAD's too): still read.
+sm="$work/b1-main"
+new_repo "$sm"
+printf 'see %s\n' "$home_path" > "$sm/old.txt"
+commit_all "$sm" "$ok_email_a"
+git -C "$sm" branch -q -M main
+git -C "$sm" rm -q old.txt
+commit_msg "$sm" "removed"
+git -C "$sm" checkout -q -b mine
+run_case "scoped history: history back to the root counts" 1 "$sm" "$cfg_with_list" "" --history --scope=branch
+# A detached HEAD on main, with nothing of its own: clean.
+git -C "$sb" checkout -q --detach main
+run_case "scoped history on a detached HEAD" 0 "$sb" "$cfg_with_list" "" --history --scope=branch
+# A branch named with a deny word is a finding, and the report never prints
+# the branch's name.
+git -C "$sb" checkout -q -b "fix-$deny_word" main
+run_case "scoped history: a deny word in the branch's own name" 1 "$sb" "$cfg_with_list" "" --history --scope=branch
+want_out "the branch name is a ref name finding" "history ref names"
+if [[ "$LAST_OUT" == *"$deny_word"* ]]; then
+  echo "FAIL the scoped report printed the branch's name"
+  failures=$((failures + 1))
+else
+  echo "ok   the scoped report never prints the branch's name"
+fi
+# scoped_repo <name>: a repo with a clean main and a branch "mine" from it,
+# checked out; prints its path.
+scoped_repo() {
+  local d="$work/$1"
+  new_repo "$d"
+  printf 'clean\n' > "$d/a.txt"
+  commit_all "$d" "$ok_email_a"
+  git -C "$d" branch -q -M main
+  git -C "$d" checkout -q -b mine
+  echo "$d"
+}
+# Each tip is read on its own: a finding only one of them reaches fails.
+# HEAD detached, with a commit main does not have.
+sd="$(scoped_repo b1-detached)"
+git -C "$sd" checkout -q --detach
+printf 'see %s\n' "$home_path" > "$sd/d.txt"
+commit_msg "$sd" "detached work"
+run_case "scoped history: a detached HEAD's own commit is read" 1 "$sd" "$cfg_with_list" "" --history --scope=branch
+want_out "a detached HEAD is named HEAD" "branch scope: HEAD, main, 0 tag(s);"
+# main moved on after HEAD forked.
+sf="$(scoped_repo b1-main-ahead)"
+git -C "$sf" checkout -q main
+printf 'see %s\n' "$home_path" > "$sf/m.txt"
+commit_msg "$sf" "main moved on"
+git -C "$sf" checkout -q mine
+run_case "scoped history: main's commits after the fork are read" 1 "$sf" "$cfg_with_list" "" --history --scope=branch
+# No local main; the finding only on origin/main, fetched.
+so="$(scoped_repo b1-origin)"
+git -C "$so" checkout -q main
+sc="$work/b1-origin-clone"
+git clone -q "file://$so" "$sc" 2>/dev/null
+git -C "$sc" checkout -q -b mine
+git -C "$sc" branch -q -D main
+printf 'see %s\n' "$home_path" > "$so/o.txt"
+commit_msg "$so" "pushed to main"
+git -C "$sc" fetch -q origin
+run_case "scoped history: origin/main is read without a local main" 1 "$sc" "$cfg_with_list" "" --history --scope=branch
+want_out "the scope names origin/main" "branch scope: HEAD, origin/main, 0 tag(s);"
+# Tags are in scope: their names, and annotated tags' messages.
+st="$(scoped_repo b1-tag-name)"
+git -C "$st" tag "v1-$deny_word" main
+run_case "scoped history: a deny word in a tag name" 1 "$st" "$cfg_with_list" "" --history --scope=branch
+want_out "a tag name is a ref name finding" "history ref names"
+want_out "the scope counts the tags" "branch scope: HEAD, main, 1 tag(s);"
+sa="$(scoped_repo b1-tag-message)"
+git -C "$sa" -c user.name=test -c user.email="$ok_email_a" tag -a -m "about $deny_word" v1 main
+run_case "scoped history: a deny word in an annotated tag's message" 1 "$sa" "$cfg_with_list" "" --history --scope=branch
+want_out "the tag message is a tag finding" "history tag "
+run_case "--scope=branch with --pull-refs is refused" 2 "$sb" "$cfg_with_list" "" --history --scope=branch --pull-refs
+run_case "--scope without --history is refused" 2 "$sb" "$cfg_with_list" "" --scope=branch
+run_case "an unknown scope is refused" 2 "$sb" "$cfg_with_list" "" --history --scope=tags
 
 # S8. --help prints the usage comment only.
 help_out="$(bash "$check" --help)"

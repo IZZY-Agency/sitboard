@@ -60,11 +60,13 @@ func structList() []reflect.Type {
 		reflect.TypeFor[Agent](),
 		reflect.TypeFor[PullRequest](),
 		reflect.TypeFor[Issue](),
+		reflect.TypeFor[Artifact](),
 		reflect.TypeFor[Catchup](),
 		reflect.TypeFor[CatchupItem](),
 		reflect.TypeFor[Leftovers](),
 		reflect.TypeFor[Leftover](),
 		reflect.TypeFor[CardRequest](),
+		reflect.TypeFor[ProjectRequest](),
 	}
 }
 
@@ -76,6 +78,7 @@ var paths = []struct{ name, path string }{
 	{"jump", PathJump},
 	{"seen", PathSeen},
 	{"catchupRead", PathCatchupRead},
+	{"forgetGrouping", PathForgetGrouping},
 }
 
 // TypeScript returns the content of web/src/contract.gen.ts. It panics when a
@@ -101,6 +104,8 @@ func TypeScript() string {
 	}
 	b.WriteString("} as const;\n\n")
 	fmt.Fprintf(&b, "export const EVENT_SNAPSHOT = %s;\n\n", strconv.Quote(EventSnapshot))
+	b.WriteString("/** The only form of Artifact.url; the page links nothing else. */\n")
+	fmt.Fprintf(&b, "export const ARTIFACT_URL_PATTERN = new RegExp(%s);\n\n", strconv.Quote(ArtifactURLPattern))
 
 	b.WriteString("/** RFC 3339 time, UTC. */\nexport type Timestamp = string;\n")
 

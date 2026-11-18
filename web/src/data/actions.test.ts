@@ -35,3 +35,26 @@ describe('actions', () => {
     expect(await recorder('down').actions.jump('x')).toMatchObject({ ok: false, kind: 'failed', message: 'sitboard did not answer' });
   });
 });
+
+describe('forget grouping', () => {
+  it('posts the project id only', async () => {
+    const r = recorder(204);
+    expect(await r.actions.forgetGrouping('p_0123456789ab')).toEqual({ ok: true });
+    expect(r.calls[0].url).toBe('/api/v1/grouping/forget');
+    expect(r.calls[0].init.method).toBe('POST');
+    expect(JSON.parse(r.calls[0].init.body as string)).toEqual({ projectId: 'p_0123456789ab' });
+  });
+  it('a 409 means it is no longer grouped, a 404 that the project is gone: both final, no retry', async () => {
+    expect(await recorder(409).actions.forgetGrouping('x')).toEqual({ ok: false, kind: 'failed', message: 'it is no longer grouped', final: true });
+    expect(await recorder(404).actions.forgetGrouping('x')).toEqual({ ok: false, kind: 'failed', message: 'this project is no longer on the board', final: true });
+  });
+  it('a 403 means the key is lost; a 500 is a state file sitboard could not write, worth a retry', async () => {
+    expect(await recorder(403).actions.forgetGrouping('x')).toEqual({ ok: false, kind: 'unauthorized' });
+    expect(await recorder(500).actions.forgetGrouping('x')).toEqual({ ok: false, kind: 'failed', message: 'sitboard could not save it' });
+  });
+  it('the other actions keep their answers', async () => {
+    expect(await recorder(409).actions.jump('x')).toEqual({ ok: false, kind: 'no_terminal' });
+    expect(await recorder(404).actions.seen('x')).toEqual({ ok: false, kind: 'failed', message: 'this card is no longer on the board' });
+    expect(await recorder(500).actions.seen('x')).toEqual({ ok: false, kind: 'failed', message: 'sitboard answered 500' });
+  });
+});

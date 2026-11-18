@@ -3,6 +3,7 @@ import { flushSync } from 'svelte';
 import { BoardState, dedupe, FLASH_TTL } from './store.svelte';
 import { card, project, snapshot } from '../test/fixtures';
 import { feedOf, recordActions } from '../test/render';
+import type { ActionResult, Actions } from './actions';
 
 afterEach(() => vi.useRealTimers());
 
@@ -46,5 +47,29 @@ describe('store', () => {
     expect(d.projects).toHaveLength(1);
     const clean = snapshot([card()], []);
     expect(dedupe(clean)).toBe(clean);
+  });
+
+  it('one forget per project at a time: a second press while one is out gets the same answer', async () => {
+    const calls: string[] = [];
+    let answer: (v: ActionResult) => void = () => {};
+    const actions: Actions = {
+      ...recordActions().actions,
+      forgetGrouping: (id) => {
+        calls.push(id);
+        return new Promise<ActionResult>((res) => (answer = res));
+      },
+    };
+    const b = new BoardState(() => actions);
+    const p = { id: 'p_main', name: 'mainapp' };
+    const first = b.forgetGrouping(p); // the tiles' control
+    const second = b.forgetGrouping(p); // the rail's, or a second click
+    expect(calls).toEqual(['p_main']);
+    answer({ ok: true });
+    expect(await first).toBe(true);
+    expect(await second).toBe(true);
+    expect(b.notice).toBeNull();
+    // Once it is answered, a new press sends a new request.
+    void b.forgetGrouping(p);
+    expect(calls).toEqual(['p_main', 'p_main']);
   });
 });

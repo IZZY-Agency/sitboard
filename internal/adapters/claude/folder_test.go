@@ -7,10 +7,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/IZZY-Agency/sitboard/internal/cpucost"
 )
 
 // cwdLines writes n main-chain (or sidechain) records in folder.
@@ -48,7 +53,7 @@ func TestFolderIsWhereMostWorkIs(t *testing.T) {
 	var buf bytes.Buffer
 	cwdLines(&buf, a, 300, false)
 	writeFile(t, p, buf.Bytes())
-	tl := newTailer(p)
+	tl := newTailer(p, realProber(t))
 	if got := folderAfter(t, tl); got != a {
 		t.Fatalf("folder %q, want a", got)
 	}
@@ -74,14 +79,14 @@ func TestFolderSwitchesOnceOutnumbered(t *testing.T) {
 	var buf bytes.Buffer
 	cwdLines(&buf, a, 10, false)
 	cwdLines(&buf, b, 10, false)
-	if got := tailOf(t, buf.Bytes()).d.Folder; got != b {
+	if got := realTail(t, buf.Bytes()).d.Folder; got != b {
 		t.Fatalf("tie: folder %q, want the most recent (b)", got)
 	}
 	buf.Reset()
 	cwdLines(&buf, a, 10, false)
 	cwdLines(&buf, b, 9, false)
 	cwdLines(&buf, b, 50, true) // an in-process subagent's records
-	if got := tailOf(t, buf.Bytes()).d.Folder; got != a {
+	if got := realTail(t, buf.Bytes()).d.Folder; got != a {
 		t.Fatalf("sidechain records counted: folder %q, want a", got)
 	}
 }
@@ -99,7 +104,7 @@ func TestFolderOfWorkerInWorktree(t *testing.T) {
 	}
 	var buf bytes.Buffer
 	cwdLines(&buf, wt, 40, false)
-	if got := tailOf(t, buf.Bytes()).d.Folder; got != wt {
+	if got := realTail(t, buf.Bytes()).d.Folder; got != wt {
 		t.Fatalf("folder %q, want the worktree", got)
 	}
 }
@@ -121,7 +126,7 @@ func TestFolderVotesCountByRepository(t *testing.T) {
 	cwdLines(&buf, filepath.Join(repo, "api"), 15, false)
 	cwdLines(&buf, filepath.Join(repo, "docs"), 15, false)
 	cwdLines(&buf, other, 21, false)
-	if got := tailOf(t, buf.Bytes()).d.Folder; got != filepath.Join(repo, "web") {
+	if got := realTail(t, buf.Bytes()).d.Folder; got != filepath.Join(repo, "web") {
 		t.Fatalf("folder %q, want repo/web", got)
 	}
 
@@ -135,7 +140,7 @@ func TestFolderVotesRebuiltAfterReset(t *testing.T) {
 	var buf bytes.Buffer
 	cwdLines(&buf, a, 50, false)
 	writeFile(t, p, buf.Bytes())
-	tl := newTailer(p)
+	tl := newTailer(p, realProber(t))
 	_ = folderAfter(t, tl)
 	buf.Reset()
 	cwdLines(&buf, b, 3, false) // a shorter file: read from zero
@@ -165,7 +170,7 @@ func TestDeletedFolderVotesGoToItsNearestExistingAncestor(t *testing.T) {
 	var buf bytes.Buffer
 	cwdLines(&buf, wt, 399, false)
 	writeFile(t, p, buf.Bytes())
-	tl := newTailer(p)
+	tl := newTailer(p, realProber(t))
 	if got := settled(t, tl, fixedNow); got != wt {
 		t.Fatalf("folder %q, want the worktree while it exists", got)
 	}
@@ -190,7 +195,7 @@ func TestFolderSpellingsCountAsOne(t *testing.T) {
 	cwdLines(&buf, a+"/", 10, false)
 	cwdLines(&buf, a+"/.", 10, false)
 	cwdLines(&buf, other, 11, false)
-	if got := tailOf(t, buf.Bytes()).d.Folder; got != a {
+	if got := realTail(t, buf.Bytes()).d.Folder; got != a {
 		t.Fatalf("folder %q, want %q", got, a)
 	}
 }
@@ -211,7 +216,7 @@ func TestHomeInGitFormsNoGroup(t *testing.T) {
 		}
 		cwdLines(&buf, n, 2, false)
 	}
-	if got := tailOf(t, buf.Bytes()).d.Folder; got != repo {
+	if got := realTail(t, buf.Bytes()).d.Folder; got != repo {
 		t.Fatalf("folder %q, want the repository", got)
 	}
 }
@@ -231,7 +236,7 @@ func TestRepositoryWithManySubfoldersWins(t *testing.T) {
 		}
 		cwdLines(&buf, sub, 1, false)
 	}
-	tl := tailOf(t, buf.Bytes())
+	tl := realTail(t, buf.Bytes())
 	if got := settled(t, tl, fixedNow); filepath.Dir(got) != mono {
 		t.Fatalf("folder %q, want a folder of mono", got)
 	}
@@ -247,13 +252,13 @@ func TestOnlyRecentRecordsCount(t *testing.T) {
 	cwdLines(&buf, a, 2000, false)
 	cwdLines(&buf, b, voteWindow/2+10, false)
 	whole := buf.Bytes()
-	if got := tailOf(t, whole).d.Folder; got != b {
+	if got := realTail(t, whole).d.Folder; got != b {
 		t.Fatalf("after a move for good: folder %q, want b", got)
 	}
 	p := filepath.Join(t.TempDir(), "s.jsonl")
 	half := bytes.LastIndexByte(whole[:len(whole)/2], '\n') + 1
 	writeFile(t, p, whole[:half])
-	tl := newTailer(p)
+	tl := newTailer(p, realProber(t))
 	_ = folderAfter(t, tl)
 	appendFile(t, p, whole[half:])
 	if got := folderAfter(t, tl); got != b {
@@ -264,8 +269,9 @@ func TestOnlyRecentRecordsCount(t *testing.T) {
 	}
 }
 
-// 100,000 records in distinct 64-deep folders index fast: folders are looked
-// up only while held, and only a few per update.
+// 100,000 records in distinct 64-deep folders: folders are looked up only
+// while held, and only a few per update. Counted, not timed: a loaded machine
+// slows the reading, not the number of lookups.
 func TestManyDeepFoldersIndexFast(t *testing.T) {
 	root := t.TempDir()
 	deep := root + strings.Repeat("/d", 63)
@@ -275,19 +281,33 @@ func TestManyDeepFoldersIndexFast(t *testing.T) {
 	}
 	p := filepath.Join(t.TempDir(), "s.jsonl")
 	writeFile(t, p, buf.Bytes())
-	tl := newTailer(p)
+	pr := realProber(t)
+	var batches, looks, checks atomic.Int32
+	run := pr.run
+	pr.run = func(jobs []probeJob, home string) []probeResult {
+		batches.Add(1)
+		for _, j := range jobs {
+			if j.look {
+				looks.Add(1)
+			}
+			if j.check {
+				checks.Add(1)
+			}
+		}
+		return run(jobs, home)
+	}
+	tl := newTailer(p, pr)
 	start := time.Now()
 	if _, err := tl.update(context.Background(), fixedNow); err != nil {
 		t.Fatal(err)
 	}
-	d := time.Since(start)
-	t.Logf("100,000 records in distinct 64-deep folders: %s", d)
-	limit := time.Second
-	if raceEnabled {
-		limit = 10 * time.Second
+	t.Logf("100,000 records in distinct 64-deep folders: %s", time.Since(start))
+	if b, l, c := batches.Load(), looks.Load(), checks.Load(); b != 1 || l > probeLookups || c > probeChecks {
+		t.Fatalf("one update ran %d batches, %d lookups, %d checks; want 1, at most %d, at most %d",
+			b, l, c, probeLookups, probeChecks)
 	}
-	if d > limit {
-		t.Fatalf("took %s, limit %s", d, limit)
+	if len(tl.held) > voteWindow {
+		t.Fatalf("%d folders held, window %d", len(tl.held), voteWindow)
 	}
 	if settled(t, tl, fixedNow) == "" {
 		t.Fatal("no folder")
@@ -309,32 +329,43 @@ func settled(t *testing.T, tl *tailer, now time.Time) string {
 	return ""
 }
 
-// blockProbes makes every lookup batch hang until the test ends, and counts
-// the batches running.
-func blockProbes(t *testing.T) *atomic.Int32 {
+// blockProbes makes every lookup batch of pr hang until the test ends.
+func blockProbes(t *testing.T, pr *prober) {
 	t.Helper()
-	release := make(chan struct{})
-	running := &atomic.Int32{}
-	old := probeRun
-	probeRun = func(jobs []probeJob, home string) []probeResult {
-		running.Add(1)
-		defer running.Add(-1)
-		<-release
-		return old(jobs, home)
+	gate := make(chan struct{})
+	run := pr.run
+	pr.run = func(jobs []probeJob, home string) []probeResult {
+		<-gate
+		return run(jobs, home)
 	}
-	t.Cleanup(func() {
-		close(release)
-		probeRun = old
-		for running.Load() > 0 {
-			time.Sleep(time.Millisecond)
-		}
-	})
-	return running
+	t.Cleanup(func() { close(gate) }) // before testProber's, which waits for the batches
 }
 
-// Item 1: one indexing pass waits for lookups once, not once per session.
+// expiries makes pr's deadlines fire at once and records them.
+func expiries(pr *prober) func() []time.Time {
+	var mu sync.Mutex
+	var got []time.Time
+	pr.expiry = func(until time.Time) <-chan time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		got = append(got, until)
+		return expiredNow
+	}
+	return func() []time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(got)
+	}
+}
+
+// Item 1: one indexing pass waits for lookups once, not once per session:
+// every session's update waits for the pass's one deadline, and a hung
+// lookup holds no update past it. A tailer outside a pass waits the budget.
 func TestPassWaitsForLookupsOnce(t *testing.T) {
-	blockProbes(t)
+	pr := realProber(t)
+	pr.slots = make(chan struct{}, 20) // every session gets its batch, and waits
+	blockProbes(t, pr)
+	got := expiries(pr)
 	root := t.TempDir()
 	var tls []*tailer
 	for i := range 20 {
@@ -342,20 +373,32 @@ func TestPassWaitsForLookupsOnce(t *testing.T) {
 		cwdLines(&buf, gitDir(t, filepath.Join(root, fmt.Sprintf("r%02d", i))), 5, false)
 		p := filepath.Join(t.TempDir(), "s.jsonl")
 		writeFile(t, p, buf.Bytes())
-		tls = append(tls, newTailer(p))
+		tls = append(tls, newTailer(p, pr))
 	}
-	start := time.Now()
-	deadline := start.Add(probeBudget)
+	deadline := time.Now().Add(pr.budget)
 	for _, tl := range tls {
 		tl.probeUntil = deadline
 		if _, err := tl.update(context.Background(), fixedNow); err != nil {
 			t.Fatal(err)
 		}
 	}
-	d := time.Since(start)
-	t.Logf("a pass over 20 sessions with hung lookups: %s", d)
-	if d > 150*time.Millisecond {
-		t.Fatalf("pass took %s", d)
+	waits := got()
+	if len(waits) != len(tls) {
+		t.Fatalf("%d waits for %d sessions", len(waits), len(tls))
+	}
+	for i, w := range waits {
+		if !w.Equal(deadline) {
+			t.Fatalf("session %d waited until %v, not the pass's deadline %v", i, w, deadline)
+		}
+	}
+	tls[0].probeUntil = time.Time{}
+	before := time.Now()
+	if _, err := tls[0].update(context.Background(), fixedNow.Add(folderRecheck)); err != nil {
+		t.Fatal(err)
+	}
+	after := got()
+	if len(after) != len(waits)+1 || after[len(waits)].Before(before.Add(pr.budget)) {
+		t.Fatalf("outside a pass: waits %v, want one until the budget from %v", after[len(waits):], before)
 	}
 }
 
@@ -380,7 +423,7 @@ func TestNoInterimFolder(t *testing.T) {
 		}
 		cwdLines(&buf, f, 1, false)
 	}
-	tl := tailOf(t, buf.Bytes())
+	tl := realTail(t, buf.Bytes())
 	if tl.d.Folder == other {
 		t.Fatal("the first update reported an interim folder")
 	}
@@ -389,10 +432,15 @@ func TestNoInterimFolder(t *testing.T) {
 	}
 }
 
-// Item 3: lookup batches in flight are bounded for the whole process, also
-// across a reset (a truncated transcript) and new tailers.
+// Item 3: lookup batches in flight are bounded for all the tailers sharing a
+// prober (the product has one per process, procProber), also across a reset
+// (a truncated transcript) and new tailers. Every batch hangs, so a tailer
+// that started one keeps it (t.probing) for the whole test; a reset tailer's
+// old batch keeps its slot.
 func TestLookupBatchesAreBounded(t *testing.T) {
-	running := blockProbes(t)
+	pr := realProber(t)
+	blockProbes(t, pr)
+	expiries(pr) // do not wait
 	root := t.TempDir()
 	var tls []*tailer
 	for i := range 20 {
@@ -400,19 +448,101 @@ func TestLookupBatchesAreBounded(t *testing.T) {
 		cwdLines(&buf, gitDir(t, filepath.Join(root, fmt.Sprintf("r%02d", i))), 5, false)
 		p := filepath.Join(t.TempDir(), "s.jsonl")
 		writeFile(t, p, buf.Bytes())
-		tl := newTailer(p)
-		tl.probeUntil = time.Now() // do not wait
+		tl := newTailer(p, pr)
 		_, _ = tl.update(context.Background(), fixedNow)
 		tls = append(tls, tl)
+	}
+	inFlight := func() int {
+		n := 0
+		for _, tl := range tls {
+			if tl.probing != nil {
+				n++
+			}
+		}
+		return n
+	}
+	if n := inFlight(); n != maxProbes || tls[0].probing == nil {
+		t.Fatalf("%d of 20 tailers started a batch (the first: %v), cap %d", n, tls[0].probing != nil, maxProbes)
 	}
 	var buf bytes.Buffer
 	cwdLines(&buf, filepath.Join(root, "r00"), 1, false)
 	writeFile(t, tls[0].path, buf.Bytes()) // shorter: read from zero
-	tls[0].probeUntil = time.Now()
 	_, _ = tls[0].update(context.Background(), fixedNow)
-	time.Sleep(20 * time.Millisecond)
-	if n := running.Load(); n > maxProbes {
-		t.Fatalf("%d lookup batches in flight, cap %d", n, maxProbes)
+	if tls[0].probing != nil {
+		t.Fatal("after a reset, a new batch started while the old one still holds its slot")
+	}
+	if n := inFlight(); n != maxProbes-1 {
+		t.Fatalf("%d tailers with a batch after the reset, want %d (and the reset one's old batch)", n, maxProbes-1)
+	}
+}
+
+// The product shares one prober, with the cap and budget above.
+func TestOneProberPerProcess(t *testing.T) {
+	a := New(Options{Home: t.TempDir()}).(*adapter)
+	if a.prober != procProber || cap(procProber.slots) != maxProbes || procProber.budget != probeBudget ||
+		procProber.run == nil || procProber.expiry == nil {
+		t.Fatal("the adapter does not use the process's prober, or it is incomplete")
+	}
+	// One batch through it, to the end: real lookups, the real deadline. It is
+	// not timed: a loaded machine may need more than one update.
+	repo := gitDir(t, filepath.Join(t.TempDir(), "repo"))
+	var buf bytes.Buffer
+	cwdLines(&buf, repo, 3, false)
+	p := filepath.Join(t.TempDir(), "s.jsonl")
+	writeFile(t, p, buf.Bytes())
+	tl := newTailer(p, procProber)
+	if got := settled(t, tl, fixedNow); got != repo {
+		t.Fatalf("folder %q through the process's prober, want the repository", got)
+	}
+	drain(procProber)
+}
+
+// at is the product's deadline: one already passed fires at once, a later
+// one fires at it, not before, and neither is ever nil (a nil channel would
+// wait for a hung lookup for good).
+func TestDeadlineFires(t *testing.T) {
+	past := at(time.Now().Add(-time.Second))
+	if past == nil {
+		t.Fatal("a passed deadline gave a nil channel")
+	}
+	select {
+	case <-past:
+	default:
+		t.Fatal("a passed deadline did not fire at once")
+	}
+	until := time.Now().Add(20 * time.Millisecond)
+	later := at(until)
+	if later == nil {
+		t.Fatal("a later deadline gave a nil channel")
+	}
+	<-later // the test's own timeout catches one that never fires
+	if now := time.Now(); now.Before(until) {
+		t.Fatalf("fired %s before its deadline", until.Sub(now))
+	}
+}
+
+// Reading a transcript costs the same per record at any length: the CPU
+// time of one update at 4n records is about 4 times that at n, a quadratic
+// step 16 times.
+func TestUpdateIsLinear(t *testing.T) {
+	pr := staticProber(t)
+	cost := func(n int) time.Duration {
+		var buf bytes.Buffer
+		for i := range n {
+			cwdLines(&buf, fmt.Sprintf("/w/f%03d", i%300), 1, false)
+		}
+		p := filepath.Join(t.TempDir(), "s.jsonl")
+		writeFile(t, p, buf.Bytes())
+		return cpucost.Of(3, func() {
+			if _, err := newTailer(p, pr).update(context.Background(), fixedNow); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	t1, t4 := cost(25000), cost(100000)
+	t.Logf("one update: %s at 25,000 records, %s at 100,000", t1, t4)
+	if t4 > 8*t1+5*time.Millisecond {
+		t.Fatalf("reading grows faster than linear: %s at n, %s at 4n", t1, t4)
 	}
 }
 
@@ -425,7 +555,7 @@ func TestReappearedFolderIsLookedUpAgain(t *testing.T) {
 	var buf bytes.Buffer
 	cwdLines(&buf, wt, 50, false)
 	cwdLines(&buf, other, 10, false)
-	tl := tailOf(t, buf.Bytes())
+	tl := realTail(t, buf.Bytes())
 	if got := settled(t, tl, fixedNow); got != repo {
 		t.Fatalf("while missing: folder %q, want its ancestor repo", got)
 	}
@@ -452,7 +582,7 @@ func TestControlCharacterFolderDoesNotVote(t *testing.T) {
 	cwdLines(&buf, a, 3, false)
 	cwdLines(&buf, filepath.Join(root, "b\x00c"), 10, false)
 	cwdLines(&buf, filepath.Join(root, "d\x1be"), 10, false)
-	tl := tailOf(t, buf.Bytes())
+	tl := realTail(t, buf.Bytes())
 	if got := settled(t, tl, fixedNow); got != a {
 		t.Fatalf("folder %q, want a", got)
 	}
@@ -461,18 +591,47 @@ func TestControlCharacterFolderDoesNotVote(t *testing.T) {
 	}
 }
 
-// staticFolders makes every folder exist and be its own group, for tests
-// about reading transcripts whose fixture paths are not on this machine (on
-// some systems looking them up waits on an automounter).
-func staticFolders(t *testing.T) {
+// testProber returns a prober of the test's own: its own slots, so a batch
+// another test left running cannot hold one, and no deadline, so an update
+// waits for its lookups however loaded the machine is. A nil run does the
+// real lookups. The test ends only when its batches have.
+func testProber(t *testing.T, run func([]probeJob, string) []probeResult) *prober {
 	t.Helper()
-	old := probeRun
-	probeRun = func(jobs []probeJob, _ string) []probeResult {
+	if run == nil {
+		run = runProbe
+	}
+	pr := &prober{
+		run: run, slots: make(chan struct{}, maxProbes), budget: probeBudget,
+		expiry: func(time.Time) <-chan time.Time { return nil },
+	}
+	t.Cleanup(func() { drain(pr) })
+	return pr
+}
+
+// drain returns when no batch of pr is in flight.
+func drain(pr *prober) {
+	for len(pr.slots) > 0 {
+		runtime.Gosched()
+	}
+}
+
+// realProber looks folders up on this machine: for fixtures in temporary
+// folders.
+func realProber(t *testing.T) *prober {
+	t.Helper()
+	return testProber(t, nil)
+}
+
+// staticProber makes every folder exist and be its own group, for tests
+// about reading transcripts whose fixture paths are not on this machine (on
+// macOS /home is automounted: one lookup there can outlast the budget).
+func staticProber(t *testing.T) *prober {
+	t.Helper()
+	return testProber(t, func(jobs []probeJob, _ string) []probeResult {
 		out := make([]probeResult, 0, len(jobs))
 		for _, j := range jobs {
 			out = append(out, probeResult{probeJob: j, group: j.folder})
 		}
 		return out
-	}
-	t.Cleanup(func() { probeRun = old })
+	})
 }

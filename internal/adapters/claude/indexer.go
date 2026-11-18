@@ -96,7 +96,7 @@ func (ix *indexer) run(ctx context.Context) {
 			}
 			return strings.Compare(x.id, y.id)
 		})
-		ix.passUntil = time.Now().Add(probeBudget)
+		ix.passUntil = time.Now().Add(ix.a.prober.budget)
 		for _, j := range order {
 			if ctx.Err() != nil {
 				return
@@ -141,7 +141,7 @@ func (ix *indexer) forget(jobs map[string]job) {
 func (ix *indexer) tail(ctx context.Context, path string, now time.Time) *tailer {
 	t := ix.tailers[path]
 	if t == nil {
-		t = newTailer(path)
+		t = newTailer(path, ix.a.prober)
 		ix.tailers[path] = t
 	}
 	t.probeUntil = ix.passUntil
@@ -150,7 +150,7 @@ func (ix *indexer) tail(ctx context.Context, path string, now time.Time) *tailer
 }
 
 // index updates one session's transcripts and merges what they say. The
-// subagents add their pull requests, spawns and activity; the main transcript
+// subagents add their pull requests, artifacts, spawns and activity; the main transcript
 // alone says the model, folder, turns and messages received.
 func (ix *indexer) index(ctx context.Context, j job) result {
 	now := ix.a.now()
@@ -158,6 +158,7 @@ func (ix *indexer) index(ctx context.Context, j job) result {
 	res := result{id: j.id, d: main.d}
 	res.d.TurnEnds = slices.Clone(main.d.TurnEnds)
 	res.d.CreatedPRs = slices.Clone(main.d.CreatedPRs)
+	res.d.Artifacts = slices.Clone(main.d.Artifacts)
 	res.d.SpawnedNames = slices.Clone(main.d.SpawnedNames)
 	res.d.SpawnedTerminalIDs = slices.Clone(main.d.SpawnedTerminalIDs)
 	res.d.PeerSenders = slices.Clone(main.d.PeerSenders)
@@ -189,6 +190,7 @@ func (ix *indexer) index(ctx context.Context, j job) result {
 				res.d.CreatedPRs = append(res.d.CreatedPRs, pr)
 			}
 		}
+		res.d.Artifacts = mergeArtifacts(res.d.Artifacts, sd.Artifacts)
 		for _, n := range sd.SpawnedNames {
 			res.d.SpawnedNames = addCapped(res.d.SpawnedNames, n, maxSpawns)
 		}

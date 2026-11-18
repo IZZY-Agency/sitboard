@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/IZZY-Agency/sitboard/internal/cpucost"
 )
 
 func checkNames(t *testing.T, cases map[string][]string) {
@@ -176,10 +178,11 @@ func TestSpawnAndPRInOneCommand(t *testing.T) {
 	}
 }
 
-// Parsing is linear. Each input is timed at size n and 4n (the median of five
-// runs): a linear parser takes about 4 times as long, a quadratic one 16
-// times, so a limit of 8 times holds against noise from the race detector or
-// parallel packages and still catches a quadratic step. Word-heavy inputs go
+// Parsing is linear. Each input's CPU time is taken at size n and 4n (the
+// least of five runs, so a loaded machine does not count): a linear parser
+// takes about 4 times as long, a quadratic one 16 times, so a limit of 8
+// times holds against noise from the race detector and still catches a
+// quadratic step. Word-heavy inputs go
 // up to about 60,000 words (under the word cap); byte-heavy ones up to about
 // 4 MiB, the longest transcript line read.
 func TestParsingIsLinear(t *testing.T) {
@@ -208,22 +211,17 @@ func TestParsingIsLinear(t *testing.T) {
 		"backticks":       func(k int) string { return rep("`echo x` ", k*words/4) },
 	}
 	timeOf := func(in string) time.Duration {
-		var runs []time.Duration
-		for range 5 {
-			start := time.Now()
+		return cpucost.Of(5, func() {
 			c := parseCommand(in)
 			_ = c.runs("gh", "pr", "create")
 			_ = c.runs("agtermctl", "session", "new")
 			_ = c.spawnNames()
-			runs = append(runs, time.Since(start))
-		}
-		slices.Sort(runs)
-		return runs[len(runs)/2]
+		})
 	}
 	for name, gen := range inputs {
 		t1, t4 := timeOf(gen(1)), timeOf(gen(4))
 		t.Logf("%s: %s at n, %s at 4n", name, t1, t4)
-		if t4 > 8*t1+30*time.Millisecond {
+		if t4 > 8*t1+5*time.Millisecond {
 			t.Errorf("%s grows faster than linear: %s at n, %s at 4n", name, t1, t4)
 		}
 		if t4 > 10*time.Second {

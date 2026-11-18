@@ -46,6 +46,7 @@ func TestSnapshotMatchesContractGoldenShape(t *testing.T) {
 	e.prs.prs = []model.PullRequest{{Repo: exRepo, Number: 101, Title: "t", URL: "https://github.com/example-org/example-repo/pull/101", State: model.PRStateOpen, Checks: model.ChecksFailing, ClosingIssues: []int{7}}}
 	s := session("s1", model.StatusFinished, tNow)
 	s.CreatedPRs = []model.PRRef{{Repo: exRepo, Number: 101}}
+	s.Artifacts = []model.ArtifactRef{{URL: "https://claude.ai/artifact/exampleArtifact0001", Title: "Placeholder", PublishedAt: tNow}}
 	s.TerminalID = termUUID
 	s.Parent = model.Of(claudeKey("c"))
 	e.board.applySync(session("c", model.StatusBusy, tNow))
@@ -100,6 +101,9 @@ func TestSeqIncreasesOnlyOnChange(t *testing.T) {
 	}
 }
 
+// Publishes are at least publishEvery apart, so a burst of changes reaches a
+// subscriber as a few snapshots, the last one the latest. The bound comes
+// from how long the burst really took, so a loaded machine does not fail it.
 func TestSubscribeCoalescesBurstsToFourPerSecond(t *testing.T) {
 	b := newTestBoard(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -116,18 +120,19 @@ func TestSubscribeCoalescesBurstsToFourPerSecond(t *testing.T) {
 			last = s
 		}
 	}()
-	deadline := time.Now().Add(time.Second)
+	start := time.Now()
 	n := 0
-	for time.Now().Before(deadline) {
+	for time.Since(start) < time.Second {
 		n++
 		b.applySync(busySession("s1", tNow.Add(time.Duration(n)*time.Second)))
 		time.Sleep(2 * time.Millisecond)
 	}
-	time.Sleep(2 * publishEvery) // let the trailing publish land
+	waitPublished(b) // the trailing publish has landed
+	took := time.Since(start)
 	cancel()
 	<-done
-	if received > 6 {
-		t.Fatalf("%d snapshots for a 1s burst of %d changes, want about 4", received, n)
+	if most := int(took/publishEvery) + 1; received > most {
+		t.Fatalf("%d snapshots for a %s burst of %d changes, want at most %d", received, took, n, most)
 	}
 	if received == 0 || last.Seq != b.Snapshot().Seq {
 		t.Fatalf("subscriber did not end on the latest snapshot: got seq %d, latest %d", last.Seq, b.Snapshot().Seq)
@@ -141,7 +146,7 @@ func TestSubscriberGetsLatestNotBacklog(t *testing.T) {
 	for _, st := range []source.State{source.StateMissing, source.StateFailing, source.StateOK} {
 		b.SetSources([]source.Status{{Kind: source.KindClaude, State: st}})
 	}
-	time.Sleep(2 * publishEvery)
+	waitPublished(b)
 	s := <-ch
 	if s.Sources[0].State != contract.SourceOK || s.Seq != b.Snapshot().Seq {
 		t.Fatalf("got seq %d state %q, want the latest", s.Seq, s.Sources[0].State)
@@ -153,6 +158,66 @@ func TestSubscriberGetsLatestNotBacklog(t *testing.T) {
 	}
 	cancel()
 	for range ch {
+	}
+}
+
+// After Run returns nothing is published: a publish scheduled before is
+// cancelled, and a change after it publishes nothing, also when the interval
+// has passed and a publish would go out at once.
+func TestNothingIsPublishedAfterRunReturns(t *testing.T) {
+	b := newTestBoard(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch := b.Subscribe(ctx)
+	scheduled := func() bool {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		return b.pubTimer != nil
+	}
+	states := []source.State{source.StateMissing, source.StateFailing}
+	for i := 0; !scheduled(); i++ { // the second change inside the interval is scheduled
+		if i == 100 {
+			t.Fatal("setup: no publish was ever scheduled")
+		}
+		b.SetSources([]source.Status{{Kind: source.KindClaude, State: states[i%2]}})
+	}
+	ended, end := context.WithCancel(context.Background())
+	end()
+	if err := b.Run(ended); err != nil {
+		t.Fatal(err)
+	}
+	if scheduled() {
+		t.Fatal("a publish is still scheduled after Run returned")
+	}
+	select { // what was published before Run returned
+	case <-ch:
+	default:
+	}
+	b.mu.Lock()
+	b.lastPub = time.Time{} // the interval has passed: a publish would go out at once
+	b.mu.Unlock()
+	b.SetSources([]source.Status{{Kind: source.KindClaude, State: source.StateOK}})
+	select {
+	case s := <-ch:
+		t.Fatalf("published seq %d after Run returned", s.Seq)
+	default:
+	}
+	if scheduled() {
+		t.Fatal("a change after Run returned scheduled a publish")
+	}
+}
+
+// waitPublished returns when no publish is scheduled: the latest change has
+// been published.
+func waitPublished(b *Board) {
+	for {
+		b.mu.Lock()
+		pending := b.pubTimer != nil
+		b.mu.Unlock()
+		if !pending {
+			return
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 

@@ -6,6 +6,7 @@ package app
 
 import (
 	"context"
+	"errors"
 
 	"github.com/IZZY-Agency/sitboard/internal/contract"
 )
@@ -35,8 +36,21 @@ type Board interface {
 	MarkSeen(cardID string) error
 	// MarkCatchupRead moves the catch-up marker to now.
 	MarkCatchupRead() error
+	// ForgetGrouping forgets the grouping of a project that has parts now:
+	// its parts are no longer grouped under it, and its folder does not group
+	// again until no agent has sat in it for a while. ErrUnknownProject when
+	// the project is not on the board, ErrNotGrouping when it has no parts;
+	// any other error means the state file could not be written and nothing
+	// changed.
+	ForgetGrouping(projectID string) error
 
 	// TerminalFor resolves a card to its agterm session id. ok is false when
 	// the card is unknown or has no terminal in the current tree.
 	TerminalFor(cardID string) (terminalID string, ok bool)
 }
+
+// Errors ForgetGrouping returns for a request it refuses.
+var (
+	ErrUnknownProject = errors.New("app: unknown project")
+	ErrNotGrouping    = errors.New("app: the project is not a grouping")
+)

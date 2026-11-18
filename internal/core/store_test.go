@@ -251,7 +251,7 @@ func TestPlainShellsCountedNotCarded(t *testing.T) {
 
 func TestRootsLimitProjects(t *testing.T) {
 	t.Setenv("HOME", testHome)
-	b := New(Options{Now: func() time.Time { return tNow }, Roots: []string{"~/projects/alpha"}})
+	b := newBoard(t, Options{Now: func() time.Time { return tNow }, Roots: []string{"~/projects/alpha"}})
 	in := busySession("s1", tNow)
 	out := busySession("s2", tNow)
 	out.Folder = beta

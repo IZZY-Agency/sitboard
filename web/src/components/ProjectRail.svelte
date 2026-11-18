@@ -11,6 +11,7 @@
   import { ms, VIEW_MS } from '../motion';
   import Count from './Count.svelte';
   import Dots from './Dots.svelte';
+  import ForgetGrouping from './ForgetGrouping.svelte';
   import GroupSwitch from './GroupSwitch.svelte';
 
   let {
@@ -19,12 +20,15 @@
     onselect,
     mode,
     onmode,
+    onforget,
   }: {
     g: Grouping;
     sel: Sel;
     onselect: (s: Sel) => void;
     mode: Mode;
     onmode: (m: Mode) => void;
+    /** Forgets a project's grouping; resolves true when the server did. */
+    onforget?: (p: { id: string; name: string }) => Promise<boolean>;
   } = $props();
 
   const all = $derived(dotsOf(g.cards));
@@ -65,10 +69,18 @@
     'all',
     ...g.groups.flatMap((grp) => [
       `g:${grp.key}`,
-      ...grp.projects.flatMap((p) => [`p:${p.id}`, ...(p.parts.length && isOpen(p.id) ? p.parts.map((e) => `q:${e.id}`) : [])]),
+      ...grp.projects.flatMap((p) => [`p:${p.id}`, ...(p.parts.length && isOpen(p.id) ? [...p.parts.map((e) => `q:${e.id}`), ...(forgets(p.id) ? [`f:${p.id}`] : [])] : [])]),
     ]),
   ]);
   const stop = $derived(tabStop(rowKeys, focused, keyOf(sel)));
+  // "Forget grouping" shows under the parts of the selected project only.
+  const forgets = (id: string) => !!onforget && selTop === id && !!g.topById.get(id)?.parts.length;
+
+  async function forget(p: { id: string; name: string }) {
+    const ok = (await onforget?.(p)) ?? false;
+    if (ok) nav?.querySelector<HTMLElement>(`[data-key="p:${CSS.escape(p.id)}"]`)?.focus();
+    return ok;
+  }
 
   // A row that vanishes, or parts that close under the focus, hand focus on.
   const keeper = focusKeeper(() => nav, '[data-key]');
@@ -250,6 +262,18 @@
                       </button>
                     </li>
                   {/each}
+                  {#if forgets(p.id)}
+                    {@const fp = { id: p.id, name: p.name }}
+                    <li>
+                      {#key p.id}<ForgetGrouping
+                          compact
+                          name={p.name}
+                          dataKey="f:{p.id}"
+                          tabindex={stop === `f:${p.id}` ? 0 : -1}
+                          onforget={() => forget(fp)}
+                        />{/key}
+                    </li>
+                  {/if}
                 </ul>
               {/if}
             </li>

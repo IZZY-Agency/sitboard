@@ -45,9 +45,10 @@ func api(opts Options) http.Handler {
 			}
 			writeJSON(w, l)
 		}},
-		contract.PathJump:        {http.MethodPost, jump(opts)},
-		contract.PathSeen:        {http.MethodPost, seen(opts)},
-		contract.PathCatchupRead: {http.MethodPost, catchupRead(opts)},
+		contract.PathJump:           {http.MethodPost, jump(opts)},
+		contract.PathSeen:           {http.MethodPost, seen(opts)},
+		contract.PathCatchupRead:    {http.MethodPost, catchupRead(opts)},
+		contract.PathForgetGrouping: {http.MethodPost, forgetGrouping(opts)},
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rt, ok := routes[r.URL.Path]

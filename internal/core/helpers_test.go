@@ -139,8 +139,22 @@ func newEnv(t *testing.T) *testEnv {
 		prs:   &fakePRs{},
 		state: st,
 	}
-	e.board = New(Options{Repos: e.repos, PRs: e.prs, State: st, Now: e.clock.Now, StaleAfter: 20 * time.Minute})
+	e.board = newBoard(t, Options{Repos: e.repos, PRs: e.prs, State: st, Now: e.clock.Now, StaleAfter: 20 * time.Minute})
 	return e
+}
+
+// newBoard is New for a test: the board ends with its test, as when Run
+// returns (a scheduled publish is cancelled, gone checks change nothing),
+// and the test waits for the git lookups and gone checks it started. No
+// timer or goroutine of one test's board runs into the next test.
+func newBoard(t *testing.T, opts Options) *Board {
+	t.Helper()
+	b := New(opts)
+	t.Cleanup(func() {
+		b.markClosed()
+		b.resolving.Wait()
+	})
+	return b
 }
 
 func newTestBoard(t *testing.T) *Board { return newEnv(t).board }

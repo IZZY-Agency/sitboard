@@ -58,11 +58,10 @@ func ts(s string) time.Time {
 }
 
 func TestTailReadsOnlyAppendedBytes(t *testing.T) {
-	staticFolders(t)
 	p := filepath.Join(t.TempDir(), "s.jsonl")
 	first := fixture(t, "coordinator.jsonl")
 	writeFile(t, p, first)
-	tl := newTailer(p)
+	tl := newTailer(p, staticProber(t))
 	if _, err := tl.update(context.Background(), fixedNow); err != nil {
 		t.Fatal(err)
 	}
@@ -90,11 +89,10 @@ func TestTailReadsOnlyAppendedBytes(t *testing.T) {
 }
 
 func TestIncompleteLastLineIsNotConsumed(t *testing.T) {
-	staticFolders(t)
 	p := filepath.Join(t.TempDir(), "s.jsonl")
 	full := `{"type":"system","subtype":"turn_duration","timestamp":"2026-11-17T08:50:00.000Z","cwd":"/home/dev/projects/gamma"}` + "\n"
 	writeFile(t, p, []byte(full[:40]))
-	tl := newTailer(p)
+	tl := newTailer(p, staticProber(t))
 	if _, err := tl.update(context.Background(), fixedNow); err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +111,7 @@ func TestIncompleteLastLineIsNotConsumed(t *testing.T) {
 func TestShrunkFileRestartsFromZero(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "s.jsonl")
 	writeFile(t, p, fixture(t, "coordinator.jsonl"))
-	tl := newTailer(p)
+	tl := newTailer(p, staticProber(t))
 	_, _ = tl.update(context.Background(), fixedNow)
 	if len(tl.d.CreatedPRs) != 1 {
 		t.Fatalf("setup: %+v", tl.d.CreatedPRs)
@@ -136,7 +134,7 @@ func TestReplacedFileRestartsFromZero(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "s.jsonl")
 	writeFile(t, p, fixture(t, "worker.jsonl"))
-	tl := newTailer(p)
+	tl := newTailer(p, staticProber(t))
 	_, _ = tl.update(context.Background(), fixedNow)
 	// A bigger, different file renamed into place.
 	writeFile(t, filepath.Join(dir, "new"), fixture(t, "coordinator.jsonl"))
@@ -152,7 +150,6 @@ func TestReplacedFileRestartsFromZero(t *testing.T) {
 }
 
 func TestHugeAndBadLinesAreSkipped(t *testing.T) {
-	staticFolders(t)
 	p := filepath.Join(t.TempDir(), "s.jsonl")
 	var b bytes.Buffer
 	b.WriteString("not json at all\n")
@@ -160,7 +157,7 @@ func TestHugeAndBadLinesAreSkipped(t *testing.T) {
 	b.WriteString(`{"type":"user","timestamp":"2026-11-17T08:00:01.000Z","message":{"content":` + `"` + strings.Repeat("x", maxLine+10) + `"}}` + "\n")
 	b.WriteString(`{"type":"system","subtype":"turn_duration","timestamp":"2026-11-17T08:00:02.000Z"}` + "\n")
 	writeFile(t, p, b.Bytes())
-	tl := newTailer(p)
+	tl := newTailer(p, staticProber(t))
 	if _, err := tl.update(context.Background(), fixedNow); err != nil {
 		t.Fatal(err)
 	}
@@ -173,10 +170,9 @@ func TestHugeAndBadLinesAreSkipped(t *testing.T) {
 }
 
 func TestDerivesModelFolderLastActivityTurnEnds(t *testing.T) {
-	staticFolders(t)
 	p := filepath.Join(t.TempDir(), "s.jsonl")
 	writeFile(t, p, fixture(t, "coordinator.jsonl"))
-	tl := newTailer(p)
+	tl := newTailer(p, staticProber(t))
 	if _, err := tl.update(context.Background(), fixedNow); err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +198,7 @@ func TestTurnEndsKeepOnly7Days(t *testing.T) {
 		fmt.Fprintf(&b, `{"type":"system","subtype":"turn_duration","timestamp":%q}`+"\n", s)
 	}
 	writeFile(t, p, b.Bytes())
-	tl := newTailer(p)
+	tl := newTailer(p, staticProber(t))
 	_, _ = tl.update(context.Background(), fixedNow)
 	if len(tl.d.TurnEnds) != 1 || !tl.d.TurnEnds[0].Equal(ts("2026-11-12T00:00:00Z")) {
 		t.Fatalf("TurnEnds = %v", tl.d.TurnEnds)
@@ -212,7 +208,7 @@ func TestTurnEndsKeepOnly7Days(t *testing.T) {
 func TestCreatedPRsFollowSpikeRule(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "s.jsonl")
 	writeFile(t, p, fixture(t, "coordinator.jsonl"))
-	tl := newTailer(p)
+	tl := newTailer(p, staticProber(t))
 	_, _ = tl.update(context.Background(), fixedNow)
 	// 101 came from the session's own `gh pr create`; 102 was merged and 103
 	// viewed, and both appear in pr-link records: they must be dropped.
@@ -225,7 +221,7 @@ func TestCreatedPRsFollowSpikeRule(t *testing.T) {
 func TestSpawnNamesAndTerminalIDs(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "s.jsonl")
 	writeFile(t, p, fixture(t, "coordinator.jsonl"))
-	tl := newTailer(p)
+	tl := newTailer(p, staticProber(t))
 	_, _ = tl.update(context.Background(), fixedNow)
 	if !slices.Equal(tl.d.SpawnedNames, []string{"worker-a"}) {
 		t.Errorf("SpawnedNames = %v", tl.d.SpawnedNames)
@@ -282,7 +278,7 @@ func TestNoTranscriptTextInFacts(t *testing.T) {
 	writeFile(t, filepath.Join(home, "t.jsonl"), fixture(t, "coordinator.jsonl"))
 	writeFile(t, filepath.Join(home, "w.jsonl"), fixture(t, "worker.jsonl"))
 	for _, f := range []string{"t.jsonl", "w.jsonl"} {
-		tl := newTailer(filepath.Join(home, f))
+		tl := newTailer(filepath.Join(home, f), staticProber(t))
 		_, _ = tl.update(context.Background(), fixedNow)
 		b, _ := json.Marshal(tl.d)
 		if bytes.Contains(b, []byte("CANARY")) {
@@ -311,11 +307,25 @@ func toolCall(b *bytes.Buffer, id, cmd, result string, sidechain bool) {
 	b.WriteByte('\n')
 }
 
+// tailOf reads a transcript in one update; every folder exists and is its
+// own group (staticProber).
 func tailOf(t *testing.T, b []byte) *tailer {
+	t.Helper()
+	return tailWith(t, staticProber(t), b)
+}
+
+// realTail is tailOf with the real folder lookups, for fixtures in
+// temporary folders.
+func realTail(t *testing.T, b []byte) *tailer {
+	t.Helper()
+	return tailWith(t, realProber(t), b)
+}
+
+func tailWith(t *testing.T, pr *prober, b []byte) *tailer {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "s.jsonl")
 	writeFile(t, p, b)
-	tl := newTailer(p)
+	tl := newTailer(p, pr)
 	if _, err := tl.update(context.Background(), fixedNow); err != nil {
 		t.Fatal(err)
 	}
@@ -359,7 +369,6 @@ func TestSpawnOnlyAtCommandPosition(t *testing.T) {
 }
 
 func TestSidechainLinesDoNotSetSessionFacts(t *testing.T) {
-	staticFolders(t)
 	var b bytes.Buffer
 	b.WriteString(`{"type":"assistant","isSidechain":false,"timestamp":"2026-11-17T08:00:00.000Z","cwd":"/home/dev/projects/alpha","message":{"model":"claude-opus-5-5"}}` + "\n")
 	b.WriteString(`{"type":"assistant","isSidechain":true,"timestamp":"2026-11-17T08:01:00.000Z","cwd":"/home/dev/projects/beta","message":{"model":"claude-haiku-5-5"}}` + "\n")
@@ -406,7 +415,7 @@ func TestUpdateStopsWhenContextEnds(t *testing.T) {
 	}
 	p := filepath.Join(t.TempDir(), "s.jsonl")
 	writeFile(t, p, b.Bytes())
-	tl := newTailer(p)
+	tl := newTailer(p, staticProber(t))
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if _, err := tl.update(ctx, fixedNow); err == nil {
@@ -426,7 +435,7 @@ func TestUpdateStopsWhenContextEnds(t *testing.T) {
 func TestUnchangedFileIsNotOpened(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "s.jsonl")
 	writeFile(t, p, fixture(t, "worker.jsonl"))
-	tl := newTailer(p)
+	tl := newTailer(p, staticProber(t))
 	if _, err := tl.update(context.Background(), fixedNow); err != nil {
 		t.Fatal(err)
 	}

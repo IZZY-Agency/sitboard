@@ -45,7 +45,7 @@ export function live(snapshot: Snapshot) {
   return feedOf({ conn: 'live', snapshot });
 }
 
-export function recordActions(answer: Partial<Record<'jump' | 'seen', ActionResult>> = {}) {
+export function recordActions(answer: Partial<Record<'jump' | 'seen' | 'forgetGrouping', ActionResult>> = {}) {
   const calls: Array<[string, string]> = [];
   const actions: Actions = {
     jump: async (id) => {
@@ -55,6 +55,10 @@ export function recordActions(answer: Partial<Record<'jump' | 'seen', ActionResu
     seen: async (id) => {
       calls.push(['seen', id]);
       return answer.seen ?? { ok: true };
+    },
+    forgetGrouping: async (id) => {
+      calls.push(['forgetGrouping', id]);
+      return answer.forgetGrouping ?? { ok: true };
     },
   };
   return { calls, actions };

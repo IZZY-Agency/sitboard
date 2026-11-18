@@ -35,7 +35,9 @@ jobs:
           version: v2.15.0
           install-only: true
 
-      # make check runs the private-material guard over the tree and the whole
-      # history; CI has no deny-list, so it says so explicitly.
+      # make check runs the private-material guard over the tree and over the
+      # history of this branch, main, origin/main and the tags (the full scan
+      # of every ref is make private-all); CI has no deny-list, so it says so
+      # explicitly.
       - run: make check PRIVATE_FLAGS=--no-denylist
       - run: make build

@@ -10,6 +10,18 @@
 #                                         name in every tree, every file version (binary
 #                                         content too, merge results too), and every ref name
 #                                         (not authors, committers or taggers)
+#   scripts/check-private.sh --history --scope=branch
+#                                         the same, for this branch only: every object
+#                                         reachable from HEAD, the local main,
+#                                         origin/main and every tag (each back to its
+#                                         root), and those ref names; other branches, the
+#                                         stash, notes and other refs are left out, and the
+#                                         report says how many. make check uses this, so
+#                                         one worktree's unfinished branch cannot fail
+#                                         another's. The full scan of this repository is
+#                                         run by hand: make private-all, and --pull-refs
+#                                         before going public. publish.sh's gate scans the
+#                                         public repository's whole history after its commit
 #   scripts/check-private.sh --history --pull-refs
 #                                         also fetch origin's refs/pull/*/head (pull request
 #                                         heads that no local ref reaches) into
@@ -59,6 +71,8 @@ denylist="${XDG_CONFIG_HOME:-$HOME/.config}/sitboard-dev/denylist"
 mode="tree"
 text_file=""
 pull_refs=0
+scope="all"
+scope_note=""  # history: which refs were read, for the summary line
 no_deny=0
 pull_ns="refs/check-private/pull"
 remove_pull_refs="git for-each-ref --format='delete %(refname)' refs/check-private/ | git update-ref --stdin"
@@ -67,6 +81,7 @@ while (($# > 0)); do
   case "$1" in
     --history) mode="history" ;;
     --pull-refs) pull_refs=1 ;;
+    --scope=all|--scope=branch) scope="${1#--scope=}" ;;
     --no-denylist) no_deny=1 ;;
     --text)
       mode="text"
@@ -82,6 +97,14 @@ while (($# > 0)); do
 done
 if ((pull_refs)) && [[ "$mode" != "history" ]]; then
   echo "check-private: --pull-refs works with --history only" >&2
+  exit 2
+fi
+if [[ "$scope" != "all" && "$mode" != "history" ]]; then
+  echo "check-private: --scope works with --history only" >&2
+  exit 2
+fi
+if [[ "$scope" == "branch" ]] && ((pull_refs)); then
+  echo "check-private: --pull-refs is for the full scan; it cannot be used with --scope=branch" >&2
   exit 2
 fi
 
@@ -314,9 +337,41 @@ case "$mode" in
         echo "check-private: warning: origin has no refs/pull/*/head (is origin on GitHub?); only local refs are scanned" >&2
       fi
     fi
-    git for-each-ref --format='%(refname)' > "$tmp/refs" || die "git for-each-ref failed"
-    git rev-list --objects --no-object-names --all > "$tmp/objects" \
-      || die "git rev-list failed (is this a git repo?)"
+    git for-each-ref --format='%(refname)' > "$tmp/refs.all" || die "git for-each-ref failed"
+    if [[ "$scope" == "branch" ]]; then
+      # HEAD (by its branch name, or HEAD when detached), main and
+      # origin/main where they exist, and every tag (few, and shared on
+      # purpose: their names, annotated messages and what they point at).
+      # Only these refs' names are read.
+      head_ref="$(git symbolic-ref -q HEAD)" || head_ref="HEAD"
+      git rev-parse -q --verify "HEAD^{commit}" > /dev/null \
+        || die "HEAD names no commit (a branch with no commit yet?); commit first, or run the full scan, --history"
+      git for-each-ref --format='%(refname)' refs/tags/ > "$tmp/tags" || die "git for-each-ref failed"
+      : > "$tmp/refs"
+      tips=()
+      while IFS= read -r r; do
+        grep -qxF "$r" "$tmp/refs" && continue
+        # A tag may point at a tree or a blob: any object will do.
+        git rev-parse -q --verify "$r^{object}" > /dev/null || continue
+        printf '%s\n' "$r" >> "$tmp/refs"
+        tips+=("$r")
+      done < <(printf '%s\n' "$head_ref" refs/heads/main refs/remotes/origin/main; cat "$tmp/tags")
+      left="$(grep -cvxF -f "$tmp/refs" "$tmp/refs.all")"
+      grep_ok $? || die "grep failed on the ref names"
+      # Named by fixed words only: the branch's own name can hold private text.
+      shown="HEAD"
+      grep -qxF refs/heads/main "$tmp/refs" && shown="$shown, main"
+      grep -qxF refs/remotes/origin/main "$tmp/refs" && shown="$shown, origin/main"
+      shown="$shown, $(grep -c . "$tmp/tags") tag(s)"
+      scope_note="branch scope: $shown; $left other ref(s) not scanned (other branches, the stash, notes), the full scan is --history"
+      git rev-list --objects --no-object-names "${tips[@]}" -- > "$tmp/objects" \
+        || die "git rev-list failed (is this a git repo?)"
+    else
+      cp "$tmp/refs.all" "$tmp/refs" || die "cp failed"
+      scope_note="all refs"
+      git rev-list --objects --no-object-names --all > "$tmp/objects" \
+        || die "git rev-list failed (is this a git repo?)"
+    fi
     git cat-file --batch < "$tmp/objects" \
       | perl -e "$history_prog" "$tmp/refs" "$tmp/history.idx" "${asset_exts// /|}" > "$tmp/history" \
       || die "reading the history failed"
@@ -518,7 +573,7 @@ sort -u "$tmp/findings" > "$tmp/report" || die "sort failed"
 
 if [[ -s "$tmp/report" ]]; then
   cat "$tmp/report"
-  echo "check-private: $(wc -l < "$tmp/report" | tr -d ' ') finding(s) in $mode mode; $deny_note" >&2
+  echo "check-private: $(wc -l < "$tmp/report" | tr -d ' ') finding(s) in $mode mode${scope_note:+ ($scope_note)}; $deny_note" >&2
   exit 1
 fi
-echo "check-private: clean ($mode mode; $deny_note)"
+echo "check-private: clean ($mode mode${scope_note:+, $scope_note}; $deny_note)"

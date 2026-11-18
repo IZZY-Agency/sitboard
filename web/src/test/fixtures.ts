@@ -24,6 +24,7 @@ export function card(over: Partial<Omit<Card, 'agent'>> & { agent?: Partial<Agen
     seen: true,
     pullRequests: [],
     issues: [],
+    artifacts: [],
     subagents: 0,
     ...rest,
     agent: {

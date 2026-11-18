@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/IZZY-Agency/sitboard/internal/model"
 )
@@ -28,24 +29,31 @@ const turnWindow = 7 * 24 * time.Hour
 // Caps on what one transcript may contribute, so a hostile or runaway
 // transcript cannot grow memory without bound.
 const (
-	maxPRs     = 200
-	maxTurns   = 5000
-	maxSpawns  = 500
-	maxPeers   = 200
-	maxPending = 1000
-	maxIDsCall = 32
+	maxPRs = 200
+	// maxArtifacts counts addresses; only a publish takes a slot.
+	maxArtifacts = 200
+	// maxArtifactTitle caps what is kept of a title, in bytes; the core cuts
+	// it again for the page.
+	maxArtifactTitle = 1024
+	maxTurns         = 5000
+	maxSpawns        = 500
+	maxPeers         = 200
+	maxPending       = 1000
+	maxIDsCall       = 32
 )
 
 // derived holds the facts read from one transcript. It never holds transcript
-// text: only a model id, a folder, times, pull request references, the names
-// and terminal ids of sessions this one spawned, and the names of sessions it
-// received messages from.
+// text: only a model id, a folder, times, pull request references, the
+// addresses and titles of artifacts it published, the names and terminal ids
+// of sessions this one spawned, and the names of sessions it received
+// messages from.
 type derived struct {
 	Model              string
 	Folder             string
 	LastActivity       time.Time
 	TurnEnds           []time.Time
 	CreatedPRs         []model.PRRef
+	Artifacts          []model.ArtifactRef // one per address, in the order first seen
 	SpawnedNames       []string
 	SpawnedTerminalIDs []string
 	PeerSenders        []string
@@ -57,6 +65,7 @@ type pendingKind uint8
 const (
 	pendingPR pendingKind = 1 << iota
 	pendingSpawn
+	pendingPublish // an Artifact publish
 )
 
 // tailer reads one transcript incrementally from a remembered offset. Only
@@ -78,16 +87,17 @@ type tailer struct {
 	seq          uint64                 // main-chain records with a folder, counted
 	votesChanged bool
 	pickedAt     time.Time          // when the folder was last chosen
+	prober       *prober            // runs the folder lookups
 	probing      chan []probeResult // a lookup batch still running
-	probeUntil   time.Time          // how long this pass waits for lookups; zero: probeBudget from now
+	probeUntil   time.Time          // how long this pass waits for lookups; zero: the prober's budget from now
 }
 
-func newTailer(path string) *tailer {
+func newTailer(path string, pr *prober) *tailer {
 	home, _ := os.UserHomeDir()
 	if home != "" {
 		home = filepath.Clean(home)
 	}
-	return &tailer{path: path, pending: map[string]pendingKind{}, home: home}
+	return &tailer{path: path, pending: map[string]pendingKind{}, home: home, prober: pr}
 }
 
 func (t *tailer) reset() {
@@ -212,6 +222,22 @@ type lineHead struct {
 	} `json:"origin"`
 }
 
+// toolUseResultLine is the structured result Claude Code records beside a
+// tool result. It is read only for an Artifact call's result.
+type toolUseResultLine struct {
+	ToolUseResult json.RawMessage `json:"toolUseResult"`
+}
+
+// artifactResult is the part of an Artifact result that is kept: the
+// address and the title. The other keys only tell what kind of result it is.
+type artifactResult struct {
+	URL         string          `json:"url"`
+	Title       string          `json:"title"`
+	AssetUpload json.RawMessage `json:"asset_upload"`
+	AssetDelete json.RawMessage `json:"asset_delete"`
+	Opened      json.RawMessage `json:"opened"`
+}
+
 // lineContent is read only for lines that may carry a tool call or result.
 type lineContent struct {
 	Message struct {
@@ -226,6 +252,7 @@ type contentBlock struct {
 	Input     json.RawMessage `json:"input"`
 	ToolUseID string          `json:"tool_use_id"`
 	Content   json.RawMessage `json:"content"`
+	IsError   bool            `json:"is_error"`
 }
 
 // decode fills v and tolerates fields of an unexpected type: those are left
@@ -261,7 +288,8 @@ func (t *tailer) consume(line []byte, now time.Time) {
 			t.d.Model = m
 		}
 		if bytes.Contains(line, []byte(`"tool_use"`)) &&
-			(bytes.Contains(line, []byte("create")) || bytes.Contains(line, []byte("agtermctl"))) {
+			(bytes.Contains(line, []byte("create")) || bytes.Contains(line, []byte("agtermctl")) ||
+				bytes.Contains(line, []byte(`"Artifact"`))) {
 			t.toolUses(line)
 		}
 	case "user":
@@ -269,7 +297,7 @@ func (t *tailer) consume(line []byte, now time.Time) {
 			t.d.PeerSenders = addCapped(t.d.PeerSenders, h.Origin.Name, maxPeers)
 		}
 		if len(t.pending) > 0 && bytes.Contains(line, []byte(`"tool_result"`)) {
-			t.toolResults(line)
+			t.toolResults(line, at)
 		}
 	case "system":
 		if !h.Sidechain && h.Subtype == "turn_duration" && !at.IsZero() && !at.Before(now.Add(-turnWindow)) {
@@ -286,8 +314,9 @@ func (t *tailer) consume(line []byte, now time.Time) {
 // `gh pr create` prints it (also after "already exists:").
 var prURLRe = regexp.MustCompile(`(?m)^[ \t]*https://github\.com/([A-Za-z0-9][A-Za-z0-9-]{0,38})/([A-Za-z0-9._-]{1,100})/pull/([0-9]{1,9})[ \t]*\r?$`)
 
-// toolUses records the Bash calls whose results carry a fact: the session's
-// own `gh pr create`, and its `agtermctl session new` spawns.
+// toolUses records the calls whose results carry a fact: the session's own
+// `gh pr create`, its `agtermctl session new` spawns, and its Artifact
+// publishes.
 func (t *tailer) toolUses(line []byte) {
 	var c lineContent
 	if !decode(line, &c) {
@@ -295,7 +324,16 @@ func (t *tailer) toolUses(line []byte) {
 	}
 	for _, raw := range c.Message.Content {
 		var b contentBlock
-		if !decode(raw, &b) || b.Type != "tool_use" || b.Name != "Bash" || b.ID == "" || len(b.ID) > 128 {
+		if !decode(raw, &b) || b.Type != "tool_use" || b.ID == "" || len(b.ID) > 128 {
+			continue
+		}
+		if b.Name == "Artifact" {
+			if isPublish(b.Input) {
+				t.addPending(b.ID, pendingPublish)
+			}
+			continue
+		}
+		if b.Name != "Bash" {
 			continue
 		}
 		var in struct {
@@ -318,17 +356,40 @@ func (t *tailer) toolUses(line []byte) {
 		if kind == 0 {
 			continue
 		}
-		if len(t.pending) >= maxPending {
-			clear(t.pending)
-		}
-		t.pending[b.ID] = kind
+		t.addPending(b.ID, kind)
 	}
 }
 
-func (t *tailer) toolResults(line []byte) {
+func (t *tailer) addPending(id string, kind pendingKind) {
+	if len(t.pending) >= maxPending {
+		clear(t.pending)
+	}
+	t.pending[id] = kind
+}
+
+// isPublish says whether an Artifact call publishes: the action "publish" or
+// none, and not an asset upload. Deletes are not followed: no real record of
+// a whole artifact's delete has been seen, so a deleted artifact stays listed
+// (its link opens claude.ai's own not-found page).
+func isPublish(input json.RawMessage) bool {
+	var in struct {
+		Action string `json:"action"`
+		Asset  bool   `json:"asset"`
+	}
+	return decode(input, &in) && (in.Action == "" || in.Action == "publish") && !in.Asset
+}
+
+func (t *tailer) toolResults(line []byte, at time.Time) {
 	var c lineContent
 	if !decode(line, &c) {
 		return
+	}
+	results := 0
+	for _, raw := range c.Message.Content {
+		var b contentBlock
+		if decode(raw, &b) && b.Type == "tool_result" {
+			results++
+		}
 	}
 	for _, raw := range c.Message.Content {
 		var b contentBlock
@@ -340,6 +401,14 @@ func (t *tailer) toolResults(line []byte) {
 			continue
 		}
 		delete(t.pending, b.ToolUseID)
+		if kind == pendingPublish {
+			// The line's toolUseResult belongs to its one result; with
+			// several, it is not known whose it is, so nothing is shown.
+			if !b.IsError && results == 1 {
+				t.publishResult(line, at)
+			}
+			continue
+		}
 		text := resultText(b.Content)
 		if kind&pendingPR != 0 {
 			for _, m := range prURLRe.FindAllStringSubmatch(text, maxIDsCall) {
@@ -359,6 +428,80 @@ func (t *tailer) toolResults(line []byte) {
 			}
 		}
 	}
+}
+
+// publishResult records a successful publish. A user line carries one tool
+// result, and its toolUseResult is that result's structured form: an object
+// on success, a string on an error. Only an object with an artifact address
+// counts.
+func (t *tailer) publishResult(line []byte, at time.Time) {
+	var l toolUseResultLine
+	if !decode(line, &l) {
+		return
+	}
+	raw := bytes.TrimSpace(l.ToolUseResult)
+	if len(raw) == 0 || raw[0] != '{' {
+		return
+	}
+	var r artifactResult
+	if !decode(raw, &r) {
+		return
+	}
+	if given(r.AssetUpload) || given(r.AssetDelete) || given(r.Opened) || !model.ValidArtifactURL(r.URL) {
+		return
+	}
+	t.d.Artifacts = noteArtifact(t.d.Artifacts, model.ArtifactRef{URL: r.URL, Title: capTitle(r.Title), PublishedAt: at})
+}
+
+// given reports whether a key was present with a value other than null.
+func given(raw json.RawMessage) bool {
+	v := bytes.TrimSpace(raw)
+	return len(v) > 0 && !bytes.Equal(v, []byte("null"))
+}
+
+// noteArtifact records a publish: within one transcript, a later line always
+// wins. A new address beyond the cap is dropped.
+func noteArtifact(list []model.ArtifactRef, r model.ArtifactRef) []model.ArtifactRef {
+	for i := range list {
+		if list[i].URL == r.URL {
+			list[i] = r
+			return list
+		}
+	}
+	if len(list) >= maxArtifacts {
+		return list
+	}
+	return append(list, r)
+}
+
+// mergeArtifacts adds another transcript's artifacts (a subagent's): for each
+// address the later of the two wins; on a tie, or with no time, the one
+// already there stays.
+func mergeArtifacts(list, more []model.ArtifactRef) []model.ArtifactRef {
+	for _, r := range more {
+		i := slices.IndexFunc(list, func(x model.ArtifactRef) bool { return x.URL == r.URL })
+		switch {
+		case i >= 0:
+			if r.PublishedAt.After(list[i].PublishedAt) {
+				list[i] = r
+			}
+		case len(list) < maxArtifacts:
+			list = append(list, r)
+		}
+	}
+	return list
+}
+
+// capTitle keeps at most maxArtifactTitle bytes, cut on a rune boundary.
+func capTitle(s string) string {
+	if len(s) <= maxArtifactTitle {
+		return s
+	}
+	s = s[:maxArtifactTitle]
+	for len(s) > 0 && !utf8.ValidString(s) {
+		s = s[:len(s)-1]
+	}
+	return s
 }
 
 // resultText returns a tool result's text, which is a string or a list of

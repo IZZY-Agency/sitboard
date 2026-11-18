@@ -1,6 +1,8 @@
 <script lang="ts">
   // The parts of the selected project: "all parts", then each part with its
-  // count, the parent's own cards under the parent's name.
+  // count, the parent's own cards under the parent's name. `end` sits at the
+  // right end of the row, outside its arrow keys (its own tab stop).
+  import type { Snippet } from 'svelte';
   import { moveFocus, onKeys, tabStop } from '../keys';
   import Count from './Count.svelte';
 
@@ -15,13 +17,15 @@
     chips,
     active,
     onselect,
-  }: { label: string; chips: PartChip[]; active: string; onselect: (key: string) => void } = $props();
+    end,
+  }: { label: string; chips: PartChip[]; active: string; onselect: (key: string) => void; end?: Snippet } = $props();
 
   let row = $state<HTMLElement>();
   let focused = $state<string | null>(null);
   const stop = $derived(tabStop(chips.map((c) => c.key), focused, active));
 </script>
 
+<div class="wrap">
 <div
   class="filter"
   role="toolbar"
@@ -43,15 +47,42 @@
       <span class="name u" title={c.name}>{c.name}</span>{' '}<span class="n"><Count value={c.count} /></span>
     </button>{/each}
 </div>
+{#if end}<div class="end">{@render end()}</div>{/if}
+</div>
 
 <style>
   /* Chips are inline so the browser balances the rows when they wrap: two
      even rows, never one row and a lone chip. */
-  .filter {
-    padding: 2px calc(var(--gutter) - 4px) 0;
+  .wrap {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px 12px;
+    padding-right: var(--gutter);
     border-bottom: 1px solid var(--rule);
+  }
+  .filter {
+    flex: 1;
+    min-width: 0;
+    padding: 2px 0 0 calc(var(--gutter) - 4px);
     text-wrap: balance;
     line-height: 0;
+  }
+  .end {
+    flex: none;
+    max-width: 60%;
+    padding: 2px 0;
+  }
+  /* Narrow: the end takes its own line under the chips. */
+  @media (max-width: 599px) {
+    .wrap {
+      flex-direction: column;
+      align-items: stretch;
+    }
+    .end {
+      max-width: none;
+      padding: 0 0 6px var(--gutter);
+      align-self: flex-end;
+    }
   }
   button {
     margin: 0 4px;

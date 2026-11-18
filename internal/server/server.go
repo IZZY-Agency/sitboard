@@ -1,8 +1,9 @@
 // Package server serves the API and the embedded page, behind the security
 // layer: loopback Host only, same-origin requests only, and the per-run token.
 //
-// The page and every API route sit behind the same checks. Three POST actions
-// change something (jump, mark seen, mark catch-up read); nothing else does.
+// The page and every API route sit behind the same checks. Four POST actions
+// change something (jump, mark seen, mark catch-up read, forget a grouping);
+// nothing else does.
 // Transcript text is never served: the board holds only derived fields.
 package server
 

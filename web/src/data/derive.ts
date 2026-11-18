@@ -2,7 +2,9 @@
 // needs lives here, so each view says the same thing the same way.
 
 import {
+  ARTIFACT_URL_PATTERN,
   ColumnValues,
+  type Artifact,
   type Attention,
   type Card,
   type Checks,
@@ -133,6 +135,37 @@ export function modelLabel(model: string): string {
   return m;
 }
 
+export const MODEL_FAMILIES = ['fable', 'opus', 'sonnet', 'haiku'] as const;
+export type ModelFamily = (typeof MODEL_FAMILIES)[number];
+
+const isFamily = (w: string | undefined): w is ModelFamily => (MODEL_FAMILIES as readonly string[]).includes(w ?? '');
+
+/**
+ * The family of an Anthropic Claude model id, so a new version, a date or a
+ * suffix keeps its hue: "claude-opus-5-5", "claude-haiku-4-5-20251001",
+ * "claude-sonnet-4-5@20250929", "claude-opus-4-6[1m]". The family word comes
+ * right after "claude", or after its version in the old form
+ * ("claude-3-5-sonnet-20241022"). Before "claude" there is nothing, or a
+ * provider prefix ending in "anthropic" ("us.anthropic.claude-…",
+ * "anthropic/claude-…"), so another maker's model named after Claude
+ * ("deepseek-claude-sonnet-distill") is not one. '' when empty, not Claude's,
+ * or a family the page does not know: those keep a neutral chip.
+ */
+export function modelFamily(model: string): ModelFamily | '' {
+  const words = clean(model).toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+  const at = words.indexOf('claude');
+  if (at < 0 || (at > 0 && words[at - 1] !== 'anthropic')) return '';
+  let i = at + 1;
+  while (/^\d+$/.test(words[i] ?? '')) i++;
+  const family = words[i];
+  return isFamily(family) ? family : '';
+}
+
+/** No model id at all, as opposed to one the page shows without a family hue. */
+export function modelUnknown(model: string): boolean {
+  return !clean(model);
+}
+
 export function agentName(card: Card): string {
   return clean(card.agent.name) || 'unnamed session';
 }
@@ -235,6 +268,28 @@ export function cardPrs(prs: readonly PullRequest[]): { shown: PullRequest[]; mo
   const failing = rest.some((p) => p.state === 'open' && p.checks === 'failing');
   if (failing) text += ' · checks failing';
   return { shown, more: { text, tone: failing ? 'failing' : 'muted' } };
+}
+
+/** A claude.ai artifact link, or null for anything else: the page links nothing but that form. */
+export function artifactHref(url: string): string | null {
+  return ARTIFACT_URL_PATTERN.test(url) ? url : null;
+}
+
+/** An artifact's title as the card shows it; a blank one says so. */
+export function artifactTitle(a: Artifact): string {
+  return clean(a.title) || 'Untitled artifact';
+}
+
+/**
+ * The artifacts a card shows, in the order the core sends them (most recently
+ * published first), with the pull request rule: all of them when they fit in
+ * CARD_PR_LINES lines, otherwise the first ones and "+N more". A link that is
+ * not a claude.ai artifact address is left out.
+ */
+export function cardArtifacts(list: readonly Artifact[]): { shown: Artifact[]; more: string | null } {
+  const ok = list.filter((a) => artifactHref(a.url) !== null);
+  if (ok.length <= CARD_PR_LINES) return { shown: ok, more: null };
+  return { shown: ok.slice(0, CARD_PR_LINES - 1), more: `+${ok.length - (CARD_PR_LINES - 1)} more` };
 }
 
 const NUMS_IN_LINE = 2;
@@ -438,31 +493,49 @@ export function lanes(s: Pick<Snapshot, 'cards' | 'projects'>): LaneRow[] {
   });
 }
 
-/** A lane note; `closes` is kept apart so it stays muted whatever the note's tone. */
-export interface LaneNote extends Line {
+/**
+ * A lane note, shown as `head · model · tail` (an empty end left out), then
+ * `closes`. `closes` stays muted whatever the note's tone. The model takes its
+ * family's hue (`hue`) only in a muted note: in a needs-you or failing note
+ * the state stays the strongest signal, so the model takes the note's tone.
+ */
+export interface LaneNote {
+  tone: Tone;
+  head: string;
+  model: string;
+  hue: ModelFamily | '';
+  tail: string;
   closes: string;
 }
 
 /** The short note under an agent in a lane cell. */
 export function laneNote(card: Card, ix: Index): LaneNote {
-  const parts: string[] = [];
+  const front: string[] = [];
+  const back: string[] = [];
   const n = ix.workers.get(card.id)?.length ?? 0;
-  if (n) parts.push('coordinator');
-  if (card.agent.status === 'unknown') parts.push('status unknown');
-  parts.push(modelLabel(card.agent.model));
-  if (n) parts.push(plural(n, 'worker'));
+  if (n) front.push('coordinator');
+  if (card.agent.status === 'unknown') front.push('status unknown');
+  if (n) back.push(plural(n, 'worker'));
   else if (card.agent.parent === 'known') {
     const parent = card.agent.parentCardId ? ix.byId.get(card.agent.parentCardId) : undefined;
-    if (parent) parts.push(`for ${agentName(parent)}`);
-  } else if (card.agent.parent === 'unknown') parts.push('coordinator: unknown');
+    if (parent) back.push(`for ${agentName(parent)}`);
+  } else if (card.agent.parent === 'unknown') back.push('coordinator: unknown');
   const prs = prSummary(card.pullRequests);
   const title = cardTitle(card);
-  if (prs) parts.push(prs.text);
-  else if (title !== agentName(card)) parts.push(title);
+  if (prs) back.push(prs.text);
+  else if (title !== agentName(card)) back.push(title);
   let tone: Tone = 'muted';
   if (card.column === 'needs_you') tone = 'needs';
   else if (card.attention.includes('failing_checks')) tone = 'failing';
-  return { text: parts.join(' · '), tone, closes: prs ? cardCloses(card, ix) : '' };
+  const model = modelLabel(card.agent.model);
+  return {
+    tone,
+    head: front.join(' · '),
+    model,
+    hue: tone === 'muted' ? modelFamily(card.agent.model) : '',
+    tail: back.join(' · '),
+    closes: prs ? cardCloses(card, ix) : '',
+  };
 }
 
 // ---- Teams -----------------------------------------------------------------

@@ -122,7 +122,9 @@
                     <span class="agent u">{name}</span>
                     <span class="since">{timeInState(card, now)}</span>
                   </span>
-                  <span class="note tone-{note.tone} u">{note.text}{#if note.closes}{' · '}<span class="closes u">{note.closes}</span>{/if}</span>
+                  <span class="note tone-{note.tone} u"
+                    >{#if note.head}{note.head}{' · '}{/if}<span class="model {note.hue ? `model-${note.hue}` : ''}">{note.model}</span
+                    >{#if note.tail}{' · '}{note.tail}{/if}{#if note.closes}{' · '}<span class="closes u">{note.closes}</span>{/if}</span>
                 </button>
               {/each}
             </div>
@@ -313,5 +315,8 @@
   }
   .closes {
     color: var(--muted);
+  }
+  .model {
+    color: var(--model, inherit);
   }
 </style>

@@ -48,6 +48,7 @@ type Board struct {
 	opts  Options
 	home  string
 	roots []string
+	build contract.Build // read once: build info does not change while it runs
 
 	mu         sync.Mutex
 	sessions   map[model.SessionKey]model.SessionFact
@@ -59,9 +60,13 @@ type Board struct {
 	umbrellaTo map[string]time.Time  // umbrella times to write to the state file on the next tick
 	liveSince  map[string]time.Time  // live umbrella -> when it became live, until it is remembered
 	missing    map[string]int        // remembered umbrella -> checks in a row that found it gone
+	forgotten  map[string]time.Time  // folder whose grouping the owner forgot -> last time an agent sat in it
+	forgotTo   map[string]time.Time  // forgotten times to write to the state file on the next tick
+	vacantFrom map[string]time.Time  // forgotten folder -> since when no agent sits in it
+	release    map[string]time.Time  // forgotten folders to drop from the state file on the next tick -> their time when released
 	goneAt     time.Time             // when the gone check last started
 	goneBusy   bool                  // a gone check's worker is running
-	closed     bool                  // Run returned: no more state writes from checks
+	closed     bool                  // Run returned: no more state writes from checks, no more publishes
 	prs        map[model.PRRef]model.PullRequest
 	branchPRs  map[string]map[string][]model.PullRequest // repo -> head branch -> pull requests
 	lookedUp   map[string]time.Time                      // repo -> last GitHub lookup (wall clock)
@@ -85,6 +90,10 @@ type Board struct {
 	pubTimer  *time.Timer
 	refreshCh chan struct{}
 	resolving sync.WaitGroup // git lookups in flight; tests wait on it
+	// flushGap, when set (tests only), runs in flushUmbrellas between reading
+	// the changes and writing them, where a ForgetGrouping can fall. Set it
+	// before the board ticks; a tick reads it without a lock.
+	flushGap func()
 }
 
 // view is the derived board. It is replaced, never changed in place.
@@ -95,7 +104,8 @@ type view struct {
 	plainShells int
 	sources     []contract.SourceStatus
 	agterm      bool
-	umbrellas   []string // umbrella folders with an agent in them now, sorted
+	umbrellas   []string          // umbrella folders with an agent in them now, sorted
+	groupings   map[string]string // project id -> umbrella folder, for umbrellas that have parts now
 }
 
 // New returns an empty board.
@@ -107,6 +117,7 @@ func New(opts Options) *Board {
 	b := &Board{
 		opts:       opts,
 		home:       filepath.Clean(home),
+		build:      buildOf(buildinfo.Version, buildinfo.Commit),
 		sessions:   map[model.SessionKey]model.SessionFact{},
 		terminals:  map[string]model.TerminalFact{},
 		repos:      map[string]model.Repo{},
@@ -116,6 +127,10 @@ func New(opts Options) *Board {
 		umbrellaTo: map[string]time.Time{},
 		liveSince:  map[string]time.Time{},
 		missing:    map[string]int{},
+		forgotten:  map[string]time.Time{},
+		forgotTo:   map[string]time.Time{},
+		vacantFrom: map[string]time.Time{},
+		release:    map[string]time.Time{},
 		prs:        map[model.PRRef]model.PullRequest{},
 		branchPRs:  map[string]map[string][]model.PullRequest{},
 		lookedUp:   map[string]time.Time{},
@@ -137,6 +152,10 @@ func New(opts Options) *Board {
 	}
 	if opts.State != nil {
 		b.umbrellas = opts.State.Umbrellas()
+		b.forgotten = opts.State.Forgotten()
+		for f := range b.forgotten {
+			delete(b.umbrellas, f) // a file edited by hand: forgotten wins
+		}
 	}
 	b.view = view{cards: []contract.Card{}, projects: []contract.Project{}, sources: []contract.SourceStatus{}}
 	return b
@@ -156,6 +175,7 @@ func (b *Board) Apply(f model.Fact) {
 			f.Folder = filepath.Clean(f.Folder) // "a/" and "a/." are "a"
 		}
 		f.CreatedPRs = slices.Clone(f.CreatedPRs)
+		f.Artifacts = slices.Clone(f.Artifacts)
 		f.TurnEnds = slices.Clone(f.TurnEnds)
 		b.sessions[f.Key] = f
 		if _, started := b.repoGen[f.Folder]; f.Folder != "" && !started {
@@ -342,7 +362,7 @@ func (b *Board) snapshotLocked() contract.Snapshot {
 		PlainShells:   v.plainShells,
 		Counts:        v.counts,
 		AgtermPresent: v.agterm,
-		Build:         currentBuild(),
+		Build:         b.build,
 	}
 }
 
@@ -350,9 +370,9 @@ func (b *Board) snapshotLocked() contract.Snapshot {
 // custom build can set anything through linker flags.
 const maxBuildText = 64
 
-// currentBuild describes this build for the page, cleaned like any other
-// string.
-func currentBuild() contract.Build {
+// buildOf describes a build for the page, version and commit cleaned like
+// any other string.
+func buildOf(version, commit string) contract.Build {
 	capped := func(s string) string {
 		s = clean(s)
 		if utf8.RuneCountInString(s) > maxBuildText {
@@ -361,8 +381,8 @@ func currentBuild() contract.Build {
 		return s
 	}
 	return contract.Build{
-		Version: capped(buildinfo.Version),
-		Commit:  capped(buildinfo.Commit),
+		Version: capped(version),
+		Commit:  capped(commit),
 		OS:      runtime.GOOS,
 		Arch:    runtime.GOARCH,
 	}
@@ -375,6 +395,7 @@ func (b *Board) rebuildLocked() {
 	next, keys := b.deriveLocked(now)
 	if b.settledLocked() {
 		b.noteUmbrellasLocked(next.umbrellas, now)
+		b.noteForgottenLocked(now)
 	}
 	if reflect.DeepEqual(next, b.view) {
 		return
@@ -402,8 +423,12 @@ func (b *Board) Subscribe(ctx context.Context) <-chan contract.Snapshot {
 }
 
 // schedulePublishLocked publishes now, or at the end of the current 250 ms
-// window when a publish just happened. Callers hold b.mu.
+// window when a publish just happened; after Run returned, never. Callers
+// hold b.mu.
 func (b *Board) schedulePublishLocked() {
+	if b.closed {
+		return
+	}
 	if b.pubTimer != nil {
 		return // a publish is already scheduled; it will carry this change
 	}
@@ -416,7 +441,9 @@ func (b *Board) schedulePublishLocked() {
 		b.mu.Lock()
 		defer b.mu.Unlock()
 		b.pubTimer = nil
-		b.publishLocked()
+		if !b.closed {
+			b.publishLocked()
+		}
 	})
 }
 

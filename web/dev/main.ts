@@ -42,6 +42,18 @@ const actions: Actions = {
     if (params.get('fail') === '1') return { ok: false, kind: 'failed', message: 'sitboard answered 500' };
     return { ok: true };
   },
+  // The server forgets the grouping: its parts become top-level projects, and
+  // a parent with no cards of its own leaves the board.
+  async forgetGrouping(id) {
+    if (!current) return { ok: true };
+    const next = JSON.parse(JSON.stringify(current)) as Snapshot;
+    if (!next.projects.some((p) => p.parentId === id)) return { ok: false, kind: 'failed', message: 'it is no longer grouped' };
+    for (const p of next.projects) if (p.parentId === id) p.parentId = '';
+    if (!next.cards.some((c) => c.projectId === id)) next.projects = next.projects.filter((p) => p.id !== id);
+    next.seq++;
+    setTimeout(() => publish(next), 300);
+    return { ok: true };
+  },
   async seen(id) {
     if (!current) return { ok: true };
     const next = JSON.parse(JSON.stringify(current)) as Snapshot;

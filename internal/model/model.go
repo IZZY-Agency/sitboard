@@ -8,10 +8,17 @@
 //     OK=false, the empty string where a field says so, or the zero time.Time.
 //   - Every string comes from session records, git or GitHub and is untrusted.
 //     It is never interpreted, only carried and, at the edge, escaped.
-//   - No transcript content (prompts, code, tool output) ever enters a fact.
+//   - No transcript content (prompts, code, tool output) ever enters a fact,
+//     with one exception: an artifact's title (ArtifactRef.Title), text a
+//     model wrote, read from the structured result of the session's own
+//     publish. Adapters cap it (1 KB); the core cleans it and cuts it to the
+//     length of any other title before the page gets it.
 package model
 
-import "time"
+import (
+	"regexp"
+	"time"
+)
 
 // Known is a value that may be unknown. The zero value is unknown.
 type Known[T any] struct {
@@ -56,6 +63,24 @@ type SessionKey struct {
 type PRRef struct {
 	Repo   string
 	Number int
+}
+
+// ArtifactURLPattern is the only form of artifact link a fact may carry: a
+// claude.ai artifact address, nothing else. contract.ArtifactURLPattern, which
+// the page checks links against, must stay equal to it (a test checks).
+const ArtifactURLPattern = `^https://claude\.ai/(?:artifact/[A-Za-z0-9_-]{8,64}|code/artifact/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$`
+
+var artifactURLRe = regexp.MustCompile(ArtifactURLPattern)
+
+// ValidArtifactURL reports whether u matches ArtifactURLPattern.
+func ValidArtifactURL(u string) bool { return artifactURLRe.MatchString(u) }
+
+// ArtifactRef is a claude.ai artifact a session published. The same URL is the
+// same artifact: a republish updates its title and time, it is not a second one.
+type ArtifactRef struct {
+	URL         string    // matches ArtifactURLPattern
+	Title       string    // as the session's latest publish of it reported; "" when none
+	PublishedAt time.Time // that publish; zero when unknown
 }
 
 // Fact is anything a Watcher emits. The set is closed: only this package defines facts.
@@ -127,10 +152,14 @@ type SessionFact struct {
 	// matched children is a sign that this session is someone's worker.
 	PeerSenders []string
 
-	TerminalID string      // agterm session id, "" when none
-	Subagents  int         // in-process subagents seen
-	CreatedPRs []PRRef     // only pull requests this session created
-	TurnEnds   []time.Time // finished turns, last 7 days, oldest first
+	TerminalID string  // agterm session id, "" when none
+	Subagents  int     // in-process subagents seen
+	CreatedPRs []PRRef // only pull requests this session created
+	// Artifacts are the claude.ai artifacts this session (or one of its
+	// in-process subagents) published itself, one per URL. A delete is not
+	// followed, and a rename made anywhere else is not seen.
+	Artifacts []ArtifactRef
+	TurnEnds  []time.Time // finished turns, last 7 days, oldest first
 }
 
 // SessionGone says a session's records no longer exist for its adapter (see

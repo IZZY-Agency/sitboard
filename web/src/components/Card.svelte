@@ -2,13 +2,17 @@
   import type { Card } from '../contract.gen';
   import {
     agentName,
+    artifactTitle,
     attentionLines,
+    cardArtifacts,
     canJump,
     cardPrs,
     cardCloses,
     cardTitle,
     columnTone,
+    modelFamily,
     modelLabel,
+    modelUnknown,
     prLine,
     projectLabel,
     roleLine,
@@ -18,6 +22,7 @@
   } from '../data/derive';
   import { flash } from '../motion';
   import PrIcon from './PrIcon.svelte';
+  import ArtifactIcon from './ArtifactIcon.svelte';
 
   let {
     card,
@@ -37,6 +42,7 @@
     onseen: (c: Card) => void;
   } = $props();
   const place = $derived(projectLabel(card, ix));
+  const family = $derived(modelFamily(card.agent.model));
 
   let el = $state<HTMLElement>();
 
@@ -51,6 +57,7 @@
     return out;
   });
   const prs = $derived(cardPrs(card.pullRequests));
+  const arts = $derived(cardArtifacts(card.artifacts));
   // Only beside pull request lines: a card with issues and no pull request shows nothing extra.
   const closes = $derived(prs.shown.length ? cardCloses(card, ix) : '');
   const unseen = $derived(card.attention.includes('unseen'));
@@ -82,7 +89,7 @@
     <span class="title u">{cardTitle(card)}</span>
     <span class="meta">
       <span class="project u">{place.name}{#if place.part}<span class="part">{' / '}{place.part}</span>{/if}</span>
-      <span class="tag u">{modelLabel(card.agent.model)}</span>
+      <span class="tag u {family ? `model-${family}` : ''}" class:unknown={modelUnknown(card.agent.model)}>{modelLabel(card.agent.model)}</span>
       {#if role}<span class="u">{role}</span>{/if}
     </span>
     {#if flags.length}
@@ -101,6 +108,21 @@
       </span>
     {/if}
   </button>
+  {#if arts.shown.length}
+    <!-- Links cannot sit inside the card's button, so they get their own row under it.
+         The link's name is the title once and the hint once; the tooltip on the
+         visible title (cut with an ellipsis when long) is not part of it. -->
+    <ul class="arts" aria-label="Artifacts">
+      {#each arts.shown as a, i (`${a.url}#${i}`)}
+        <li>
+          <a class="art" href={a.url} target="_blank" rel="noopener noreferrer"
+            ><ArtifactIcon /><span class="name u" title={artifactTitle(a)}>{artifactTitle(a)}</span><span class="visually-hidden">{' (artifact, opens in a new tab)'}</span></a
+          >
+        </li>
+      {/each}
+      {#if arts.more}<li class="art more">{arts.more}</li>{/if}
+    </ul>
+  {/if}
   {#if unseen}
     <button class="seen" type="button" onclick={() => onseen(card)}>Mark seen</button>
   {/if}
@@ -202,11 +224,16 @@
   }
   .tag {
     padding: 0 5px;
-    border: 1px solid var(--border);
+    border: 1px solid var(--model-line, var(--border));
     font-size: var(--text-xs);
     letter-spacing: 0.06em;
     text-transform: uppercase;
-    color: var(--fg-body);
+    color: var(--model, var(--fg-body));
+  }
+  /* No model id: dashed and muted, apart from a known model with no family hue. */
+  .tag.unknown {
+    border-style: dashed;
+    color: var(--muted);
   }
   .flag {
     color: var(--tone);
@@ -229,6 +256,41 @@
     padding-left: 18px;
   }
   .pr.closes {
+    color: var(--muted);
+  }
+  .arts {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    margin: -4px 12px 0;
+    padding: 8px 0 12px;
+    list-style: none;
+    border-top: 1px solid var(--rule);
+  }
+  .art {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    font-size: var(--text-s);
+    color: var(--fg-body);
+    text-decoration: none;
+  }
+  .art .name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  a.art:hover {
+    color: var(--fg);
+  }
+  a.art:hover .name {
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+  .art.more {
+    padding-left: 18px;
     color: var(--muted);
   }
   .seen {

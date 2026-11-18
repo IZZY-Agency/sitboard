@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"time"
 
+	"github.com/IZZY-Agency/sitboard/internal/app"
 	"github.com/IZZY-Agency/sitboard/internal/contract"
 	"github.com/IZZY-Agency/sitboard/internal/source"
 )
@@ -89,11 +90,52 @@ func catchupRead(opts Options) http.HandlerFunc {
 	}
 }
 
-// readCard reads a JSON CardRequest. Unknown fields are ignored.
-func readCard(w http.ResponseWriter, r *http.Request) (string, bool) {
+// forgetGrouping forgets the grouping of a project with parts. The server
+// resolves the folder from the project id; nothing else in the body is read.
+func forgetGrouping(opts Options) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !isJSON(w, r) {
+			return
+		}
+		body, ok := readBody(w, r)
+		if !ok {
+			return
+		}
+		var req contract.ProjectRequest
+		if err := json.Unmarshal(body, &req); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		if !contract.ValidProjectID(req.ProjectID) {
+			http.Error(w, "bad project id", http.StatusBadRequest)
+			return
+		}
+		switch err := opts.Board.ForgetGrouping(req.ProjectID); {
+		case err == nil:
+			w.WriteHeader(http.StatusNoContent)
+		case errors.Is(err, app.ErrUnknownProject):
+			http.Error(w, "unknown project", http.StatusNotFound)
+		case errors.Is(err, app.ErrNotGrouping):
+			http.Error(w, "this project is not a grouping", http.StatusConflict)
+		default:
+			log.Printf("server: forget grouping: %v", err)
+			http.Error(w, "could not save the change", http.StatusInternalServerError)
+		}
+	}
+}
+
+func isJSON(w http.ResponseWriter, r *http.Request) bool {
 	mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || mt != "application/json" {
 		http.Error(w, "send application/json", http.StatusUnsupportedMediaType)
+		return false
+	}
+	return true
+}
+
+// readCard reads a JSON CardRequest. Unknown fields are ignored.
+func readCard(w http.ResponseWriter, r *http.Request) (string, bool) {
+	if !isJSON(w, r) {
 		return "", false
 	}
 	body, ok := readBody(w, r)

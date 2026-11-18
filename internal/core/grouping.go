@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/IZZY-Agency/sitboard/internal/app"
 	"github.com/IZZY-Agency/sitboard/internal/contract"
 	"github.com/IZZY-Agency/sitboard/internal/model"
 	"github.com/IZZY-Agency/sitboard/internal/state"
@@ -42,6 +43,14 @@ import (
 //     longer plain (git init), and is forgotten after
 //     state.UmbrellaRetention, or when its folder was gone on umbrellaMisses
 //     hourly checks in a row.
+//   - The owner can forget a grouping (ForgetGrouping). That drops the
+//     remembered umbrella and holds the folder: while held it is neither an
+//     umbrella nor remembered, even when two agents sit in it. The hold
+//     lifts once no agent has sat in the folder for umbrellaSettle, with
+//     every source settled; a grouping after that is new evidence. An
+//     umbrella needs an agent sitting in its folder, so the hold lasts as
+//     long as the forgotten grouping could be inferred again. Holds live in
+//     the state file, so a restart does not regroup the folder.
 //   - Counts stay each project's own; Card.ProjectID stays the part.
 
 // maxPlainDepth is how far below an umbrella a plain folder still folds.
@@ -111,6 +120,9 @@ func (b *Board) qualifiedLocked(shown []model.SessionFact, parents map[model.Ses
 			out[c.Folder] = true
 		}
 	}
+	for f := range b.forgotten {
+		delete(out, f) // the owner forgot it: it does not group while held
+	}
 	return out
 }
 
@@ -132,8 +144,9 @@ func (b *Board) mayBeUmbrella(folder string) bool {
 // have parts but no card of their own. mainRoots maps project id to its main
 // root; live are the plain folders with an agent in them now, qualified those
 // of them that are umbrellas. It returns the qualified umbrellas that stay
-// top-level, sorted. Callers hold b.mu.
-func (b *Board) groupLocked(projects map[string]*contract.Project, mainRoots map[string]string, live map[string]int, qualified map[string]bool, now time.Time) []string {
+// top-level, sorted, and the umbrellas that have parts, by project id.
+// Callers hold b.mu.
+func (b *Board) groupLocked(projects map[string]*contract.Project, mainRoots map[string]string, live map[string]int, qualified map[string]bool, now time.Time) ([]string, map[string]string) {
 	umbrellas := maps.Clone(qualified)
 	ownRoot := map[string]bool{}
 	for _, r := range mainRoots {
@@ -145,6 +158,9 @@ func (b *Board) groupLocked(projects map[string]*contract.Project, mainRoots map
 		}
 		if ownRoot[u] && !b.plain[u] {
 			continue // it has a project of its own that is no longer plain
+		}
+		if _, held := b.forgotten[u]; held {
+			continue
 		}
 		umbrellas[u] = true
 	}
@@ -186,12 +202,14 @@ func (b *Board) groupLocked(projects map[string]*contract.Project, mainRoots map
 			projects[id].Area = b.area(mainRoots[id])
 		}
 	}
+	groupings := map[string]string{}
 	for _, id := range ids {
 		parent, ok := parentOf[id]
 		if !ok {
 			continue
 		}
 		pid := contract.ProjectID(parent)
+		groupings[pid] = parent
 		if _, ok := projects[pid]; !ok { // a remembered umbrella with no card of its own
 			projects[pid] = &contract.Project{
 				ID:   pid,
@@ -211,7 +229,10 @@ func (b *Board) groupLocked(projects map[string]*contract.Project, mainRoots map
 		}
 	}
 	slices.Sort(top)
-	return top
+	if len(groupings) == 0 {
+		groupings = nil // so a board with no grouping equals an empty view
+	}
+	return top, groupings
 }
 
 func depth(p string) int { return strings.Count(filepath.Clean(p), string(filepath.Separator)) }
@@ -285,14 +306,150 @@ func (b *Board) noteUmbrellasLocked(live []string, now time.Time) {
 	}
 }
 
-// flushUmbrellas runs on the tick, without b.mu: it forgets remembered
-// umbrellas that are too old, writes the changes to the state file, and
+// noteForgottenLocked keeps or lifts the holds on forgotten folders: a folder
+// an agent (any live session, its folder resolved or not) still sits in stays
+// held, and its time is queued for the state file at most once per
+// umbrellaRewrite; one that has been empty for umbrellaSettle is released.
+// While an agent watcher is failing its sessions were dropped (DropSource),
+// so an empty folder says nothing: no hold is released then, and the empty
+// time starts again once it recovers. Callers hold b.mu and have checked
+// that every source is settled.
+func (b *Board) noteForgottenLocked(now time.Time) {
+	if len(b.forgotten) == 0 {
+		return
+	}
+	for _, s := range b.sources {
+		if (s.Kind == contract.SourceClaude || s.Kind == contract.SourceCodex) && s.State == contract.SourceFailing {
+			clear(b.vacantFrom)
+			return
+		}
+	}
+	occupied := map[string]bool{}
+	for _, s := range b.sessions {
+		if !s.Ended && s.Folder != "" {
+			occupied[s.Folder] = true
+		}
+	}
+	for f, at := range b.forgotten {
+		if occupied[f] {
+			delete(b.vacantFrom, f)
+			if now.Sub(at) >= umbrellaRewrite {
+				b.forgotten[f] = now
+				b.forgotTo[f] = now
+			}
+			continue
+		}
+		since, ok := b.vacantFrom[f]
+		if !ok {
+			b.vacantFrom[f] = now
+			continue
+		}
+		if now.Sub(since) >= umbrellaSettle {
+			delete(b.forgotten, f)
+			delete(b.forgotTo, f)
+			delete(b.vacantFrom, f)
+			b.release[f] = at
+		}
+	}
+}
+
+// ErrUnknownProject and ErrNotGrouping are what ForgetGrouping refuses.
+var (
+	ErrUnknownProject = app.ErrUnknownProject
+	ErrNotGrouping    = app.ErrNotGrouping
+)
+
+// ForgetGrouping forgets the grouping of a project that has parts now: the
+// umbrella is no longer remembered, and its folder is held ungrouped (see the
+// rules at the top of this file). The state file is written first; when that
+// fails nothing changes.
+func (b *Board) ForgetGrouping(projectID string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	folder, ok := b.view.groupings[projectID]
+	if !ok {
+		for _, p := range b.view.projects {
+			if p.ID == projectID {
+				return ErrNotGrouping
+			}
+		}
+		return ErrUnknownProject
+	}
+	now := b.now()
+	// The hold's time must be later than any time this folder has stored or
+	// pending release, whatever the clock did (stepped back, or the same
+	// reading twice): a late release or touch then never undoes this forget.
+	at := now
+	for _, prev := range []map[string]time.Time{b.release, b.forgotten} {
+		if t, ok := prev[folder]; ok && !at.After(t) {
+			at = t.Add(time.Nanosecond)
+		}
+	}
+	if b.opts.State != nil {
+		b.writeMu.Lock()
+		stored, err := b.opts.State.ForgetGrouping(folder, at)
+		b.writeMu.Unlock()
+		if err != nil {
+			return err
+		}
+		at = stored // the store moves it past a time it holds itself
+	}
+	delete(b.umbrellas, folder)
+	delete(b.umbrellaTo, folder)
+	delete(b.liveSince, folder)
+	delete(b.missing, folder)
+	delete(b.vacantFrom, folder)
+	delete(b.forgotTo, folder)
+	delete(b.release, folder)
+	b.forgotten[folder] = at
+	if len(b.forgotten) > state.MaxUmbrellas { // the same cut as the state file
+		kept := state.PruneUmbrellas(b.forgotten, now)
+		for f := range b.forgotten {
+			if _, ok := kept[f]; !ok {
+				delete(b.vacantFrom, f)
+				delete(b.forgotTo, f)
+			}
+		}
+		b.forgotten = kept
+	}
+	b.rebuildLocked()
+	return nil
+}
+
+// flushUmbrellas runs on the tick: it forgets remembered umbrellas and holds
+// that are too old, writes the changes to the state file without b.mu, and
 // starts the hourly gone check.
+//
+// A ForgetGrouping can run between reading the changes here and writing
+// them; it writes first (it holds b.mu and takes writeMu). What this flush
+// then writes cannot undo it, in any order and whatever the clock did:
+//   - the forget stores a time strictly later than any time that folder has
+//     stored or pending release (ForgetGrouping, and the store's own check);
+//   - a release names the hold's time as memory had it, and the store keeps
+//     a hold stored with a newer time;
+//   - a touch of a forgotten folder never writes over a newer stored time;
+//   - an umbrella touch of a forgotten folder is skipped by the store, which
+//     never remembers a forgotten folder.
+//
+// Releases are written first, so an umbrella touch of a folder released in
+// the same flush (a late tick) is not skipped. A release that fails is
+// queued again, with the umbrella touches of its folders, for the next tick.
 func (b *Board) flushUmbrellas() {
 	now := b.now()
 	b.mu.Lock()
 	touch := slices.Sorted(maps.Keys(b.umbrellaTo))
 	clear(b.umbrellaTo)
+	touchForgotten := b.forgotTo
+	b.forgotTo = map[string]time.Time{}
+	release := b.release
+	b.release = map[string]time.Time{}
+	for f, at := range b.forgotten {
+		if now.Sub(at) > state.UmbrellaRetention {
+			delete(b.forgotten, f)
+			delete(b.vacantFrom, f)
+			delete(b.forgotTo, f)
+		}
+	}
 	var old []string
 	for u, at := range b.umbrellas {
 		if now.Sub(at) > state.UmbrellaRetention {
@@ -323,7 +480,48 @@ func (b *Board) flushUmbrellas() {
 		}
 	}
 	b.mu.Unlock()
-	b.saveUmbrellas(touch, old, now)
+	if b.opts.State == nil || len(touch)+len(old)+len(touchForgotten)+len(release) == 0 {
+		return
+	}
+	if b.flushGap != nil {
+		b.flushGap()
+	}
+	b.writeMu.Lock()
+	err := b.opts.State.ReleaseForgotten(release)
+	if err != nil {
+		log.Printf("core: could not release forgotten folders: %v", err)
+		// Their umbrella touches would be skipped while the file still holds
+		// them: they wait for the release.
+		touch = slices.DeleteFunc(touch, func(u string) bool { _, held := release[u]; return held })
+	}
+	b.saveUmbrellasHeld(touch, old, now)
+	if err := b.opts.State.TouchForgotten(touchForgotten); err != nil {
+		log.Printf("core: could not save forgotten folders: %v", err)
+	}
+	b.writeMu.Unlock()
+	if err != nil {
+		b.requeueRelease(release, now)
+	}
+}
+
+// requeueRelease queues a release that could not be written for the next
+// tick, keeping a newer queued time, with the umbrella touches of folders
+// remembered since. A folder forgotten again since is not queued: its new
+// hold must stay. Callers do not hold b.mu.
+func (b *Board) requeueRelease(release map[string]time.Time, now time.Time) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for f, at := range release {
+		if _, held := b.forgotten[f]; held {
+			continue
+		}
+		if q, ok := b.release[f]; !ok || at.After(q) {
+			b.release[f] = at
+		}
+		if _, ok := b.umbrellas[f]; ok {
+			b.umbrellaTo[f] = now
+		}
+	}
 }
 
 // checkGone looks whether remembered umbrella folders still exist, off the
@@ -403,6 +601,14 @@ func (b *Board) saveUmbrellas(touch, forget []string, now time.Time) {
 	}
 	b.writeMu.Lock()
 	defer b.writeMu.Unlock()
+	b.saveUmbrellasHeld(touch, forget, now)
+}
+
+// saveUmbrellasHeld is saveUmbrellas for callers that hold b.writeMu.
+func (b *Board) saveUmbrellasHeld(touch, forget []string, now time.Time) {
+	if len(touch)+len(forget) == 0 {
+		return
+	}
 	if err := b.opts.State.TouchUmbrellas(touch, now); err != nil {
 		log.Printf("core: could not save umbrella folders: %v", err)
 	}

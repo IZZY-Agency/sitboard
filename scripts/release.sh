@@ -51,6 +51,8 @@ cd "$ROOT"
 # targets the repository named below on github.com, nothing the environment says.
 unset GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GH_HOST GH_REPO
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+# REPO holds the host: it is gh's HOST/OWNER/REPO form, and every address
+# below is https://$REPO/..., never https://github.com/$REPO/... (issue 45).
 REPO="github.com/IZZY-Agency/sitboard"
 URL="https://$REPO.git"
 if [ -n "${RELEASE_TEST_REMOTE:-}" ]; then
@@ -62,6 +64,7 @@ fi
 VERSION="$(sed -n 's/^RELEASE_VERSION := \([^ ]*\)$/\1/p' Makefile)"
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "RELEASE_VERSION in the Makefile is '${VERSION:-missing}'"
 TAG="v$VERSION"
+PAGE="https://$REPO/releases/tag/$TAG"
 OUT="$ROOT/bin/release/$VERSION"
 FILES=()
 for s in macos-arm64 macos-x86_64 linux-arm64 linux-x86_64; do
@@ -121,6 +124,7 @@ if ((GO == 0)); then
   echo "    copy to $OUT:"
   printf '      %s\n' "${FILES[@]}"
   echo "    gh release create $TAG <the eight files> --repo $REPO --verify-tag --title \"sitboard $VERSION\" --notes-file <notes below>"
+  echo "    the release page: $PAGE"
   echo "    then, by hand: PUBLISH_IDENT=\"Name <email>\" scripts/tap.sh <tap checkout>, review, push"
   step "release notes"
   sed 's/^/    /' "$WORK/notes.md"
@@ -159,5 +163,5 @@ done
 step "gh release create $TAG"
 gh release create "$TAG" "${ASSETS[@]}" --repo "$REPO" --verify-tag \
   --title "sitboard $VERSION" --notes-file "$WORK/notes.md" || fail "gh release create failed"
-step "released: https://github.com/$REPO/releases/tag/$TAG"
+step "released: $PAGE"
 echo "    next, by hand: PUBLISH_IDENT=\"Name <email>\" scripts/tap.sh <tap checkout>, review, push"

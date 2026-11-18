@@ -1,6 +1,7 @@
 <script lang="ts">
   // The result of an action that needs the owner: a folder and name to copy when
-  // there is no terminal to focus, or what failed with a retry.
+  // there is no terminal to focus, or what failed, with a retry when trying
+  // again could help.
   import { fly } from 'svelte/transition';
   import { cubicOut } from 'svelte/easing';
   import type { Notice } from '../data/store.svelte';
@@ -49,7 +50,7 @@
   {:else}
     <h2 class="label">Failed</h2>
     <p><span class="u">{notice.what}</span> failed: <span class="u">{notice.message}</span>.</p>
-    <div class="row"><button type="button" class="act primary" onclick={notice.retry}>Retry</button></div>
+    {#if notice.retry}<div class="row"><button type="button" class="act primary" onclick={notice.retry}>Retry</button></div>{/if}
   {/if}
   <button type="button" class="close" onclick={ondismiss} aria-label="Close">Close</button>
 </section>

@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/IZZY-Agency/sitboard/internal/model"
 )
 
 func readGolden(t *testing.T, name string) []byte {
@@ -291,6 +293,30 @@ func TestEveryEnumHasValues(t *testing.T) {
 	for _, e := range enumList() {
 		if len(e.values) == 0 {
 			t.Errorf("enum %s has no values", e.name)
+		}
+	}
+}
+
+// The page checks artifact links against the contract's pattern, the adapters
+// against the model's; they must be one rule.
+func TestArtifactURLPatternMatchesTheModel(t *testing.T) {
+	if ArtifactURLPattern != model.ArtifactURLPattern {
+		t.Fatalf("contract.ArtifactURLPattern %q != model.ArtifactURLPattern %q", ArtifactURLPattern, model.ArtifactURLPattern)
+	}
+	if !strings.Contains(TypeScript(), "export const ARTIFACT_URL_PATTERN = new RegExp(") {
+		t.Fatal("the generated types do not carry ARTIFACT_URL_PATTERN")
+	}
+}
+
+func TestValidProjectID(t *testing.T) {
+	for _, root := range []string{"/", "/home/dev/work", "relative", ""} {
+		if id := ProjectID(root); !ValidProjectID(id) {
+			t.Errorf("ProjectID(%q) = %q is not valid", root, id)
+		}
+	}
+	for _, id := range []string{"", "p_", "p_0123456789a", "p_0123456789abc", "p_0123456789AB", "q_0123456789ab", " p_0123456789ab", "p_0123456789ab\n", "claude:1234"} {
+		if ValidProjectID(id) {
+			t.Errorf("%q is valid", id)
 		}
 	}
 }

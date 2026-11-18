@@ -92,7 +92,8 @@ function crowd(): Snapshot {
     c.agent.lastActivity = ago(1 + i);
     c.agent.parent = i < 6 ? 'known' : 'none';
     c.agent.parentCardId = i < 6 ? s.cards[0].id : '';
-    c.agent.model = i % 3 ? 'claude-opus-5-5' : 'claude-fable-5-2';
+    // Every model family, a model that is not Claude's and an unknown one, for the chip colours.
+    c.agent.model = ['claude-fable-5-2', 'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-4-5-20251001', 'gpt-5.4-codex', ''][i % 6];
     c.pullRequests =
       c.column === 'in_review' || c.column === 'done' || i % 4 === 1
         ? [
@@ -181,7 +182,7 @@ function one(): Snapshot {
 /**
  * For the website's pictures: invented names only. A coordinator and its
  * workers in a project with two parts, every column in use, pull request
- * lines, and one card that needs you.
+ * lines, artifact links, and one card that needs you.
  */
 function site(): Snapshot {
   const s = golden();
@@ -217,15 +218,18 @@ function site(): Snapshot {
     attention?: Card['attention'];
     prs?: Card['pullRequests'];
     issues?: number[];
+    arts?: string[];
   };
+  let artN = 0;
+  const art = (title: string) => ({ title, url: `https://claude.ai/artifact/exampleArtifact${String(++artN).padStart(4, '0')}` });
   const specs: Spec[] = [
-    { id: lead, projectId: 'p_site00000001', name: 'harbor-lead', title: 'Checkout rewrite: plan, split and review', column: 'working', status: 'busy', since: 12, model: 'claude-fable-5-2', prs: [pr(214, 'merged'), pr(209, 'merged')] },
-    { id: 'claude:site-w1', projectId: 'p_site00000002', name: 'web-checkout', title: 'One-page checkout with saved addresses', column: 'working', status: 'busy', since: 4, lead: true, prs: [pr(221, 'open', 'running')] },
+    { id: lead, projectId: 'p_site00000001', name: 'harbor-lead', title: 'Checkout rewrite: plan, split and review', column: 'working', status: 'busy', since: 12, model: 'claude-fable-5-2', prs: [pr(214, 'merged')], arts: ['Checkout plan'] },
+    { id: 'claude:site-w1', projectId: 'p_site00000002', name: 'web-checkout', title: 'One-page checkout with saved addresses', column: 'working', status: 'busy', since: 4, lead: true, prs: [pr(221, 'open', 'running')], arts: ['Address form layouts'] },
     { id: 'claude:site-w2', projectId: 'p_site00000003', name: 'api-auth', title: 'Session refresh for long-lived tokens', column: 'needs_you', status: 'blocked', since: 2, lead: true, attention: ['blocked'] },
-    { id: 'claude:site-w3', projectId: 'p_site00000002', name: 'web-search', title: 'Search suggestions as you type', column: 'with_coordinator', status: 'finished', since: 18, lead: true },
-    { id: 'claude:site-w4', projectId: 'p_site00000003', name: 'api-payments', title: 'Retry failed card payments once', column: 'in_review', status: 'finished', since: 35, lead: true, prs: [pr(219, 'open', 'passing')], issues: [88] },
+    { id: 'claude:site-w3', projectId: 'p_site00000002', name: 'web-search', title: 'Search suggestions as you type', column: 'with_coordinator', status: 'finished', since: 18, model: 'claude-sonnet-5-5', lead: true },
+    { id: 'claude:site-w4', projectId: 'p_site00000003', name: 'api-payments', title: 'Retry failed card payments once', column: 'in_review', status: 'finished', since: 35, model: 'claude-sonnet-5-5', lead: true, prs: [pr(219, 'open', 'passing')], issues: [88], arts: ['Payment retry flow'] },
     { id: 'claude:site-w5', projectId: 'p_site00000002', name: 'web-a11y', title: 'Keyboard paths through the cart', column: 'done', status: 'finished', since: 95, lead: true, prs: [pr(216, 'merged')] },
-    { id: 'claude:site-d1', projectId: 'p_site00000004', name: 'docs-refresh', title: 'Rewrite the getting-started guide', column: 'in_review', status: 'finished', since: 50, attention: ['failing_checks'], prs: [{ ...pr(41, 'open', 'failing'), repo: 'example-org/lumen-docs', url: 'https://github.com/example-org/lumen-docs/pull/41' }] },
+    { id: 'claude:site-d1', projectId: 'p_site00000004', name: 'docs-refresh', title: 'Rewrite the getting-started guide', column: 'in_review', status: 'finished', since: 50, model: 'claude-haiku-4-5-20251001', attention: ['failing_checks'], prs: [{ ...pr(41, 'open', 'failing'), repo: 'example-org/lumen-docs', url: 'https://github.com/example-org/lumen-docs/pull/41' }] },
     { id: 'claude:site-k1', projectId: 'p_site00000005', name: 'pixel-kit-icons', title: 'Icon set at 16 and 24 pixels', column: 'idle', status: 'finished', since: 300 },
   ];
   s.cards = specs.map((x) => {
@@ -239,6 +243,7 @@ function site(): Snapshot {
     c.seen = true;
     c.subagents = x.id === lead ? 3 : 0;
     c.pullRequests = x.prs ?? [];
+    c.artifacts = (x.arts ?? []).map(art);
     c.issues = (x.issues ?? []).map((n) => ({ repo, number: n, url: `https://github.com/${repo}/issues/${n}` }));
     c.agent.name = x.name;
     c.agent.model = x.model ?? 'claude-opus-5-5';

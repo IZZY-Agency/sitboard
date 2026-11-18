@@ -18,7 +18,7 @@ import (
 // the board must not keep it.
 func TestTickComparesWallClockNotMonotonic(t *testing.T) {
 	t.Setenv("HOME", testHome)
-	b := New(Options{Now: time.Now, StaleAfter: 20 * time.Minute})
+	b := newBoard(t, Options{Now: time.Now, StaleAfter: 20 * time.Minute})
 	b.tick()
 	if strings.Contains(time.Now().String(), "m=") && strings.Contains(b.lastTick.String(), "m=") {
 		t.Fatalf("lastTick keeps a monotonic reading: %s", b.lastTick)
@@ -95,7 +95,7 @@ func (g *gatedRepos) answer(i int, r model.Repo) {
 func TestSlowGitDoesNotFreezeTheBoard(t *testing.T) {
 	t.Setenv("HOME", testHome)
 	g := &gatedRepos{arrived: make(chan struct{}, 8)}
-	b := New(Options{Repos: g, Now: func() time.Time { return tNow }})
+	b := newBoard(t, Options{Repos: g, Now: func() time.Time { return tNow }})
 
 	slow := busySession("s1", tNow)
 	done := make(chan struct{})
@@ -126,7 +126,7 @@ func TestSlowGitDoesNotFreezeTheBoard(t *testing.T) {
 func TestStaleGitAnswerIsDropped(t *testing.T) {
 	t.Setenv("HOME", testHome)
 	g := &gatedRepos{arrived: make(chan struct{}, 8)}
-	b := New(Options{Repos: g, Now: func() time.Time { return tNow }})
+	b := newBoard(t, Options{Repos: g, Now: func() time.Time { return tNow }})
 	start := func() {
 		b.mu.Lock()
 		b.startResolveLocked(alpha)

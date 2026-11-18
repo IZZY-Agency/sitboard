@@ -37,8 +37,8 @@ import (
 // existence are looked up when the folder is chosen, only for folders held
 // in the window, at most probeLookups and probeChecks per update, off the
 // reading goroutine, with at most maxProbes batches in flight in the whole
-// process. One indexing pass waits for them at most probeBudget in all
-// (probeUntil); a hung mount delays the answer, never the reading. While a
+// process (procProber). One indexing pass waits for them at most probeBudget
+// in all (probeUntil); a hung mount delays the answer, never the reading. While a
 // lookup is pending the previous folder stays (on the first read, none, so
 // the launch folder is used): no interim pick is sent. Each folder's group is
 // looked up once while it is held, and again when it comes back after being
@@ -55,10 +55,32 @@ const (
 	maxProbes     = 4  // lookup batches in flight in the whole process
 )
 
-var (
-	probeSlots = make(chan struct{}, maxProbes)
-	probeRun   = runProbe // replaced in tests
-)
+// A prober runs the folder lookups of the tailers that share it.
+type prober struct {
+	run    func(jobs []probeJob, home string) []probeResult
+	slots  chan struct{} // a token per lookup batch in flight
+	budget time.Duration // how long one pass waits for its lookups
+	// expiry fires at a pass's deadline; a nil channel never fires.
+	expiry func(until time.Time) <-chan time.Time
+}
+
+// procProber is the product's only prober: every tailer of the process shares
+// it, so its slots cap the lookup batches in flight in the whole process.
+// Tests make their own, so a batch one test leaves running cannot hold a slot
+// another test needs.
+var procProber = &prober{
+	run: runProbe, slots: make(chan struct{}, maxProbes), budget: probeBudget, expiry: at,
+}
+
+var expiredNow = func() chan time.Time { c := make(chan time.Time); close(c); return c }()
+
+// at fires at until, or at once when until has passed.
+func at(until time.Time) <-chan time.Time {
+	if wait := time.Until(until); wait > 0 {
+		return time.After(wait)
+	}
+	return expiredNow
+}
 
 // validFolder cleans a cwd and reports whether it can be a folder: absolute,
 // with no control character.
@@ -147,46 +169,38 @@ func (t *tailer) unresolved() bool {
 }
 
 // probe starts the lookups the held folders need, most recent first, unless
-// a batch of this tailer is still running or maxProbes batches are, and takes
-// what arrives before probeUntil (probeBudget from now when unset).
+// a batch of this tailer is still running or all the prober's slots are
+// taken, and takes what arrives before probeUntil (the prober's budget from
+// now when unset).
 func (t *tailer) probe(now time.Time) {
+	p := t.prober
 	if t.probing == nil {
 		jobs := t.jobs(now)
 		if len(jobs) == 0 {
 			return
 		}
 		select {
-		case probeSlots <- struct{}{}:
+		case p.slots <- struct{}{}:
 		default:
 			return // the cap on batches in flight is reached: try later
 		}
 		ch := make(chan []probeResult, 1)
-		home, run := t.home, probeRun
+		home := t.home
 		go func() {
-			defer func() { <-probeSlots }()
-			ch <- run(jobs, home)
+			defer func() { <-p.slots }()
+			ch <- p.run(jobs, home)
 		}()
 		t.probing = ch
 	}
 	until := t.probeUntil
 	if until.IsZero() {
-		until = time.Now().Add(probeBudget)
-	}
-	var expired <-chan time.Time
-	if wait := time.Until(until); wait > 0 {
-		timer := time.NewTimer(wait)
-		defer timer.Stop()
-		expired = timer.C
-	} else {
-		closed := make(chan time.Time)
-		close(closed)
-		expired = closed
+		until = time.Now().Add(p.budget)
 	}
 	select {
 	case r := <-t.probing:
 		t.probing = nil
 		t.apply(r, now)
-	case <-expired:
+	case <-p.expiry(until):
 	}
 }
 

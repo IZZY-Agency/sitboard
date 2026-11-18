@@ -17,6 +17,27 @@ The working repository is private. The public repository,
 | `tap.sh` | Writes the formula into the tap checkout from the published release, and commits. |
 | `*_test.sh` | The tests of these scripts; `make check` runs them. |
 
+The release tests run on macOS through `make check`. To run them on Linux as well, commit first, then:
+
+```sh
+make release-test-linux
+```
+
+It clones what is committed into a temporary folder and runs `make release-test` in a `golang:1.27` container (another image: `make release-test-linux LINUX_IMAGE=…`). A plain clone is needed because a worktree's `.git` file points at a host path the container cannot see. Uncommitted changes are not tested, and the target says so when there are any.
+
+## What each private-material scan reads
+
+| Command | Reads | Run by |
+|---|---|---|
+| `check-private.sh` | the work tree: every tracked or untracked, not ignored, file, and what is staged | `make check`, and `publish.sh` on the tree it exports |
+| `check-private.sh --history --scope=branch` | everything reachable from HEAD, the local `main`, `origin/main` and every tag (tag names and annotated tag messages too), each back to its root, and those ref names. Other branches, the stash, notes and other refs are left out; its summary line names its scope and says how many refs it left out | `make check` |
+| `check-private.sh --history` | everything reachable from every ref, and every ref name | `make private-all` on this repository, by hand; `publish.sh`'s gate on the public repository |
+| `check-private.sh --history --pull-refs` | the same, and the heads of origin's pull requests | you, before going public (below) |
+
+`make check` scans only the branch in hand, so another worktree's unfinished branch in the same repository cannot fail it. A scoped clean result is not the full one.
+
+There is one release gate, in `publish.sh`, and its history scan runs on the public repository after the commit, so it never reads this repository's other branches. The full scan of this private repository is run by hand: `make private-all` (the tree and `--history` with the deny-list) before every release, and `--history --pull-refs` before going public.
+
 ## Releasing a version
 
 The version lives in one place: `RELEASE_VERSION` in the Makefile. `CHANGELOG.md` must open with its `## <version>` entry; `make check` enforces that. Every script below ignores your global and system git config and hooks, and none of them pushes.

@@ -10,7 +10,9 @@
     cardTitle,
     columnTone,
     inbox,
+    modelFamily,
     modelLabel,
+    modelUnknown,
     cardPrSummary,
     projectName,
     stateWord,
@@ -119,6 +121,8 @@
               {@const name = agentName(card)}
               {@const pr = prCell(card)}
               {@const unsure = uncertainRole(card, ix)}
+              {@const model = modelLabel(card.agent.model)}
+              {@const family = modelFamily(card.agent.model)}
               <button
                 type="button"
                 class="trow"
@@ -135,7 +139,7 @@
                 <span class="doing">
                   {#if team.solo}<span class="proj u">{projectName(card, ix)}</span>{/if}{#if unsure}<span class="proj">{unsure}</span>{/if}<span class="u">{cardTitle(card)}</span>
                 </span>
-                <span class="model u">{modelLabel(card.agent.model)}</span>
+                <span class="model u {family ? `model-${family}` : ''}" class:unknown={modelUnknown(card.agent.model)} title={model}>{model}</span>
                 <span class="prs tone-{pr?.tone ?? 'muted'} u"
                   >{#each (pr?.text ?? '').split(' · ').filter(Boolean) as part, i (i)}{#if i}{' · '}{/if}<span class="part" class:closes={part.startsWith('closes ')}>{part}</span>{/each}</span
                 >
@@ -238,11 +242,11 @@
     overflow-x: auto;
   }
   .tbl {
-    min-width: 900px;
+    min-width: 920px;
   }
   .trow {
     display: grid;
-    grid-template-columns: 160px 170px minmax(0, 1fr) 100px 250px 84px;
+    grid-template-columns: 160px 170px minmax(0, 1fr) 120px 250px 84px;
     align-items: center;
     width: 100%;
     min-height: 46px;
@@ -313,11 +317,19 @@
     font-size: var(--text-s);
     color: var(--muted);
   }
+  /* 15 characters fit ("model unknown", "gpt-5.4-codex" with room); a longer
+     id is cut with an ellipsis and stays whole in the tooltip. The padding
+     keeps it off the Pull requests text. */
   .model {
+    padding-right: 12px;
     font-size: var(--text-m);
+    color: var(--model, inherit);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .model.unknown {
+    color: var(--muted);
   }
   /* The line is short by construction (prSummary), so it wraps rather than being cut. */
   .prs {

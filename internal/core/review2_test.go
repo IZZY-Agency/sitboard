@@ -87,7 +87,7 @@ func TestSelectionSeenIsPersisted(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		return New(Options{State: st, Now: func() time.Time { return tNow }})
+		return newBoard(t, Options{State: st, Now: func() time.Time { return tNow }})
 	}
 	b := open()
 	b.applySync(model.TerminalFact{ID: termUUID, HasAgent: true})

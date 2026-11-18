@@ -10,7 +10,7 @@ import { clean } from './text';
 
 export type Notice =
   | { kind: 'copy'; cardId: string; name: string; folder: string; why: 'no_agterm' | 'no_terminal' }
-  | { kind: 'failed'; what: string; message: string; retry: () => void };
+  | { kind: 'failed'; what: string; message: string; retry?: () => void }; // no retry when it would fail the same way
 
 /** How long an arrival in Needs you can still flash. A card that mounts later does not. */
 export const FLASH_TTL = 1000;
@@ -39,7 +39,20 @@ export class BoardState {
   conn = $state<Conn>('connecting');
   raw = $state<Snapshot | null>(null);
   retryAt = $state<number | undefined>(undefined);
-  notice = $state<Notice | null>(null);
+  #notice = $state<Notice | null>(null);
+  /**
+   * The last action that succeeded, said to assistive tech; '' when none. Any
+   * change of the notice clears it, so it is never read out again later.
+   */
+  said = $state('');
+
+  get notice(): Notice | null {
+    return this.#notice;
+  }
+  set notice(n: Notice | null) {
+    this.#notice = n;
+    this.said = '';
+  }
   /** When the board stopped being live, while a snapshot is shown; null while live. */
   lostAt = $state<number | null>(null);
   /** card id → flash token, kept for FLASH_TTL so a later remount does not replay it. */
@@ -49,6 +62,7 @@ export class BoardState {
 
   #token = 0;
   #timers = new Set<ReturnType<typeof setTimeout>>();
+  #forgetting = new Map<string, Promise<boolean>>(); // project id -> the forget request that is out
   #now: () => number;
   #actions: () => Actions;
   #stop: (() => void) | null = null;
@@ -138,6 +152,46 @@ export class BoardState {
         message: r.kind === 'failed' ? r.message : 'sitboard refused it',
         retry: () => void this.seen(card),
       };
+  }
+
+  /**
+   * Forgets a project's grouping; true when the server accepted it. One
+   * request per project at a time: a second press while one is out (a double
+   * click on Retry, the rail's and the tiles' control) gets the same answer
+   * instead of sending a second forget, which would fail with "no longer
+   * grouped" after the first worked.
+   */
+  forgetGrouping(project: { id: string; name: string }): Promise<boolean> {
+    const out = this.#forgetting.get(project.id);
+    if (out) return out;
+    const p = this.#forget(project).finally(() => this.#forgetting.delete(project.id));
+    this.#forgetting.set(project.id, p);
+    return p;
+  }
+
+  async #forget(project: { id: string; name: string }): Promise<boolean> {
+    const name = clean(project.name) || 'this project';
+    const r = await this.#actions().forgetGrouping(project.id);
+    if (r.ok) {
+      if (this.notice?.kind === 'failed' && this.notice.what.startsWith('Forget')) this.notice = null;
+      // Emptied first, so the same words twice are still read out twice.
+      this.said = '';
+      const t = setTimeout(() => {
+        this.#timers.delete(t);
+        this.said = `Forgot the grouping of ${name}. Its parts are no longer grouped under it.`;
+      }, 0);
+      this.#timers.add(t);
+      return true;
+    }
+    if (r.kind === 'unauthorized') this.#lostKey();
+    else
+      this.notice = {
+        kind: 'failed',
+        what: `Forget the grouping of ${name}`,
+        message: r.kind === 'failed' ? r.message : 'sitboard refused it',
+        retry: r.kind === 'failed' && r.final ? undefined : () => void this.forgetGrouping(project),
+      };
+    return false;
   }
 
   dismiss() {

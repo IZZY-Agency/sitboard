@@ -11,7 +11,7 @@ GOLANGCI := $(shell command -v golangci-lint 2>/dev/null || echo go run github.c
 # release` stamps it into the binaries, scripts/publish.sh tags it, and
 # CHANGELOG.md must open with its entry. A dev build (`make build`) prints
 # `git describe` instead.
-RELEASE_VERSION := 0.1.0
+RELEASE_VERSION := 0.2.0
 RELEASE_DIR := bin/release/$(RELEASE_VERSION)
 # Published builds sign (and notarize) the macOS binaries; empty: unsigned.
 SIGN_IDENTITY ?=
@@ -26,8 +26,8 @@ HAS_WEB := $(wildcard web/package.json)
 HAS_GEN := $(wildcard internal/contract/gen/main.go)
 HAS_CMD := $(wildcard cmd/sitboard/main.go)
 
-.PHONY: check build test lint web-deps web-check web-build go-build contract contract-check private \
-	notices notices-check release verify-release release-test print-version
+.PHONY: check build test lint web-deps web-check web-build go-build contract contract-check private private-all \
+	notices notices-check release verify-release release-test release-test-linux print-version
 
 check: lint test web-check contract-check notices-check private release-test
 	@echo "make check: all steps passed"
@@ -43,6 +43,14 @@ test:
 # PRIVATE_FLAGS: CI passes --no-denylist (it has no deny-list); locally the list is required.
 private:
 	bash scripts/check-private_test.sh
+	bash scripts/check-private.sh $(PRIVATE_FLAGS)
+	bash scripts/check-private.sh --history --scope=branch $(PRIVATE_FLAGS)
+
+# private-all is the full scan of this repository: the tree, and the history
+# of every ref (other worktrees' branches, the stash, notes, tags). make check
+# scans this branch only; run this before every release. Before going public,
+# also run scripts/check-private.sh --history --pull-refs (scripts/README.md).
+private-all:
 	bash scripts/check-private.sh $(PRIVATE_FLAGS)
 	bash scripts/check-private.sh --history $(PRIVATE_FLAGS)
 
@@ -116,6 +124,26 @@ verify-release:
 
 release-test:
 	bash scripts/release_test.sh
+
+# release-test-linux runs the release tests and the private-material guard's
+# tests on Linux (GNU grep, sed and friends; the public repository's CI runs on
+# Linux), in a container, from a clone of what is committed: a worktree's .git
+# file points at a host path the container cannot see, so the container gets a
+# plain clone, and it clones that again (through git's own protocol, not by
+# copying files across the mount) so nothing is written into the mount.
+# Uncommitted changes are not tested. Ctrl-C stops the container: --init runs
+# tini as its first process, and TINI_KILL_PROCESS_GROUP=1 has it pass the
+# signal to every process in it. Needs docker.
+LINUX_IMAGE ?= golang:1.27
+release-test-linux:
+	@command -v docker >/dev/null || { echo "release-test-linux: needs docker" >&2; exit 2; }
+	@if [ -n "$$(git status --porcelain)" ]; then echo "release-test-linux: uncommitted changes are not tested; the clone sees commits only" >&2; fi
+	@tmp="$$(mktemp -d)" && trap 'rm -rf "$$tmp"' EXIT && \
+	git -c advice.detachedHead=false clone -q . "$$tmp/src" && \
+	echo "release-test-linux: $$(git -C "$$tmp/src" log -1 --format='%h %s') in $(LINUX_IMAGE)" && \
+	docker run --rm --init -e TINI_KILL_PROCESS_GROUP=1 -v "$$tmp/src":/src:ro $(LINUX_IMAGE) \
+	  bash -c 'git config --global --add safe.directory "*" && git -c advice.detachedHead=false clone -q --no-local /src /w && cd /w \
+	    && make release-test && bash scripts/check-private_test.sh'
 
 print-version:
 	@echo $(RELEASE_VERSION)
