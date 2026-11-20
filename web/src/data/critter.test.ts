@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { flushSync } from 'svelte';
 import { AttentionValues, ColumnValues, type Attention, type Card, type Column } from '../contract.gen';
 import { critter, critterCount, type Critter, critterPhase, critterState, drawing, EYES, MOVE_TTL, stateChanges, CRITTER_STATES } from './critter';
@@ -64,6 +64,14 @@ describe('critter generator', () => {
     }
     return [...seen.values()];
   })();
+  // drawing() is the costly part (about 40 us a critter), and three tests need
+  // every critter drawn at both sizes: draw them once, in a hook with a roomy
+  // timeout, so that a slow CI runner spends its time here and not inside a
+  // 5 s test.
+  const drawn: Record<number, ReturnType<typeof drawing>[]> = {};
+  beforeAll(() => {
+    for (const size of [20, 24]) drawn[size] = every.map((m) => drawing(m, size === 20));
+  }, 120_000);
   const rects = (path: string) => [...path.matchAll(/M(-?[\d.]+) (-?[\d.]+)h(-?[\d.]+)v(-?[\d.]+)/g)].map((r) => r.slice(1).map(Number));
   const polygon = (path: string) => path.replace(/[MZ]/g, '').split('L').map((pt) => pt.split(' ').map(Number));
   const inside = (pts: number[][], x: number, y: number) => {
@@ -80,21 +88,27 @@ describe('critter generator', () => {
     const u = 24 / size;
     const whole = (v: number) => Math.abs(v / u - Math.round(v / u)) < 0.01;
     expect(every).toHaveLength(5320);
-    for (const m of every) {
-      const d = drawing(m, size === 20);
-      for (const path of Object.values(d.eyes)) for (const n of path.match(/-?\d+(\.\d+)?/g) ?? []) expect(whole(Number(n))).toBe(true);
+    // One expect() per number is millions of calls and made this test time out
+    // on a slow CI runner: check with plain booleans, collect what is wrong,
+    // and assert once at the end (the list shows the first failures).
+    const wrong: string[] = [];
+    const lookOk = ['-1,1', '-1,0', '0,1'];
+    for (const [i, m] of every.entries()) {
+      const d = drawn[size][i];
+      for (const path of Object.values(d.eyes)) for (const n of path.match(/-?\d+(\.\d+)?/g) ?? []) if (!whole(Number(n))) wrong.push(`${m.key}: eye number ${n} is not on a pixel`);
       const g = d.gaze;
-      for (const v of [...g.work, g.up, g.look]) expect(whole(v)).toBe(true);
-      expect([1, 2]).toContain(Math.round(g.up / u));
-      expect([0, 1, 2]).toContain(Math.round(g.look / u));
-      expect(['-1,1', '-1,0', '0,1']).toContain(g.work.map((v) => Math.round(v / u)).join(','));
+      for (const v of [...g.work, g.up, g.look]) if (!whole(v)) wrong.push(`${m.key}: gaze ${v} is not on a pixel`);
+      if (![1, 2].includes(Math.round(g.up / u))) wrong.push(`${m.key}: looks up by ${g.up}`);
+      if (![0, 1, 2].includes(Math.round(g.look / u))) wrong.push(`${m.key}: looks aside by ${g.look}`);
+      if (!lookOk.includes(g.work.map((v) => Math.round(v / u)).join(','))) wrong.push(`${m.key}: works by ${g.work}`);
     }
-  });
+    expect(wrong.slice(0, 5)).toEqual([]);
+  }, 60_000);
 
   it.each([20, 24])('at %i px every eye, wherever it looks, keeps body around it and a pixel from the notch; the spot keeps two', (size) => {
     const u = 24 / size;
-    for (const m of every) {
-      const d = drawing(m, size === 20);
+    for (const [i, m] of every.entries()) {
+      const d = drawn[size][i];
       const body = polygon(d.body);
       const notch = m.mark === 2 && d.mark ? rects(d.mark)[0] : null;
       const spot = m.mark === 3 && d.mark ? rects(d.mark)[0] : null;
@@ -110,10 +124,10 @@ describe('critter generator', () => {
             if (spot && x1 > spot[0] - 2 * u && x0 < spot[0] + spot[2] + 2 * u && y1 > spot[1] - 2 * u && y0 < spot[1] + spot[3] + 2 * u) expect.fail(`${m.key} at ${size} px: the spot sits by the ${k} eye`);
           }
     }
-  });
+  }, 60_000);
 
   it('keeps most of its marks: the spot at 24 px, the notch at both sizes', () => {
-    const count = (size: number, mark: number) => every.filter((m) => m.mark === mark && drawing(m, size === 20).mark !== '').length / every.filter((m) => m.mark === mark).length;
+    const count = (size: number, mark: number) => every.filter((m, i) => m.mark === mark && drawn[size][i].mark !== '').length / every.filter((m) => m.mark === mark).length;
     expect(count(24, 3)).toBeGreaterThan(0.3);
     expect(count(24, 2)).toBe(1);
     expect(count(20, 2)).toBeGreaterThan(0.8);
