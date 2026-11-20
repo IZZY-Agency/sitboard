@@ -99,6 +99,10 @@ type PRProvider interface {
 	Lookup(ctx context.Context, repo string, numbers []int, branches []string) ([]model.PullRequest, error)
 }
 
+// ErrRepoNotFound is returned by Lookup for a repo GitHub does not know or
+// does not show to the account: gone, renamed, or private.
+var ErrRepoNotFound = errors.New("repository not found")
+
 // Jumper focuses an existing terminal session. It can do nothing else.
 type Jumper interface {
 	Jump(ctx context.Context, terminalID string) error

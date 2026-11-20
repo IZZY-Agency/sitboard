@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -93,7 +95,7 @@ func TestLookupByNumberAndByBranchInOneCall(t *testing.T) {
 	}
 
 	args := f.calls[0]
-	if args[0] != "api" || args[1] != "graphql" {
+	if args[0] != "api" || args[1] != "graphql" || args[2] != "--hostname" || args[3] != "github.com" {
 		t.Fatalf("args = %v", args)
 	}
 	// Untrusted values travel only as raw string variables, never in the query text.
@@ -233,7 +235,7 @@ func TestLoggedOutReportsFailing(t *testing.T) {
 	f := &fakeGh{auth: loggedOut, reply: func([]string) ([]byte, error) { return nil, loggedOut }}
 	p := newTestProvider(f, &clock{t: time.Now()})
 	st := p.Probe(context.Background())
-	if st.State != source.StateFailing || st.Detail != "not logged in" || st.Version != "2.104.0" || !st.Tested {
+	if st.State != source.StateFailing || st.Detail != "not logged in to github.com" || st.Version != "2.104.0" || !st.Tested {
 		t.Fatalf("Probe = %+v", st)
 	}
 	if _, err := p.Lookup(context.Background(), repo, []int{1}, nil); err == nil {
@@ -349,10 +351,10 @@ func TestHostileValuesStayData(t *testing.T) {
 		t.Fatal(err)
 	}
 	args := f.calls[len(f.calls)-1]
-	if args[0] != "api" || args[1] != "graphql" {
+	if args[0] != "api" || args[1] != "graphql" || args[2] != "--hostname" || args[3] != "github.com" {
 		t.Fatalf("args = %v", args)
 	}
-	for i := 2; i < len(args); i += 2 {
+	for i := 4; i < len(args); i += 2 {
 		if args[i] != "-f" {
 			t.Fatalf("argument %d is %q, want -f: %v", i, args[i], args)
 		}
@@ -429,8 +431,8 @@ func TestRepoNotFoundDoesNotFailTheSource(t *testing.T) {
 			Stderr: []byte("gh: Could not resolve to a Repository with the name 'example-org/gone'.")}
 	}}
 	p := newTestProvider(f, &clock{t: time.Now()})
-	if _, err := p.Lookup(context.Background(), "example-org/gone", []int{1}, nil); err == nil {
-		t.Fatal("want an error for that repo")
+	if _, err := p.Lookup(context.Background(), "example-org/gone", []int{1}, nil); !errors.Is(err, source.ErrRepoNotFound) {
+		t.Fatalf("err %v, want source.ErrRepoNotFound", err)
 	}
 	if st := p.Probe(context.Background()); st.State != source.StateOK {
 		t.Fatalf("one missing repo turned the source %s: %+v", st.State, st)
@@ -465,5 +467,46 @@ func TestConcurrentSameLookupsShareOneCall(t *testing.T) {
 		if n != 4 {
 			t.Fatalf("lookup %d got %d pull requests", i, n)
 		}
+	}
+}
+
+// A pull request's address is built from the repo and the number for
+// github.com; whatever gh might say in a url field is never read.
+func TestBuildsThePullRequestAddress(t *testing.T) {
+	answer := `{"data":{"repository":{` +
+		`"n0":{"number":5,"title":"t","url":"javascript:alert(1)","headRefName":"x","state":"OPEN","createdAt":"2026-11-16T09:00:00Z"},` +
+		`"n1":{"number":6,"title":"t","url":"https://evil.example/example-org/example-repo/pull/6","headRefName":"y","state":"MERGED","createdAt":"2026-11-16T09:00:00Z"}}}}`
+	f := &fakeGh{reply: func([]string) ([]byte, error) { return []byte(answer), nil }}
+	prs, err := newTestProvider(f, &clock{t: time.Now()}).Lookup(context.Background(), repo, []int{5, 6}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prs) != 2 {
+		t.Fatalf("prs = %+v", prs)
+	}
+	for _, pr := range prs {
+		if want := fmt.Sprintf("https://github.com/%s/pull/%d", repo, pr.Number); pr.URL != want {
+			t.Errorf("#%d URL = %q, want %q", pr.Number, pr.URL, want)
+		}
+	}
+	for _, a := range f.calls[0] {
+		if strings.HasPrefix(a, "query=") && regexp.MustCompile(`\burl\b`).MatchString(a) {
+			t.Errorf("the query asks gh for a url: %s", a)
+		}
+	}
+}
+
+// The probe asks about github.com only, the one host lookups go to.
+func TestProbeNamesTheHost(t *testing.T) {
+	f := &fakeGh{}
+	newTestProvider(f, &clock{t: time.Now()}).Probe(context.Background())
+	var auth [][]string
+	for _, c := range f.calls {
+		if c[0] == "auth" {
+			auth = append(auth, c)
+		}
+	}
+	if len(auth) != 1 || !slices.Equal(auth[0], []string{"auth", "status", "--hostname", "github.com"}) {
+		t.Fatalf("auth calls = %v", auth)
 	}
 }

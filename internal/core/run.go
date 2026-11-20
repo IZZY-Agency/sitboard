@@ -1,7 +1,9 @@
 package core
 
 import (
+	"cmp"
 	"context"
+	"errors"
 	"regexp"
 	"slices"
 	"strconv"
@@ -10,13 +12,21 @@ import (
 
 	"github.com/IZZY-Agency/sitboard/internal/contract"
 	"github.com/IZZY-Agency/sitboard/internal/model"
+	"github.com/IZZY-Agency/sitboard/internal/source"
 )
 
 const (
-	tickEvery     = 10 * time.Second
-	sleepGap      = tickEvery + 60*time.Second // a longer gap between ticks means the machine slept
-	githubEvery   = time.Minute                // per repo with live work
-	lookupTimeout = 15 * time.Second           // the adapter gives up after 10 s; this is a backstop
+	tickEvery   = 10 * time.Second
+	sleepGap    = tickEvery + 60*time.Second // a longer gap between ticks means the machine slept
+	githubEvery = time.Minute                // per repo with live work
+	endedEvery  = 10 * time.Minute           // per repo whose sessions have all ended (catch-up still wants its merges)
+	// maxEndedRepos caps the repos asked about only for ended sessions, the
+	// newest first. Their references come from the output of the sessions'
+	// own gh pr create commands, so a transcript decides which repos sitboard
+	// asks about; 20 batched calls every endedEvery is at most 120 an hour,
+	// a small part of GitHub's hourly limit, and keeps a first round short.
+	maxEndedRepos = 20
+	lookupTimeout = 15 * time.Second // the adapter gives up after 10 s; this is a backstop
 )
 
 // Run is the core's clock: every 10 s it re-evaluates the time-based rules,
@@ -31,6 +41,7 @@ func (b *Board) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
+			b.learnTick() // what arrived since the last tick, before the store closes
 			return nil
 		case <-tick.C:
 			b.tickCtx(ctx)
@@ -79,6 +90,7 @@ func (b *Board) tickCtx(ctx context.Context) {
 	b.mu.Unlock()
 	b.flushSeen()
 	b.flushUmbrellas()
+	b.learnTick()
 	b.refreshGitHub(ctx, true)
 }
 
@@ -118,6 +130,8 @@ func askKey(repo, what string) string { return repo + "\x00" + what }
 type lookupReq struct {
 	numbers  []int
 	branches []string
+	live     bool      // a session that has not ended asks about this repo
+	newest   time.Time // when the newest ended session asking about it ended
 }
 
 // refreshGitHub looks up pull requests for repos with live work: those due
@@ -134,20 +148,35 @@ func (b *Board) refreshGitHub(ctx context.Context, periodic bool) {
 		return
 	}
 	reqs := b.lookupsLocked()
-	for repo := range reqs {
+	for repo, req := range reqs {
 		last, asked := b.lookedUp[repo]
-		due := periodic && (!asked || since(last, now) >= githubEvery)
+		every := githubEvery
+		if !req.live {
+			every = endedEvery
+		}
+		due := periodic && (!asked || since(last, now) >= every)
 		if !due && !b.pending[repo] {
 			delete(reqs, repo)
 		}
 	}
 	b.mu.Unlock()
 
+	// Repos with live work first, then the ones only ended sessions ask
+	// about, newest first: live cards never wait behind the backlog.
 	repos := make([]string, 0, len(reqs))
 	for r := range reqs {
 		repos = append(repos, r)
 	}
-	slices.Sort(repos)
+	slices.SortFunc(repos, func(x, y string) int {
+		a, c := reqs[x], reqs[y]
+		if a.live != c.live {
+			if a.live {
+				return -1
+			}
+			return 1
+		}
+		return cmp.Or(c.newest.Compare(a.newest), cmp.Compare(x, y))
+	})
 	for _, repo := range repos {
 		req := reqs[repo]
 		lctx, cancel := context.WithTimeout(ctx, lookupTimeout)
@@ -162,8 +191,17 @@ func (b *Board) refreshGitHub(ctx context.Context, periodic bool) {
 		for _, br := range req.branches {
 			b.asked[askKey(repo, "branch:"+br)] = true
 		}
-		if err == nil {
+		switch {
+		case err == nil:
+			delete(b.goneRepos, repo)
+			b.noteMissingLocked(repo, req.numbers, found)
 			b.storePRsLocked(repo, req, found)
+		case errors.Is(err, source.ErrRepoNotFound):
+			// One such answer is enough: for its ended sessions the repo is
+			// not asked again until sitboard restarts, even when the cause
+			// passes (a token not yet authorised for the organisation).
+			// Live sessions still ask.
+			b.goneRepos[repo] = true
 		}
 		b.rebuildLocked()
 		b.mu.Unlock()
@@ -200,8 +238,13 @@ func (b *Board) liveFoldersLocked() []string {
 }
 
 // lookupsLocked groups, per repo, the pull requests of sessions with live
-// work: sessions that have not ended, and ended ones that may still hold a
-// card because of their pull requests. Repos with nothing to ask are absent.
+// work: sessions that have not ended, and ended ones for up to
+// catchupWindow after they ended, so a merge made after a worker ended still
+// reaches the board and catch-up. For an ended session, a pull request GitHub
+// already called merged or closed is not asked about again (that state is
+// final), nor one GitHub did not find, nor any in a repo GitHub did not find;
+// and a repo only ended sessions ask about is asked every endedEvery, not
+// every minute. Repos with nothing to ask are absent.
 func (b *Board) lookupsLocked() map[string]lookupReq {
 	now := b.now()
 	reqs := map[string]lookupReq{}
@@ -210,14 +253,11 @@ func (b *Board) lookupsLocked() map[string]lookupReq {
 			continue
 		}
 		if s.Ended {
-			if !keepEnded {
-				continue
-			}
 			endedAt := s.EndedAt
 			if endedAt.IsZero() {
 				endedAt = s.LastActivity
 			}
-			if since(endedAt, now) > endedOpenLimit {
+			if since(endedAt, now) > max(endedOpenLimit, catchupWindow) {
 				continue
 			}
 		}
@@ -225,9 +265,18 @@ func (b *Board) lookupsLocked() map[string]lookupReq {
 			if !validRepo(ref.Repo) || ref.Number <= 0 {
 				continue
 			}
+			if s.Ended {
+				if pr, ok := b.prs[ref]; (ok && pr.State != model.PRStateOpen) || b.missingRefs[ref] || b.goneRepos[ref.Repo] {
+					continue
+				}
+			}
 			r := reqs[ref.Repo]
 			if !slices.Contains(r.numbers, ref.Number) {
 				r.numbers = append(r.numbers, ref.Number)
+			}
+			r.live = r.live || !s.Ended
+			if s.Ended && s.EndedAt.After(r.newest) {
+				r.newest = s.EndedAt
 			}
 			reqs[ref.Repo] = r
 		}
@@ -237,16 +286,42 @@ func (b *Board) lookupsLocked() map[string]lookupReq {
 				if !slices.Contains(r.branches, repo.Branch.V) {
 					r.branches = append(r.branches, repo.Branch.V)
 				}
+				r.live = true
 				reqs[repo.Slug] = r
 			}
 		}
 	}
+	var endedOnly []string
 	for repo, r := range reqs {
 		slices.Sort(r.numbers)
 		slices.Sort(r.branches)
 		reqs[repo] = r
+		if !r.live {
+			endedOnly = append(endedOnly, repo)
+		}
+	}
+	if len(endedOnly) > maxEndedRepos {
+		slices.SortFunc(endedOnly, func(x, y string) int {
+			return cmp.Or(reqs[y].newest.Compare(reqs[x].newest), cmp.Compare(x, y))
+		})
+		for _, repo := range endedOnly[maxEndedRepos:] {
+			delete(reqs, repo)
+		}
 	}
 	return reqs
+}
+
+// noteMissingLocked records which numbers a successful lookup did not find,
+// so ended sessions stop asking about them. Callers hold b.mu.
+func (b *Board) noteMissingLocked(repo string, numbers []int, found []model.PullRequest) {
+	for _, n := range numbers {
+		ref := model.PRRef{Repo: repo, Number: n}
+		if slices.ContainsFunc(found, func(pr model.PullRequest) bool { return pr.Number == n && (pr.Repo == repo || pr.Repo == "") }) {
+			delete(b.missingRefs, ref)
+		} else {
+			b.missingRefs[ref] = true
+		}
+	}
 }
 
 // storePRsLocked records a lookup's answer. Branch matches are replaced for

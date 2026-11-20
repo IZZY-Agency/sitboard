@@ -1,7 +1,9 @@
 // Package github looks up pull requests through the user's own gh. It never
 // reads, stores or passes a token, and never logs gh's output.
 //
-// One Lookup is one read-only GraphQL call per repo. Every untrusted value
+// One Lookup is one read-only GraphQL call per repo, always to
+// model.GitHubHost: gh's GH_HOST, which the user may have set for another
+// host, never sends it elsewhere. Every untrusted value
 // (owner, name, branch) travels as a raw string variable (-f), never inside the
 // query text and never through gh's typed -F fields, which read files on "@".
 package github
@@ -133,7 +135,7 @@ func (p *provider) probeNow(ctx context.Context) source.Status {
 		st.Tested = slices.Contains(testedVersions, st.Version)
 	}
 	// Only the exit code is read. The output is discarded: it can name the account.
-	if _, err := p.exec(ctx, "auth", "status", "--hostname", "github.com"); err != nil {
+	if _, err := p.exec(ctx, "auth", "status", "--hostname", model.GitHubHost); err != nil {
 		st.State, st.Detail = source.StateFailing, classify(err)
 		return st
 	}
@@ -220,7 +222,7 @@ type flight struct {
 
 // fetch runs the one gh call for a lookup and updates the cache and health.
 func (p *provider) fetch(ctx context.Context, key, repo, owner, name string, nums []int, brs []string, c cached, hit bool) ([]model.PullRequest, error) {
-	args := []string{"api", "graphql", "-f", "query=" + buildQuery(nums, len(brs)), "-f", "owner=" + owner, "-f", "name=" + name}
+	args := []string{"api", "graphql", "--hostname", model.GitHubHost, "-f", "query=" + buildQuery(nums, len(brs)), "-f", "owner=" + owner, "-f", "name=" + name}
 	for i, b := range brs {
 		args = append(args, "-f", "b"+strconv.Itoa(i)+"="+b)
 	}
@@ -244,6 +246,9 @@ func (p *provider) fetch(ctx context.Context, key, repo, owner, name string, num
 				return slices.Clone(c.prs), nil
 			}
 			return nil, errRateLimited
+		}
+		if note == noteRepoNotFound {
+			return nil, fmt.Errorf("github: %w", source.ErrRepoNotFound)
 		}
 		return nil, fmt.Errorf("github: %s: %w", note, unwrapCtx(err))
 	}
@@ -301,7 +306,9 @@ func classify(err error) string {
 		return "rate limited"
 	case strings.Contains(msg, "gh auth login"), strings.Contains(msg, "not logged in"),
 		strings.Contains(msg, "http 401"), strings.Contains(msg, "bad credentials"):
-		return "not logged in"
+		// Lookups and the probe go to one host only: say which, so an owner
+		// logged in elsewhere (an Enterprise host) knows what is missing.
+		return "not logged in to " + model.GitHubHost
 	case strings.Contains(msg, "could not resolve to a repository"):
 		return noteRepoNotFound
 	default:
@@ -364,7 +371,9 @@ func cacheKey(repo string, nums []int, brs []string) string {
 
 // closingIssuesReferences is capped at 50: a pull request closing more lists
 // only the first 50.
-const prFields = `number title url headRefName isCrossRepository state isDraft createdAt closedAt mergedAt reviewDecision ` +
+// A pull request's address is not asked for: it is built from the repo and the
+// number (model.PullRequestURL).
+const prFields = `number title headRefName isCrossRepository state isDraft createdAt closedAt mergedAt reviewDecision ` +
 	`closingIssuesReferences(first:50){nodes{number repository{nameWithOwner}}} ` +
 	`commits(last:1){nodes{commit{statusCheckRollup{state}}}}`
 
@@ -390,7 +399,6 @@ func buildQuery(nums []int, nBranches int) string {
 type ghPR struct {
 	Number         int     `json:"number"`
 	Title          string  `json:"title"`
-	URL            string  `json:"url"`
 	HeadRefName    string  `json:"headRefName"`
 	CrossRepo      bool    `json:"isCrossRepository"`
 	State          string  `json:"state"`
@@ -484,7 +492,7 @@ func parse(out []byte, repo string) ([]model.PullRequest, error) {
 
 func toModel(g *ghPR, repo string) (model.PullRequest, bool) {
 	pr := model.PullRequest{
-		Repo: repo, Number: g.Number, Title: g.Title, URL: g.URL, HeadBranch: g.HeadRefName,
+		Repo: repo, Number: g.Number, Title: g.Title, URL: model.PullRequestURL(repo, g.Number), HeadBranch: g.HeadRefName,
 		Draft: g.IsDraft, OpenedAt: parseTime(g.CreatedAt),
 	}
 	switch g.State {
@@ -502,9 +510,6 @@ func toModel(g *ghPR, repo string) (model.PullRequest, bool) {
 	}
 	if pr.ClosedAt.IsZero() && pr.State != model.PRStateOpen && g.ClosedAt != nil {
 		pr.ClosedAt = parseTime(*g.ClosedAt)
-	}
-	if !strings.HasPrefix(pr.URL, "https://github.com/") {
-		pr.URL = ""
 	}
 	pr.Checks = model.ChecksNone
 	if n := len(g.Commits.Nodes); n > 0 {

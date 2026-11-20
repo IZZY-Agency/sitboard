@@ -18,6 +18,8 @@
   import { clean } from '../data/text';
   import { flipOpts, makeMove } from '../motion';
   import Count from '../components/Count.svelte';
+  import Critter from '../components/Critter.svelte';
+  import { critterState } from '../data/critter';
   import InboxItem from '../components/InboxItem.svelte';
 
   let {
@@ -111,6 +113,7 @@
                 <button
                   type="button"
                   class="it"
+                  data-card={card.id}
                   animate:flip={flipOpts()}
                   in:receive={{ key: card.id }}
                   out:send={{ key: card.id }}
@@ -118,13 +121,17 @@
                 >
                   <span class="visually-hidden">{canJump(card, snapshot.agtermPresent) ? 'Jump to agterm:' : 'Show where it runs:'}</span>
                   <span class="it-top">
-                    <span class="dot tone-{columnTone(card.column)}" class:pulse={card.column === 'working'}></span>
+                    <Critter id={card.id} mood={critterState(card)} size={20} />
                     <span class="agent u">{name}</span>
                     <span class="since">{timeInState(card, now)}</span>
                   </span>
                   <span class="note tone-{note.tone} u"
                     >{#if note.head}{note.head}{' · '}{/if}<span class="model {note.hue ? `model-${note.hue}` : ''}">{note.model}</span
-                    >{#if note.tail}{' · '}{note.tail}{/if}{#if note.closes}{' · '}<span class="closes u">{note.closes}</span>{/if}</span>
+                    >{#if note.effort}<span class="visually-hidden">, effort</span>{' '}<span
+                        class="eff effort-{note.effort.level}"
+                        class:launch={note.effort.launch}
+                        title={note.effort.title}>{note.effort.level}{#if note.effort.launch}<span class="at">{' at launch'}</span>{/if}</span
+                      >{/if}{#if note.tail}{' · '}{note.tail}{/if}{#if note.closes}{' · '}<span class="closes u">{note.closes}</span>{/if}</span>
                 </button>
               {/each}
             </div>
@@ -271,6 +278,8 @@
     color: var(--fg-body);
   }
   .it {
+    /* The critter's eyes are holes in the page ground. */
+    --hole: var(--bg);
     display: flex;
     flex-direction: column;
     justify-content: center;
@@ -307,7 +316,7 @@
     color: var(--muted);
   }
   .note {
-    padding-left: 14px;
+    padding-left: 27px;
     font-size: var(--text-xs);
     line-height: 1.45;
     color: var(--tone);
@@ -318,5 +327,28 @@
   }
   .model {
     color: var(--model, inherit);
+  }
+  /* The level keeps the note's tone, apart from a muted note, where it is on
+     the ramp. From high up it is heavier and sits on a small filled patch
+     (base.css), on the ramp in every note: the ramp is what reads on the
+     fill. Set at launch, it has no patch. */
+  .eff {
+    color: inherit;
+    font-weight: var(--effort-weight, 400);
+  }
+  .tone-muted .eff,
+  .eff:is(.effort-high, .effort-xhigh, .effort-max):not(.launch) {
+    color: var(--effort);
+  }
+  .eff:is(.effort-high, .effort-xhigh, .effort-max):not(.launch) {
+    padding: 0 4px;
+    background: var(--effort-fill);
+  }
+  /* "at launch" no brighter than the faintest level; in a needs-you or failing note it keeps the tone. */
+  .tone-muted .at {
+    color: var(--effort-low);
+  }
+  .at {
+    font-weight: 400;
   }
 </style>

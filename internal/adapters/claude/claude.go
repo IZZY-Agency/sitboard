@@ -17,12 +17,27 @@
 // a whole artifact's delete exists to model, so a deleted artifact stays
 // listed.
 //
+// Sessions that had already ended when sitboard started are indexed once, in
+// the background after the live ones: those whose record file is still there
+// (a crash) and those found only by their transcript (Claude Code removes the
+// record when a session exits; the transcript keeps the session id as its
+// name). Only transcripts changed within turnWindow count, and of a transcript
+// first opened for a last pass only the last endedReadCap bytes are read. A
+// session found by its transcript counts only when its lines say it was
+// interactive (entrypoint "cli", or none): claude -p and the SDK runs are left
+// out. Its name is the one Claude Code recorded in its agent-name lines; its
+// start time and status are lost with the record. A session that ends while
+// sitboard runs gets one last pass too. After that last pass only the derived
+// facts are kept, not the tailers, and they go once the session ended more
+// than turnWindow ago.
+//
 // All facts are emitted from one goroutine, so a fact and a gone for one
 // session never swap. Nothing from a transcript but derived fields leaves this
 // package, and only one environment variable is read from a live process.
 package claude
 
 import (
+	"cmp"
 	"context"
 	"io"
 	"os"
@@ -31,6 +46,7 @@ import (
 	"regexp"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -51,9 +67,9 @@ type adapter struct {
 	root     string // <Home>/.claude
 	now      func() time.Time
 	starts   startsFunc
-	termID   func(pid int) string
-	tick     time.Duration // transcript growth (stat only) and re-adding the watch
-	liveTick time.Duration // full rescan with ps: liveness
+	proc     func(pid int) procFacts // read once per process
+	tick     time.Duration           // transcript growth (stat only) and re-adding the watch
+	liveTick time.Duration           // full rescan with ps: liveness
 	debounce time.Duration
 	prober   *prober // folder lookups (procProber; tests have their own)
 	// beforeIndex, when set, runs in the indexer before each batch (tests).
@@ -68,7 +84,7 @@ func New(opts Options) source.Watcher {
 	}
 	return &adapter{
 		opts: opts, root: filepath.Join(opts.Home, ".claude"), now: now,
-		starts: defaultStarts(), termID: readAgtermID,
+		starts: defaultStarts(), proc: readProcFacts,
 		tick: 3 * time.Second, liveTick: 10 * time.Second, debounce: 100 * time.Millisecond,
 		prober: procProber,
 	}
@@ -142,11 +158,25 @@ type sess struct {
 	ended      bool
 	endedAt    time.Time
 	termID     string
-	termKey    string    // pid and process start the terminal id was read for
+	launch     string    // the effort level the process was started with, "" when none
+	termKey    string    // pid and process start the process facts were read for
 	transcript string    // "" until found
 	globAt     time.Time // last search of every project folder for it
 	d          derived
 	subagents  int
+	// final: the last indexing pass after the session ended was applied; it
+	// is not indexed again unless it comes back to life.
+	final bool
+	// found: known only from its transcript (no record file); it is sent once
+	// its last pass is in, never as an empty fact first.
+	found bool
+	// headless: at its last pass its transcript said it was not an
+	// interactive session (claude -p, the SDKs), or nothing in it could be
+	// read. It is not sent (one sent while it ran is withdrawn), and nothing
+	// read from it is kept.
+	headless bool
+	// ends counts the times the session ended: each end has its own last pass.
+	ends int
 }
 
 // Run emits the live sessions at once, then derived facts as the transcripts
@@ -155,6 +185,7 @@ func (a *adapter) Run(ctx context.Context, emit func(model.Fact)) error {
 	ready := model.SourceReady{Kind: string(source.KindClaude)}
 	if fi, err := os.Stat(a.root); err != nil || !fi.IsDir() {
 		emit(ready)
+		emit(model.BackfillDone{Kind: string(source.KindClaude)}) // nothing to read
 		return nil
 	}
 	ctx, cancel := context.WithCancel(ctx)
@@ -181,7 +212,7 @@ func (a *adapter) Run(ctx context.Context, emit func(model.Fact)) error {
 		events, werrs = w.Events, w.Errors
 	}
 
-	r := &registry{a: a, emit: emit, sessions: map[string]*sess{}, sent: map[string]model.SessionFact{}}
+	r := &registry{a: a, emit: emit, sessions: map[string]*sess{}, sent: map[string]model.SessionFact{}, firsts: map[string]firstSession{}}
 	watch()
 	r.rescan(ctx)
 	if ctx.Err() != nil {
@@ -189,6 +220,9 @@ func (a *adapter) Run(ctx context.Context, emit func(model.Fact)) error {
 	}
 	emit(ready) // every live session is out; the transcripts follow in the background
 	ix.want(r.jobs())
+	r.discover() // after the first paint: what ended before this start
+	ix.want(r.jobs())
+	r.checkBackfill()
 
 	// The fast tick only stats transcripts; ps runs on the slow one, or when
 	// a session file changes.
@@ -237,12 +271,28 @@ func (a *adapter) Run(ctx context.Context, emit func(model.Fact)) error {
 	}
 }
 
+// firstSession is the first session seen in one process.
+type firstSession struct {
+	pid       int
+	procStart string
+	id        string
+}
+
 // registry is the Run goroutine's state. Only that goroutine touches it.
 type registry struct {
 	a        *adapter
 	emit     func(model.Fact)
 	sessions map[string]*sess
 	sent     map[string]model.SessionFact
+	// firsts maps a live process (pid and start) to the first session seen
+	// running in it. A later one is the same process after /clear: its launch
+	// level may be stale (an /effort before the clear carries over), so it is
+	// not shown. An entry goes only when ps says the process is gone, never
+	// because its session file was missing or unreadable in one scan.
+	firsts map[string]firstSession
+	// backfilling: the sessions that had ended before this start are still
+	// being read; BackfillDone is sent when they are.
+	backfilling bool
 }
 
 func (r *registry) rescan(ctx context.Context) {
@@ -270,11 +320,15 @@ func (r *registry) rescan(ctx context.Context) {
 		recs[rec.SessionID], files[rec.SessionID] = rec, path
 	}
 
-	pids := make([]int, 0, len(recs))
+	pids := make([]int, 0, len(recs)+len(r.firsts))
 	for _, rec := range recs {
 		pids = append(pids, rec.PID)
 	}
+	for _, f := range r.firsts { // the processes behind the /clear rule, record or not
+		pids = append(pids, f.pid)
+	}
 	slices.Sort(pids)
+	pids = slices.Compact(pids)
 	starts, known := a.starts(ctx, pids)
 	if ctx.Err() != nil {
 		return
@@ -287,29 +341,45 @@ func (r *registry) rescan(ctx context.Context) {
 			s = &sess{}
 			r.sessions[id] = s
 		}
-		s.rec, s.recFile = rec, files[id]
+		s.rec, s.recFile, s.found = rec, files[id], false
 		switch start, running := starts[rec.PID]; {
 		case !known:
 			s.live, s.ended = model.Unknown[bool](), false
 		case running && (rec.ProcStart == "" || sameStart(start, rec.ProcStart)):
-			s.live, s.ended, s.endedAt = model.Of(true), false, time.Time{}
+			s.live, s.ended, s.endedAt, s.final, s.headless = model.Of(true), false, time.Time{}, false, false
 		default: // the process is gone, or its pid now belongs to another program
 			if !s.ended {
 				s.ended, s.endedAt = true, lastChange(s.recFile, s.transcript)
+				s.ends++
 			}
 			s.live = model.Of(false)
 		}
 		if s.live.V && s.live.OK {
 			if key := strconv.Itoa(rec.PID) + "|" + rec.ProcStart; key != s.termKey {
-				s.termKey, s.termID = key, a.termID(rec.PID)
+				p := a.proc(rec.PID)
+				s.termKey, s.termID, s.launch = key, p.TermID, p.LaunchEffort
+			}
+			if first, seen := r.firsts[s.termKey]; !seen {
+				r.firsts[s.termKey] = firstSession{pid: rec.PID, procStart: rec.ProcStart, id: id}
+			} else if first.id != id {
+				s.launch = ""
 			}
 		} else {
-			s.termKey, s.termID = "", ""
+			s.termKey, s.termID, s.launch = "", "", ""
 		}
 		if s.transcript == "" {
 			s.transcript = a.findTranscript(id, rec.Cwd, now.Sub(s.globAt) >= globEvery)
 			if s.transcript == "" && now.Sub(s.globAt) >= globEvery {
 				s.globAt = now
+			}
+		}
+	}
+
+	if known {
+		for k, f := range r.firsts {
+			start, running := starts[f.pid]
+			if !running || (f.procStart != "" && !sameStart(start, f.procStart)) {
+				delete(r.firsts, k) // the process is gone, or its pid is another program's
 			}
 		}
 	}
@@ -326,17 +396,44 @@ func (r *registry) rescan(ctx context.Context) {
 			// while its transcript exists; then it is gone.
 			if !s.ended {
 				s.ended, s.endedAt, s.live = true, now, model.Of(false)
-				s.termKey, s.termID = "", ""
+				s.termKey, s.termID, s.launch = "", "", ""
+				s.ends++
 			}
-			if s.transcript == "" || !exists(s.transcript) {
+			// Gone too once it ended more than turnWindow ago: nothing of it
+			// is shown any more, so nothing of it is kept.
+			if s.transcript == "" || !exists(s.transcript) || (s.ended && now.Sub(s.endedAt) > turnWindow) {
+				_, sent := r.sent[id]
 				delete(r.sessions, id)
 				delete(r.sent, id)
-				r.emit(model.SessionGone{Key: model.SessionKey{Tool: model.ToolClaude, ID: id}})
+				if sent || !s.found {
+					r.emit(model.SessionGone{Key: model.SessionKey{Tool: model.ToolClaude, ID: id}})
+				}
 				continue
 			}
 		}
+		if (s.found && !s.final) || s.headless {
+			continue // not indexed yet, or not an interactive session
+		}
 		r.send(id, s)
 	}
+	r.checkBackfill()
+}
+
+// checkBackfill sends BackfillDone once, when every session that had ended
+// before this start has had its last pass (or left: its transcript went, or
+// it fell out of the window).
+func (r *registry) checkBackfill() {
+	if !r.backfilling {
+		return
+	}
+	now := r.a.now()
+	for _, s := range r.sessions {
+		if s.ended && !s.final && s.transcript != "" && now.Sub(s.endedAt) <= turnWindow {
+			return
+		}
+	}
+	r.backfilling = false
+	r.emit(model.BackfillDone{Kind: string(source.KindClaude)})
 }
 
 func exists(path string) bool {
@@ -397,24 +494,82 @@ func (a *adapter) findTranscript(id, cwd string, search bool) string {
 	return ""
 }
 
-func (r *registry) jobs() map[string]job {
-	jobs := map[string]job{}
-	for id, s := range r.sessions {
-		if s.ended || s.transcript == "" {
+// discover adds the sessions that had ended before this start and left no
+// record file. Their transcripts are named by session id, in their folder's
+// project directory; those changed within turnWindow are indexed once. Links
+// are not followed, neither to a folder nor to a file. A transcript in two
+// project directories (a session resumed in another folder) counts once: the
+// one changed last.
+func (r *registry) discover() {
+	r.backfilling = true
+	now := r.a.now()
+	dirs, _ := os.ReadDir(r.a.projectsDir())
+	for _, d := range dirs {
+		if !d.IsDir() {
 			continue
 		}
-		jobs[id] = job{id: id, main: s.transcript, subDir: filepath.Join(filepath.Dir(s.transcript), id, "subagents")}
+		dir := filepath.Join(r.a.projectsDir(), d.Name())
+		entries, _ := os.ReadDir(dir)
+		for _, e := range entries {
+			id, ok := strings.CutSuffix(e.Name(), ".jsonl")
+			if !ok || !e.Type().IsRegular() || !validSessionID(id) {
+				continue
+			}
+			old := r.sessions[id]
+			if old != nil && !old.found {
+				continue // a session with a record: the registry has it
+			}
+			info, err := e.Info()
+			if err != nil || now.Sub(info.ModTime()) > turnWindow || (old != nil && !info.ModTime().After(old.endedAt)) {
+				continue
+			}
+			r.sessions[id] = &sess{
+				rec: record{SessionID: id}, transcript: filepath.Join(dir, e.Name()),
+				live: model.Of(false), ended: true, endedAt: info.ModTime(), found: true, ends: 1,
+			}
+		}
+	}
+}
+
+// jobs lists the sessions to index: the live ones, and the ended ones until
+// their last pass is in, if they ended within turnWindow.
+func (r *registry) jobs() map[string]job {
+	now := r.a.now()
+	jobs := map[string]job{}
+	for id, s := range r.sessions {
+		if s.transcript == "" || s.final || (s.ended && now.Sub(s.endedAt) > turnWindow) {
+			continue
+		}
+		jobs[id] = job{id: id, main: s.transcript, subDir: filepath.Join(filepath.Dir(s.transcript), id, "subagents"), ended: s.ended, gen: s.ends}
 	}
 	return jobs
 }
 
 func (r *registry) applyIndex(res result) {
 	s := r.sessions[res.id]
-	if s == nil || s.ended {
+	if s == nil || s.final || s.ended != res.final || (res.final && res.gen != s.ends) {
+		return // a pass from before the session ended (or ended again): its last pass follows
+	}
+	s.d, s.subagents, s.final = res.d, res.subagents, res.final
+	if res.final && (!res.readable || !interactive(s.d.Entrypoint)) {
+		s.headless, s.d, s.subagents = true, derived{}, 0
+		if _, sent := r.sent[res.id]; sent { // a claude -p run seen while it ran
+			delete(r.sent, res.id)
+			r.emit(model.SessionGone{Key: model.SessionKey{Tool: model.ToolClaude, ID: res.id}})
+		}
+		r.checkBackfill()
 		return
 	}
-	s.d, s.subagents = res.d, res.subagents
 	r.send(res.id, s)
+	r.checkBackfill()
+}
+
+// interactive: what a transcript's entrypoint says. Headless runs are
+// claude -p ("sdk-cli"), the SDKs ("sdk-…") and the MCP server ("mcp");
+// everything else is a person's session: the terminal ("cli"), the IDE and
+// desktop apps, remote and chat ones. None (an older Claude Code) counts.
+func interactive(entrypoint string) bool {
+	return !strings.HasPrefix(entrypoint, "sdk-") && entrypoint != "mcp"
 }
 
 // send emits the session's fact when it differs from the last one sent.
@@ -431,7 +586,7 @@ func (r *registry) fact(id string, s *sess) model.SessionFact {
 	rec := s.rec
 	f := model.SessionFact{
 		Key:         model.SessionKey{Tool: model.ToolClaude, ID: id},
-		Name:        rec.Name,
+		Name:        cmp.Or(rec.Name, s.d.Name),
 		ToolVersion: rec.Version,
 		Status:      mapStatus(rec.Status),
 		StatusSince: msTime(rec.StatusUpdatedAt),
@@ -445,12 +600,22 @@ func (r *registry) fact(id string, s *sess) model.SessionFact {
 		CreatedPRs:  slices.Clone(s.d.CreatedPRs),
 		Artifacts:   slices.Clone(s.d.Artifacts),
 		WorkerHint:  workerHint(s.d),
+		Backfill:    s.found,
+		Headless:    !interactive(s.d.Entrypoint),
 	}
 	if f.Folder == "" {
 		f.Folder, _ = validFolder(rec.Cwd)
 	}
 	if s.d.Model != "" {
 		f.Model = model.Of(s.d.Model)
+	}
+	switch {
+	case s.d.Effort != "":
+		f.Effort = model.Of(s.d.Effort)
+	case s.d.Model == "" && s.launch != "":
+		// No reply yet (every main-chain reply sets the model): the level the
+		// process was started with, until the first reply replaces it.
+		f.Effort, f.EffortAtLaunch = model.Of(s.launch), true
 	}
 	f.LastActivity = s.d.LastActivity
 	if u := msTime(rec.UpdatedAt); u.After(f.LastActivity) && !u.After(r.a.now().Add(24*time.Hour)) {

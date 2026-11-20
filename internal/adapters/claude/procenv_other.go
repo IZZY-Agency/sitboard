@@ -2,5 +2,6 @@
 
 package claude
 
-// readAgtermID is not supported on this platform: no terminal link.
-func readAgtermID(int) string { return "" }
+// readProcFacts is not supported on this platform: no terminal link and no
+// launch effort.
+func readProcFacts(int) procFacts { return procFacts{} }

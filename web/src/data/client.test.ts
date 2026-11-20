@@ -10,6 +10,7 @@ function snap(seq: number, version = CONTRACT_VERSION): Snapshot {
     sources: [],
     projects: [],
     cards: [],
+    groupingSettings: [],
     plainShells: 0,
     counts: { working: 0, needsYou: 0, inReview: 0, stale: 0 },
     agtermPresent: false,

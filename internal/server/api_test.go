@@ -197,6 +197,37 @@ func TestAssetsServedWithCorrectTypes(t *testing.T) {
 	}
 }
 
+func TestTabIconsMayBeKeptButNothingElse(t *testing.T) {
+	h := newHarness()
+	w := h.do(req(http.MethodGet, "/badge/lost.svg", ""))
+	wantStatus(t, w, http.StatusOK)
+	if got := w.Header().Get("Cache-Control"); got != BadgeCache {
+		t.Errorf("badge Cache-Control %q, want %q", got, BadgeCache)
+	}
+	if !strings.Contains(BadgeCache, "private") || !strings.Contains(BadgeCache, "max-age=") {
+		t.Errorf("BadgeCache %q must be private with a max-age", BadgeCache)
+	}
+	// Not an error, not another file, and never without the key.
+	for _, path := range []string{"/badge/", "/badge/nope.svg", "/favicon.svg", "/", "/assets/icon.svg", "/badge/../favicon.svg", "/badge/..", "/badge/./lost.svg", "/badge//lost.svg"} {
+		if got := h.do(req(http.MethodGet, path, "")).Header().Get("Cache-Control"); got != "" {
+			t.Errorf("%s: Cache-Control %q, want none", path, got)
+		}
+	}
+	// A version query names the same file and keeps the header.
+	w = h.do(req(http.MethodGet, "/badge/lost.svg?v=abc1234", ""))
+	wantStatus(t, w, http.StatusOK)
+	if got := w.Header().Get("Cache-Control"); got != BadgeCache {
+		t.Errorf("versioned badge Cache-Control %q", got)
+	}
+	keyless := req(http.MethodGet, "/badge/lost.svg", "")
+	keyless.Header.Del("Cookie")
+	w = h.do(keyless)
+	wantStatus(t, w, http.StatusUnauthorized)
+	if got := w.Header().Get("Cache-Control"); got == BadgeCache {
+		t.Errorf("a refused badge request must not be kept: Cache-Control %q", got)
+	}
+}
+
 func TestNotBuiltPage(t *testing.T) {
 	h := New(Options{Board: newFakeBoard(), Token: testToken, Addr: testAddr, Assets: emptyFS{}})
 	w := httptest.NewRecorder()

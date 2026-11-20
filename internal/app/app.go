@@ -7,6 +7,7 @@ package app
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/IZZY-Agency/sitboard/internal/contract"
 )
@@ -34,8 +35,9 @@ type Board interface {
 
 	// MarkSeen marks a card seen. Unknown card ids are an error.
 	MarkSeen(cardID string) error
-	// MarkCatchupRead moves the catch-up marker to now.
-	MarkCatchupRead() error
+	// MarkCatchupRead moves the catch-up marker to upTo, clamped to now; it
+	// never moves the marker back.
+	MarkCatchupRead(upTo time.Time) error
 	// ForgetGrouping forgets the grouping of a project that has parts now:
 	// its parts are no longer grouped under it, and its folder does not group
 	// again until no agent has sat in it for a while. ErrUnknownProject when
@@ -43,14 +45,22 @@ type Board interface {
 	// any other error means the state file could not be written and nothing
 	// changed.
 	ForgetGrouping(projectID string) error
+	// SetGrouping sets the folder of a grouping on the board, or of a folder
+	// listed in Snapshot.GroupingSettings, to auto, always or never.
+	// ErrUnknownProject when the id is neither, ErrNotGrouping when it is a
+	// project with no parts, ErrTooManySettings for a new setting past the
+	// cap; any other error means the state file could not be written and
+	// nothing changed.
+	SetGrouping(projectID string, mode contract.GroupingMode) error
 
 	// TerminalFor resolves a card to its agterm session id. ok is false when
 	// the card is unknown or has no terminal in the current tree.
 	TerminalFor(cardID string) (terminalID string, ok bool)
 }
 
-// Errors ForgetGrouping returns for a request it refuses.
+// Errors ForgetGrouping and SetGrouping return for a request they refuse.
 var (
-	ErrUnknownProject = errors.New("app: unknown project")
-	ErrNotGrouping    = errors.New("app: the project is not a grouping")
+	ErrUnknownProject  = errors.New("app: unknown project")
+	ErrNotGrouping     = errors.New("app: the project is not a grouping")
+	ErrTooManySettings = errors.New("app: too many folders have a grouping setting")
 )

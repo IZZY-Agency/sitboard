@@ -31,6 +31,8 @@ export function card(over: Partial<Omit<Card, 'agent'>> & { agent?: Partial<Agen
       tool: 'claude',
       name: `agent-${n}`,
       model: 'claude-opus-5-5',
+      effort: '',
+      effortSource: 'none',
       status: 'busy',
       statusSince: '2026-11-17T09:00:00Z',
       live: 'yes',
@@ -68,6 +70,7 @@ export function snapshot(cards: Card[], projects: Project[], over: Partial<Snaps
     counts: { working: 0, needsYou: 0, inReview: 0, stale: 0 },
     agtermPresent: true,
     build: { version: 'dev', commit: 'unknown', os: 'darwin', arch: 'arm64' },
+    groupingSettings: [],
     ...over,
   };
 }

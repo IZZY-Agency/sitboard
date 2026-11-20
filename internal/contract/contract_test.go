@@ -320,3 +320,12 @@ func TestValidProjectID(t *testing.T) {
 		}
 	}
 }
+
+func TestPullRequestAndIssueURLPatternsMatchTheModel(t *testing.T) {
+	if PullRequestURLPattern != model.PullRequestURLPattern {
+		t.Fatalf("contract.PullRequestURLPattern %q != model.PullRequestURLPattern %q", PullRequestURLPattern, model.PullRequestURLPattern)
+	}
+	if IssueURLPattern != model.IssueURLPattern {
+		t.Fatalf("contract.IssueURLPattern %q != model.IssueURLPattern %q", IssueURLPattern, model.IssueURLPattern)
+	}
+}

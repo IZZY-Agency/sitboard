@@ -5,11 +5,15 @@ import type { Card, Snapshot } from '../src/contract.gen';
 
 export const SCENARIOS = [
   'golden',
+  'settled',
   'crowd',
+  'effort',
   'projects',
   'forty',
   'one',
   'site',
+  'grouping',
+  'settings200',
   'hostile',
   'empty',
   'scanning',
@@ -94,6 +98,11 @@ function crowd(): Snapshot {
     c.agent.parentCardId = i < 6 ? s.cards[0].id : '';
     // Every model family, a model that is not Claude's and an unknown one, for the chip colours.
     c.agent.model = ['claude-fable-5-2', 'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-4-5-20251001', 'gpt-5.4-codex', ''][i % 6];
+    // Every effort level, one set at launch (on the unknown-model chip, as before a first reply) and one unknown.
+    const effort = (['xhigh', 'max', 'medium', 'low', '', 'high', 'high'] as const)[i % 7];
+    const claude = c.agent.model === '' || c.agent.model.startsWith('claude-');
+    c.agent.effort = claude ? effort : '';
+    c.agent.effortSource = !claude || effort === '' ? 'none' : c.agent.model === '' ? 'launch' : 'recorded';
     c.pullRequests =
       c.column === 'in_review' || c.column === 'done' || i % 4 === 1
         ? [
@@ -111,14 +120,16 @@ function crowd(): Snapshot {
         : [];
     s.cards.push(c);
   }
-  // A long-running coordinator with many merged pull requests.
+  // A long-running coordinator with many merged pull requests. All merged:
+  // the card is an unseen turn (rule 5), which an open pull request would
+  // have sent to In review (rule 4) instead.
   s.cards[0].pullRequests = Array.from({ length: 26 }, (_, i) => ({
     repo: 'placeholder/repo',
     number: 400 - i,
     title: 'Placeholder',
     url: `https://github.com/placeholder/repo/pull/${400 - i}`,
-    state: i === 0 ? ('open' as const) : ('merged' as const),
-    checks: 'running' as const,
+    state: 'merged' as const,
+    checks: 'passing' as const,
     review: '' as const,
     draft: false,
   }));
@@ -187,6 +198,7 @@ function one(): Snapshot {
 function site(): Snapshot {
   const s = golden();
   const base = s.cards[1];
+  s.groupingSettings = []; // the website's pictures show no grouping settings
   s.projects = [];
   addProject(s, 'p_site00000001', 'harbor', 'studio');
   addProject(s, 'p_site00000002', 'harbor-web', '', 'p_site00000001');
@@ -214,6 +226,7 @@ function site(): Snapshot {
     status: Card['agent']['status'];
     since: number;
     model?: string;
+    effort?: Card['agent']['effort'];
     lead?: boolean;
     attention?: Card['attention'];
     prs?: Card['pullRequests'];
@@ -223,13 +236,13 @@ function site(): Snapshot {
   let artN = 0;
   const art = (title: string) => ({ title, url: `https://claude.ai/artifact/exampleArtifact${String(++artN).padStart(4, '0')}` });
   const specs: Spec[] = [
-    { id: lead, projectId: 'p_site00000001', name: 'harbor-lead', title: 'Checkout rewrite: plan, split and review', column: 'working', status: 'busy', since: 12, model: 'claude-fable-5-2', prs: [pr(214, 'merged')], arts: ['Checkout plan'] },
-    { id: 'claude:site-w1', projectId: 'p_site00000002', name: 'web-checkout', title: 'One-page checkout with saved addresses', column: 'working', status: 'busy', since: 4, lead: true, prs: [pr(221, 'open', 'running')], arts: ['Address form layouts'] },
-    { id: 'claude:site-w2', projectId: 'p_site00000003', name: 'api-auth', title: 'Session refresh for long-lived tokens', column: 'needs_you', status: 'blocked', since: 2, lead: true, attention: ['blocked'] },
-    { id: 'claude:site-w3', projectId: 'p_site00000002', name: 'web-search', title: 'Search suggestions as you type', column: 'with_coordinator', status: 'finished', since: 18, model: 'claude-sonnet-5-5', lead: true },
-    { id: 'claude:site-w4', projectId: 'p_site00000003', name: 'api-payments', title: 'Retry failed card payments once', column: 'in_review', status: 'finished', since: 35, model: 'claude-sonnet-5-5', lead: true, prs: [pr(219, 'open', 'passing')], issues: [88], arts: ['Payment retry flow'] },
-    { id: 'claude:site-w5', projectId: 'p_site00000002', name: 'web-a11y', title: 'Keyboard paths through the cart', column: 'done', status: 'finished', since: 95, lead: true, prs: [pr(216, 'merged')] },
-    { id: 'claude:site-d1', projectId: 'p_site00000004', name: 'docs-refresh', title: 'Rewrite the getting-started guide', column: 'in_review', status: 'finished', since: 50, model: 'claude-haiku-4-5-20251001', attention: ['failing_checks'], prs: [{ ...pr(41, 'open', 'failing'), repo: 'example-org/lumen-docs', url: 'https://github.com/example-org/lumen-docs/pull/41' }] },
+    { id: lead, projectId: 'p_site00000001', name: 'harbor-lead', title: 'Checkout rewrite: plan, split and review', column: 'working', status: 'busy', since: 12, model: 'claude-fable-5-2', effort: 'xhigh', prs: [pr(214, 'merged')], arts: ['Checkout plan'] },
+    { id: 'claude:site-w1', projectId: 'p_site00000002', name: 'web-checkout', title: 'One-page checkout with saved addresses', column: 'working', status: 'busy', since: 4, effort: 'high', lead: true, prs: [pr(221, 'open', 'running')] },
+    { id: 'claude:site-w2', projectId: 'p_site00000003', name: 'api-auth', title: 'Session refresh for long-lived tokens', column: 'needs_you', status: 'blocked', since: 2, effort: 'max', lead: true, attention: ['blocked'] },
+    { id: 'claude:site-w3', projectId: 'p_site00000002', name: 'web-search', title: 'Search suggestions as you type', column: 'with_coordinator', status: 'finished', since: 18, model: 'claude-sonnet-5-5', effort: 'medium', lead: true },
+    { id: 'claude:site-w4', projectId: 'p_site00000003', name: 'api-payments', title: 'Retry failed card payments once', column: 'in_review', status: 'finished', since: 35, model: 'claude-sonnet-5-5', effort: 'high', lead: true, prs: [pr(219, 'open', 'passing')], issues: [88], arts: ['Payment retry flow'] },
+    { id: 'claude:site-w5', projectId: 'p_site00000002', name: 'web-a11y', title: 'Keyboard paths through the cart', column: 'done', status: 'finished', since: 95, effort: 'medium', lead: true, prs: [pr(216, 'merged')] },
+    { id: 'claude:site-d1', projectId: 'p_site00000004', name: 'docs-refresh', title: 'Rewrite the getting-started guide', column: 'in_review', status: 'finished', since: 50, model: 'claude-haiku-4-5-20251001', effort: 'low', attention: ['failing_checks'], prs: [{ ...pr(41, 'open', 'failing'), repo: 'example-org/lumen-docs', url: 'https://github.com/example-org/lumen-docs/pull/41' }] },
     { id: 'claude:site-k1', projectId: 'p_site00000005', name: 'pixel-kit-icons', title: 'Icon set at 16 and 24 pixels', column: 'idle', status: 'finished', since: 300 },
   ];
   s.cards = specs.map((x) => {
@@ -247,6 +260,8 @@ function site(): Snapshot {
     c.issues = (x.issues ?? []).map((n) => ({ repo, number: n, url: `https://github.com/${repo}/issues/${n}` }));
     c.agent.name = x.name;
     c.agent.model = x.model ?? 'claude-opus-5-5';
+    c.agent.effort = x.effort ?? '';
+    c.agent.effortSource = x.effort ? 'recorded' : 'none';
     c.agent.status = x.status;
     c.agent.statusSince = ago(x.since);
     c.agent.startedAt = ago(x.since + 120);
@@ -276,6 +291,97 @@ function site(): Snapshot {
   return s;
 }
 
+/**
+ * Every model family at every effort level, one column per family, and the
+ * unknown-model chip with a launch level and with none, beside a needs-you
+ * card at max, for the effort ramp.
+ */
+function effort(): Snapshot {
+  const s = golden();
+  const base = s.cards[1];
+  const levels = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+  const families: Array<[string, Card['column']]> = [
+    ['claude-fable-5-2', 'working'],
+    ['claude-opus-5-5', 'with_coordinator'],
+    ['claude-sonnet-5-5', 'in_review'],
+    ['claude-haiku-5-5', 'idle'],
+  ];
+  const lead = s.cards[0];
+  s.cards = [lead];
+  lead.agent.effort = 'xhigh';
+  lead.agent.effortSource = 'recorded';
+  const add = (name: string, model: string, column: Card['column'], effort: Card['agent']['effort'], src: Card['agent']['effortSource'], i: number) => {
+    const c = clone(base);
+    c.id = `claude:effort-${name}`;
+    c.projectId = s.projects[0].id;
+    c.column = column;
+    c.attention = [];
+    c.pullRequests = [];
+    c.artifacts = [];
+    c.issues = [];
+    c.subagents = 0;
+    c.title = `Sample task at ${effort || 'no'} effort`;
+    c.titleSource = 'session';
+    c.agent.name = name;
+    c.agent.model = model;
+    c.agent.effort = effort;
+    c.agent.effortSource = src;
+    c.agent.status = column === 'working' ? 'busy' : column === 'needs_you' ? 'blocked' : 'finished';
+    c.agent.statusSince = ago(2 + i);
+    c.agent.lastActivity = ago(1 + i);
+    c.agent.parent = 'known';
+    c.agent.parentCardId = lead.id;
+    s.cards.push(c);
+  };
+  for (const [f, [model, column]] of families.entries()) {
+    for (const [l, level] of levels.entries()) add(`${model.split('-')[1]}-${level}`, model, column, level, 'recorded', f * 5 + l);
+  }
+  add('new-session', '', 'needs_you', 'high', 'launch', 30);
+  add('no-level', '', 'needs_you', '', 'none', 31);
+  add('needs-max', 'claude-opus-5-5', 'needs_you', 'max', 'recorded', 32);
+  s.cards[s.cards.length - 1].attention = ['blocked'];
+  for (const p of s.projects) {
+    const mine = s.cards.filter((c) => c.projectId === p.id);
+    p.counts = {
+      working: mine.filter((c) => c.column === 'working').length,
+      needsYou: mine.filter((c) => c.column === 'needs_you').length,
+      inReview: mine.filter((c) => c.column === 'in_review').length,
+      stale: 0,
+    };
+  }
+  s.counts = {
+    working: s.cards.filter((c) => c.column === 'working').length,
+    needsYou: s.cards.filter((c) => c.column === 'needs_you').length,
+    inReview: s.cards.filter((c) => c.column === 'in_review').length,
+    stale: 0,
+  };
+  return s;
+}
+
+/**
+ * Grouping settings, on the website's sample board: the umbrella project is
+ * set to always, and two sample folders are set to never.
+ */
+function groupingScenario(): Snapshot {
+  const s = site();
+  s.groupingSettings = [
+    { projectId: 'p_site00000001', name: 'harbor', path: '~/projects/harbor', mode: 'always' },
+    { projectId: 'p_site0000000a', name: 'scratch', path: '~/scratch', mode: 'never' },
+    { projectId: 'p_site0000000b', name: 'downloads-sorting', path: '~/Downloads/downloads-sorting', mode: 'never' },
+  ];
+  return s;
+}
+
+/** The most folders that can have a setting (state.MaxGroupingSettings). */
+function settings200(): Snapshot {
+  const s = groupingScenario();
+  s.groupingSettings = Array.from({ length: 200 }, (_, i) => {
+    const n = String(i + 1).padStart(3, '0');
+    return { projectId: `p_set${n.padStart(9, '0')}`, name: `folder-${n}`, path: `~/projects/folder-${n}`, mode: i % 7 === 0 ? 'always' : 'never' };
+  });
+  return s;
+}
+
 function hostile(): Snapshot {
   const s = golden();
   s.cards[0].title = '<img src=x onerror="alert(1)"><script>alert(2)</script> markup as text';
@@ -283,8 +389,16 @@ function hostile(): Snapshot {
   s.cards[1].title = 'x'.repeat(10_000);
   s.cards[2].agent.name = 'right\u202eto-left\u0007 override';
   s.cards[3].title = 'A title with a very-long-unbroken-token-' + 'y'.repeat(300);
+  // Addresses from a tampered snapshot: the page shows these as text, never as links.
+  const pr = s.cards[3].pullRequests[0];
+  s.cards[3].pullRequests.push({ ...pr, number: pr.number + 1, url: 'javascript:alert(3)' });
+  s.cards[3].issues.push({ ...s.cards[3].issues[0], number: 8, url: 'https://evil.example/example-org/example-repo/issues/8' });
+  // Well-formed github.com addresses that are not this card's own: text as well.
+  s.cards[3].pullRequests.push({ ...pr, number: pr.number + 2, url: 'https://github.com/attacker-org/phish/pull/1' });
+  s.cards[3].issues.push({ ...s.cards[3].issues[0], number: 9, url: 'https://github.com/attacker-org/phish/issues/9' });
   s.projects[0].name = '<b>project</b>';
   s.projects[1].name = 'a-project-with-an-extremely-long-folder-name-that-goes-on-and-on-and-on';
+  s.groupingSettings.push({ projectId: 'p_0000000000ee', name: '<img src=x onerror="alert(3)">\u202e' + 'z'.repeat(200), path: '~/' + 'deep/'.repeat(60), mode: 'never' });
   return s;
 }
 
@@ -295,6 +409,8 @@ export function initial(sc: Scenario): Snapshot | null {
       return golden();
     case 'crowd':
       return crowd();
+    case 'effort':
+      return effort();
     case 'projects':
       return manyProjects();
     case 'forty':
@@ -303,6 +419,10 @@ export function initial(sc: Scenario): Snapshot | null {
       return one();
     case 'site':
       return site();
+    case 'grouping':
+      return groupingScenario();
+    case 'settings200':
+      return settings200();
     case 'hostile':
       return hostile();
     case 'empty': {
@@ -310,6 +430,12 @@ export function initial(sc: Scenario): Snapshot | null {
       s.cards = [];
       s.projects = [];
       s.sources = s.sources.map((x) => (x.kind === 'codex' ? { ...x, state: 'missing', detail: '', ready: true } : { ...x, ready: true }));
+      return s;
+    }
+    // Golden with every watcher past its first pass: what fires a notification.
+    case 'settled': {
+      const s = golden();
+      s.sources = s.sources.map((x) => ({ ...x, ready: true }));
       return s;
     }
     case 'scanning': {

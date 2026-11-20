@@ -69,13 +69,15 @@ describe('forget grouping, tiles', () => {
     await click(tile('mainapp'));
     await click(button('Forget grouping'));
     expect(a.calls).toEqual([]);
-    expect(text(confirm())).toBe('Forget the grouping of mainapp? Its parts are no longer grouped under it. Forget Keep');
+    expect(text(confirm())).toBe(
+      'Forget the grouping of mainapp? Its parts are no longer grouped under it. Forget once lets it group again later; Never group keeps them apart. Never group Forget once Keep',
+    );
     expect(text(confirm())).not.toContain('~/');
     const acts = [...confirm()!.querySelectorAll('button')].map(text);
-    expect(acts).toEqual(['Forget', 'Keep']); // Keep is where the button was
+    expect(acts).toEqual(['Never group', 'Forget once', 'Keep']); // Keep is where the button was
     expect(document.activeElement).toBe(button('Keep'));
     expect(button('Keep')!.classList.contains('keep')).toBe(true); // the primary look goes with the focus
-    expect(button('Forget')!.classList.contains('keep')).toBe(false);
+    expect(button('Forget once')!.classList.contains('keep')).toBe(false);
   });
 
   it('Keep is at least as wide as the button was, so a double click cannot land on Forget', async () => {
@@ -92,7 +94,9 @@ describe('forget grouping, tiles', () => {
     await click(tile('mainapp'));
     await click(button('Forget grouping'));
     const id = confirm()!.getAttribute('aria-describedby')!;
-    expect(text(r!.target.querySelector(`[id="${id}"]`))).toBe('Forget the grouping of mainapp? Its parts are no longer grouped under it.');
+    expect(text(r!.target.querySelector(`[id="${id}"]`))).toBe(
+      'Forget the grouping of mainapp? Its parts are no longer grouped under it. Forget once lets it group again later; Never group keeps them apart.',
+    );
   });
 
   it('a second click or Enter lands on Keep: nothing is forgotten', async () => {
@@ -120,7 +124,7 @@ describe('forget grouping, tiles', () => {
     const a = app();
     await click(tile('mainapp'));
     await click(button('Forget grouping'));
-    await click(button('Forget'));
+    await click(button('Forget once'));
     expect(a.calls).toEqual([['forgetGrouping', 'p_main']]);
     expect(polite()).toBe('Forgot the grouping of mainapp. Its parts are no longer grouped under it.');
     expect(document.activeElement).toBe(tile('mainapp'));
@@ -136,7 +140,7 @@ describe('forget grouping, tiles', () => {
     const a = app(undefined, { ok: false, kind: 'failed', message: 'sitboard answered 500' });
     await click(tile('mainapp'));
     await click(button('Forget grouping'));
-    await click(button('Forget'));
+    await click(button('Forget once'));
     expect(polite()).toContain('Forgot the grouping of mainapp');
     a.push({ conn: 'live', snapshot: { ...world(true), seq: 2 } });
     await settle();
@@ -151,7 +155,7 @@ describe('forget grouping, tiles', () => {
     const a = app({ ok: false, kind: 'failed', message: 'sitboard could not save it' });
     await click(tile('mainapp'));
     await click(button('Forget grouping'));
-    await click(button('Forget'));
+    await click(button('Forget once'));
     expect(text(q('section[aria-label="Action failed"]'))).toContain('Forget the grouping of mainapp failed: sitboard could not save it.');
     expect(confirm()).toBeNull();
     expect(button('Forget grouping')).toBeDefined();
@@ -167,7 +171,7 @@ describe('forget grouping, tiles', () => {
       app({ ok: false, kind: 'failed', message, final: true });
       await click(tile('mainapp'));
       await click(button('Forget grouping'));
-      await click(button('Forget'));
+      await click(button('Forget once'));
       expect(text(q('section[aria-label="Action failed"]'))).toContain(`Forget the grouping of mainapp failed: ${message}.`);
       expect(button('Retry')).toBeUndefined();
       r!.destroy();
@@ -181,6 +185,7 @@ describe('forget grouping, tiles', () => {
     const actions = {
       jump: async () => ({ ok: true }) as ActionResult,
       seen: async () => ({ ok: true }) as ActionResult,
+      setGrouping: async () => ({ ok: true }) as ActionResult,
       forgetGrouping: (id: string) => {
         calls.push(id);
         return new Promise<ActionResult>((res) => (answer = res));
@@ -190,7 +195,7 @@ describe('forget grouping, tiles', () => {
     r = render(App, { feed: f.feed, actions });
     await click(tile('mainapp'));
     await click(button('Forget grouping'));
-    const forget = button('Forget')!;
+    const forget = button('Forget once')!;
     forget.focus();
     await click(forget);
     expect(document.activeElement).toBe(forget);
@@ -221,7 +226,7 @@ describe('forget grouping, tiles', () => {
     r = render(App, { feed: f.feed, actions });
     await click(tile('mainapp'));
     await click(button('Forget grouping'));
-    await click(button('Forget'));
+    await click(button('Forget once'));
     const retry = button('Retry')!;
     retry.click();
     retry.click();
@@ -237,7 +242,7 @@ describe('forget grouping, tiles', () => {
     app({ ok: false, kind: 'unauthorized' });
     await click(tile('mainapp'));
     await click(button('Forget grouping'));
-    await click(button('Forget'));
+    await click(button('Forget once'));
     expect(text(r!.target)).toMatch(/open the link/i);
   });
 });
@@ -254,10 +259,12 @@ describe('forget grouping, rail', () => {
     expect(button('Forget grouping')).toBeUndefined();
     await click(row('mainapp'));
     const parts = [...rail().querySelectorAll<HTMLElement>('.parts [data-key]')];
-    expect(parts.map(text).at(-1)).toBe('Forget grouping');
+    expect(parts.map(text).slice(-2)).toEqual(['Always group', 'Forget grouping']);
     row('web').focus();
     key(row('web'), 'ArrowDown');
     key(document.activeElement!, 'ArrowDown');
+    key(document.activeElement!, 'ArrowDown');
+    expect(document.activeElement).toBe(button('Always group'));
     key(document.activeElement!, 'ArrowDown');
     expect(document.activeElement).toBe(button('Forget grouping'));
   });
@@ -266,14 +273,14 @@ describe('forget grouping, rail', () => {
     const a = app();
     await click(row('mainapp'));
     await click(button('Forget grouping'));
-    expect([...confirm()!.querySelectorAll('button')].map(text)).toEqual(['Keep', 'Forget']);
+    expect([...confirm()!.querySelectorAll('button')].map(text)).toEqual(['Keep', 'Forget once', 'Never group']);
     expect(document.activeElement).toBe(button('Keep'));
     key(document.activeElement!, 'Escape');
     await settle();
     expect(a.calls).toEqual([]);
     expect(rail().isConnected).toBe(true);
     await click(button('Forget grouping'));
-    await click(button('Forget'));
+    await click(button('Forget once'));
     expect(a.calls).toEqual([['forgetGrouping', 'p_main']]);
     expect(document.activeElement).toBe(row('mainapp'));
   });

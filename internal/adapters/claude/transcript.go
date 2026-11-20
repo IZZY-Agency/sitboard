@@ -43,12 +43,24 @@ const (
 )
 
 // derived holds the facts read from one transcript. It never holds transcript
-// text: only a model id, a folder, times, pull request references, the
+// text: only a model id, an effort level, a folder, times, pull request references, the
 // addresses and titles of artifacts it published, the names and terminal ids
-// of sessions this one spawned, and the names of sessions it received
-// messages from.
+// of sessions this one spawned, the names of sessions it received messages
+// from, the session's own name, and how it was started.
 type derived struct {
+	// Name is the session's name as Claude Code records it in an agent-name
+	// line: the same name its record file holds while it runs. It is used
+	// whenever the session's record has no name: always for a session that
+	// ended (it has no record), and for a running one whose record lacks it.
+	Name string
+	// Entrypoint is how the session was started, as its lines say: "cli" for
+	// an interactive session, "sdk-…" for claude -p and the SDKs. One
+	// interactive line makes the session interactive, whatever the others
+	// say: a session resumed with claude -p (or a -p run resumed by a person)
+	// keeps the turns a person saw. claude -p writes no turn lines itself.
+	Entrypoint         string
 	Model              string
+	Effort             string // the level the last main-chain reply ran at, one of model.EffortLevels; "" when it recorded none
 	Folder             string
 	LastActivity       time.Time
 	TurnEnds           []time.Time
@@ -78,6 +90,12 @@ type tailer struct {
 	d       derived
 	pending map[string]pendingKind // tool-use id → what its result tells
 	read    int64                  // bytes read by the last update (tests)
+	// readCap, when set, makes the first read of a larger file start that
+	// many bytes before its end, at the first whole line (skipFirst).
+	readCap   int64
+	skipFirst bool
+	id        string // the session id its file is named by
+	parsed    int    // lines read as JSON, from the start
 
 	// The session's folder (see folder.go).
 	home         string                 // the home folder, cleaned
@@ -97,11 +115,11 @@ func newTailer(path string, pr *prober) *tailer {
 	if home != "" {
 		home = filepath.Clean(home)
 	}
-	return &tailer{path: path, pending: map[string]pendingKind{}, home: home, prober: pr}
+	return &tailer{path: path, id: strings.TrimSuffix(filepath.Base(path), ".jsonl"), pending: map[string]pendingKind{}, home: home, prober: pr}
 }
 
 func (t *tailer) reset() {
-	t.off = 0
+	t.off, t.skipFirst, t.parsed = 0, false, 0
 	t.d = derived{}
 	clear(t.pending)
 	t.window, t.wpos, t.seq, t.probing = nil, 0, 0, nil
@@ -116,9 +134,14 @@ func (t *tailer) update(ctx context.Context, now time.Time) (changed bool, err e
 	defer func() {
 		changed = t.chooseFolder(now) || changed
 	}()
-	fi, err := os.Stat(t.path)
+	// A link is never read: a transcript is a regular file, and a link put
+	// in its place could point anywhere.
+	fi, err := os.Lstat(t.path)
 	if err != nil {
 		return false, err
+	}
+	if !fi.Mode().IsRegular() {
+		return false, errNotRegular
 	}
 	changed = false
 	if t.info != nil && (!os.SameFile(t.info, fi) || fi.Size() < t.off) {
@@ -128,15 +151,21 @@ func (t *tailer) update(ctx context.Context, now time.Time) (changed bool, err e
 	if !changed && !t.partial && t.info != nil && fi.Size() == t.info.Size() && fi.ModTime().Equal(t.info.ModTime()) {
 		return t.pruneTurns(now), nil
 	}
+	if t.info == nil && t.off == 0 && t.readCap > 0 && fi.Size() > t.readCap {
+		t.off, t.skipFirst = fi.Size()-t.readCap, true
+	}
 	t.info, t.partial = fi, false
 	if fi.Size() == t.off {
 		return t.pruneTurns(now) || changed, nil
 	}
-	f, err := os.Open(t.path)
+	f, err := openNoFollow(t.path)
 	if err != nil {
 		return changed, err
 	}
 	defer func() { _ = f.Close() }()
+	if ofi, err := f.Stat(); err != nil || !ofi.Mode().IsRegular() || !os.SameFile(ofi, fi) {
+		return changed, errNotRegular // swapped since it was looked at
+	}
 	if _, err := f.Seek(t.off, io.SeekStart); err != nil {
 		return changed, err
 	}
@@ -169,6 +198,9 @@ func (t *tailer) update(ctx context.Context, now time.Time) (changed bool, err e
 		case err != nil:
 			return changed, err
 		}
+		if t.skipFirst { // the rest of a line cut by readCap
+			skipping, long, t.skipFirst = true, nil, false
+		}
 		if !skipping {
 			line := chunk
 			if long != nil {
@@ -188,6 +220,8 @@ func (t *tailer) update(ctx context.Context, now time.Time) (changed bool, err e
 		changed = true
 	}
 }
+
+var errNotRegular = errors.New("claude: transcript is not a regular file")
 
 // ctxCheckLines is how often a long read checks whether it should stop.
 const ctxCheckLines = 512
@@ -213,6 +247,10 @@ type lineHead struct {
 	Timestamp string `json:"timestamp"`
 	Cwd       string `json:"cwd"`
 	Sidechain bool   `json:"isSidechain"`
+	Effort    string `json:"effort"` // on an assistant line: the effort level the reply ran at
+	Entry     string `json:"entrypoint"`
+	SessionID string `json:"sessionId"`
+	AgentName string `json:"agentName"` // on an agent-name line
 	Message   struct {
 		Model string `json:"model"`
 	} `json:"message"`
@@ -271,6 +309,10 @@ func (t *tailer) consume(line []byte, now time.Time) {
 	if !decode(line, &h) {
 		return
 	}
+	t.parsed++
+	// A line that names another session (as Claude Code's own reader
+	// checks) gives this one neither its name nor its turns.
+	own := h.SessionID == "" || h.SessionID == t.id
 	at := parseTS(h.Timestamp, now)
 	if !at.IsZero() && at.After(t.d.LastActivity) {
 		t.d.LastActivity = at
@@ -280,12 +322,22 @@ func (t *tailer) consume(line []byte, now time.Time) {
 			t.vote(f)
 		}
 	}
+	if own && !h.Sidechain && h.Entry != "" && len(h.Entry) <= 32 && (t.d.Entrypoint == "" || !interactive(t.d.Entrypoint)) {
+		t.d.Entrypoint = h.Entry
+	}
 	switch h.Type {
+	case "agent-name":
+		if own && !h.Sidechain && h.AgentName != "" && len(h.AgentName) <= 1024 {
+			t.d.Name = h.AgentName
+		}
 	case "assistant":
 		// A sidechain line is an in-process subagent's: it may add pull
-		// requests and spawns, never the session's own model, turns or messages.
+		// requests and spawns, never the session's own model, effort, turns or
+		// messages. A reply with no effort level (none was sent, or an older
+		// Claude Code) clears it, so a stale level is never kept.
 		if m := h.Message.Model; !h.Sidechain && m != "" && m != "<synthetic>" && len(m) <= 128 {
 			t.d.Model = m
+			t.d.Effort = model.KnownEffort(h.Effort)
 		}
 		if bytes.Contains(line, []byte(`"tool_use"`)) &&
 			(bytes.Contains(line, []byte("create")) || bytes.Contains(line, []byte("agtermctl")) ||
@@ -300,7 +352,7 @@ func (t *tailer) consume(line []byte, now time.Time) {
 			t.toolResults(line, at)
 		}
 	case "system":
-		if !h.Sidechain && h.Subtype == "turn_duration" && !at.IsZero() && !at.Before(now.Add(-turnWindow)) {
+		if own && !h.Sidechain && h.Subtype == "turn_duration" && !at.IsZero() && !at.Before(now.Add(-turnWindow)) {
 			i, _ := slices.BinarySearchFunc(t.d.TurnEnds, at, time.Time.Compare)
 			t.d.TurnEnds = slices.Insert(t.d.TurnEnds, i, at)
 			if len(t.d.TurnEnds) > maxTurns { // keep the newest

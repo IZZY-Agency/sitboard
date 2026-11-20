@@ -39,6 +39,8 @@ func enumList() []enumDef {
 		enumOf(AgentStatuses...),
 		enumOf(Tris...),
 		enumOf(ParentStates...),
+		enumOf(Efforts...),
+		enumOf(EffortSources...),
 		enumOf(PRStates...),
 		enumOf(CheckValues...),
 		enumOf(Reviews...),
@@ -46,6 +48,7 @@ func enumList() []enumDef {
 		enumOf(SourceStates...),
 		enumOf(CatchupKinds...),
 		enumOf(LeftoverKinds...),
+		enumOf(GroupingModes...),
 	}
 }
 
@@ -67,6 +70,9 @@ func structList() []reflect.Type {
 		reflect.TypeFor[Leftover](),
 		reflect.TypeFor[CardRequest](),
 		reflect.TypeFor[ProjectRequest](),
+		reflect.TypeFor[GroupingSetting](),
+		reflect.TypeFor[GroupingRequest](),
+		reflect.TypeFor[CatchupReadRequest](),
 	}
 }
 
@@ -79,6 +85,7 @@ var paths = []struct{ name, path string }{
 	{"seen", PathSeen},
 	{"catchupRead", PathCatchupRead},
 	{"forgetGrouping", PathForgetGrouping},
+	{"groupingSetting", PathGroupingSetting},
 }
 
 // TypeScript returns the content of web/src/contract.gen.ts. It panics when a
@@ -106,6 +113,10 @@ func TypeScript() string {
 	fmt.Fprintf(&b, "export const EVENT_SNAPSHOT = %s;\n\n", strconv.Quote(EventSnapshot))
 	b.WriteString("/** The only form of Artifact.url; the page links nothing else. */\n")
 	fmt.Fprintf(&b, "export const ARTIFACT_URL_PATTERN = new RegExp(%s);\n\n", strconv.Quote(ArtifactURLPattern))
+	b.WriteString("/** The only form of PullRequest.url; the page links nothing else. */\n")
+	fmt.Fprintf(&b, "export const PULL_REQUEST_URL_PATTERN = new RegExp(%s);\n\n", strconv.Quote(PullRequestURLPattern))
+	b.WriteString("/** The only form of Issue.url; the page links nothing else. */\n")
+	fmt.Fprintf(&b, "export const ISSUE_URL_PATTERN = new RegExp(%s);\n\n", strconv.Quote(IssueURLPattern))
 
 	b.WriteString("/** RFC 3339 time, UTC. */\nexport type Timestamp = string;\n")
 

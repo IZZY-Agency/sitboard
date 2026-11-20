@@ -66,7 +66,8 @@ func TestGitHubOffReportsOff(t *testing.T) {
 }
 
 // A watcher whose source is missing has nothing to scan, so it is ready at
-// once: it emits exactly one SourceReady with its own kind and returns nil.
+// once: it emits one SourceReady with its own kind and returns nil. Claude's
+// also says it has nothing to backfill.
 func TestMissingWatcherIsReadyAtOnce(t *testing.T) {
 	home := t.TempDir()
 	noBin := filepath.Join(home, "no-such-binary")
@@ -82,8 +83,17 @@ func TestMissingWatcherIsReadyAtOnce(t *testing.T) {
 		if err != nil {
 			t.Errorf("%s: Run = %v, want nil", w.Kind(), err)
 		}
-		if len(facts) != 1 {
-			t.Errorf("%s: emitted %d facts, want one SourceReady", w.Kind(), len(facts))
+		want := 1
+		if w.Kind() == source.KindClaude {
+			want = 2
+			if len(facts) == 2 {
+				if d, ok := facts[1].(model.BackfillDone); !ok || d.Kind != string(source.KindClaude) {
+					t.Errorf("claude: then emitted %#v, want BackfillDone", facts[1])
+				}
+			}
+		}
+		if len(facts) != want {
+			t.Errorf("%s: emitted %d facts, want %d", w.Kind(), len(facts), want)
 			continue
 		}
 		if r, ok := facts[0].(model.SourceReady); !ok || r.Kind != string(w.Kind()) {

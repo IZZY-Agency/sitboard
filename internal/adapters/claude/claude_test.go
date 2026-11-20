@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -28,12 +29,13 @@ const (
 
 // env is a temp home with Claude Code's folders and a fake process table.
 type env struct {
-	t     *testing.T
-	home  string
-	mu    sync.Mutex
-	procs map[int]string // pid → lstart; nil map with psFail means ps failed
-	psBad bool
-	reads []int // pids whose environment was read
+	t      *testing.T
+	home   string
+	mu     sync.Mutex
+	procs  map[int]string // pid → lstart; nil map with psFail means ps failed
+	psBad  bool
+	reads  []int          // pids whose arguments and environment were read
+	launch map[int]string // pid → effort level it was launched with
 }
 
 func newEnv(t *testing.T) *env {
@@ -75,14 +77,24 @@ func (e *env) starts(_ context.Context, pids []int) (map[int]string, bool) {
 	return out, true
 }
 
-func (e *env) termID(pid int) string {
+func (e *env) proc(pid int) procFacts {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.reads = append(e.reads, pid)
+	f := procFacts{LaunchEffort: e.launch[pid]}
 	if pid == 4242 {
-		return termCoord
+		f.TermID = termCoord
 	}
-	return ""
+	return f
+}
+
+func (e *env) setLaunch(pid int, level string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.launch == nil {
+		e.launch = map[int]string{}
+	}
+	e.launch[pid] = level
 }
 
 // record writes a session file from the fixture with the given changes.
@@ -124,7 +136,7 @@ func newAdapter(t *testing.T, opts Options) *adapter {
 func (e *env) adapter() *adapter {
 	a := newAdapter(e.t, Options{Home: e.home, Now: func() time.Time { return fixedNow }})
 	a.starts = e.starts
-	a.termID = e.termID
+	a.proc = e.proc
 	a.tick = 50 * time.Millisecond
 	a.liveTick = 50 * time.Millisecond
 	a.debounce = 5 * time.Millisecond
@@ -437,32 +449,152 @@ func TestTerminalIDReadOncePerProcess(t *testing.T) {
 	}
 }
 
-func TestReadsOnlyTheAgtermVariable(t *testing.T) {
-	id := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-	env := []string{"SECRET_TOKEN=do-not-read", "AGTERM_SESSION_ID=" + id, "HOME=/home/dev"}
-
+// procArgs2 builds a KERN_PROCARGS2 buffer.
+func procArgs2(args, env []string) []byte {
 	var pa bytes.Buffer
-	_ = binary.Write(&pa, binary.LittleEndian, int32(2))
+	_ = binary.Write(&pa, binary.LittleEndian, int32(len(args)))
 	pa.WriteString("/home/dev/.local/bin/claude\x00\x00\x00\x00")
-	pa.WriteString("claude\x00--flag AGTERM_SESSION_ID=bad\x00")
+	for _, v := range args {
+		pa.WriteString(v + "\x00")
+	}
 	for _, v := range env {
 		pa.WriteString(v + "\x00")
 	}
 	pa.WriteString("\x00")
-	if got := agtermIDFromProcArgs2(pa.Bytes()); got != strings.ToUpper(id) {
-		t.Fatalf("procargs2 = %q", got)
+	return pa.Bytes()
+}
+
+func nul(list []string) []byte {
+	if len(list) == 0 {
+		return nil
 	}
-	if got := agtermIDFromEnviron([]byte(strings.Join(env, "\x00") + "\x00")); got != strings.ToUpper(id) {
-		t.Fatalf("environ = %q", got)
+	return []byte(strings.Join(list, "\x00") + "\x00")
+}
+
+func TestReadsOnlyTheAgtermVariable(t *testing.T) {
+	id := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	env := []string{"SECRET_TOKEN=do-not-read", "AGTERM_SESSION_ID=" + id, "HOME=/home/dev"}
+	args := []string{"claude", "--flag AGTERM_SESSION_ID=bad"}
+
+	if got := procFactsFromProcArgs2(procArgs2(args, env)); got != (procFacts{TermID: strings.ToUpper(id)}) {
+		t.Fatalf("procargs2 = %+v", got)
+	}
+	if got := procFactsFromLinux(nul(args), nul(env)); got != (procFacts{TermID: strings.ToUpper(id)}) {
+		t.Fatalf("linux = %+v", got)
 	}
 	// Anything that is not an id is refused, and nothing else is returned.
 	for _, bad := range []string{"AGTERM_SESSION_ID=--window x", "AGTERM_SESSION_ID=", "OTHER=" + id} {
-		if got := agtermIDFromEnviron([]byte(bad + "\x00")); got != "" {
-			t.Fatalf("environ(%q) = %q", bad, got)
+		if got := procFactsFromLinux(nil, []byte(bad+"\x00")); got != (procFacts{}) {
+			t.Fatalf("environ(%q) = %+v", bad, got)
 		}
 	}
 	for _, short := range [][]byte{nil, {1}, {1, 0, 0, 0}, {5, 0, 0, 0, 'x', 0, 'a', 0}} {
-		_ = agtermIDFromProcArgs2(short) // must not panic
+		_ = procFactsFromProcArgs2(short) // must not panic
+	}
+}
+
+// Arguments and an environment full of other material leave only the agterm
+// id and the level in what the adapter keeps: the raw strings are dropped.
+func TestProcFactsKeepOnlyTheLevel(t *testing.T) {
+	id := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	args := []string{"claude", "--model", "secret-model-arg", "-p", "a secret prompt --effort low", "--effort", "HIGH", "--settings", "/secret/path.json", "--", "--effort", "max"}
+	env := []string{"API_TOKEN=secret-token", "CLAUDE_EFFORT=max", "CLAUDE_CODE_OTHER=secret-other", "AGTERM_SESSION_ID=" + id, "PWD=/secret/folder"}
+	want := procFacts{TermID: strings.ToUpper(id), LaunchEffort: "high"}
+	for _, got := range []procFacts{procFactsFromProcArgs2(procArgs2(args, env)), procFactsFromLinux(nul(args), nul(env))} {
+		if got != want {
+			t.Fatalf("kept %+v, want %+v", got, want)
+		}
+		if dump := fmt.Sprintf("%#v", got); strings.Contains(strings.ToLower(dump), "secret") {
+			t.Fatalf("kept other material: %s", dump)
+		}
+	}
+}
+
+// Reading the launch level copies nothing: no argument (a prompt can be one)
+// and no environment entry is turned into a string on the heap.
+func TestLaunchEffortAllocatesNothing(t *testing.T) {
+	prompt := []byte(strings.Repeat("a long prompt with --effort in it ", 200))
+	args := [][]byte{[]byte("claude"), []byte("-p"), prompt, []byte("--model"), []byte("claude-opus-5-5"), []byte("--effort=Max"), []byte("--effort"), []byte("high")}
+	env := [][]byte{[]byte("LONG=" + strings.Repeat("x", 4096)), []byte("CLAUDE_CODE_EFFORT_LEVEL= Med "), []byte("AGTERM_SESSION_ID=aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")}
+	noEnv := [][]byte{[]byte("LONG=" + strings.Repeat("x", 4096))}
+	if got := launchEffort(args, env); got != "medium" {
+		t.Fatalf("launchEffort = %q", got)
+	}
+	if got := launchEffort(args, noEnv); got != "high" {
+		t.Fatalf("launchEffort = %q", got)
+	}
+	if n := testing.AllocsPerRun(100, func() { _ = launchEffort(args, env); _ = launchEffort(args, noEnv) }); n != 0 {
+		t.Fatalf("launchEffort allocates %v times per run, want 0", n)
+	}
+}
+
+// A value longer than any level word is refused, not cut to fit.
+func TestEffortWordRefusesLongValues(t *testing.T) {
+	var buf [maxEffortWord]byte
+	if w, ok := effortWord(&buf, []byte(" XHigh ")); !ok || string(w) != "xhigh" {
+		t.Fatalf("effortWord(XHigh) = %q, %v", w, ok)
+	}
+	if _, ok := effortWord(&buf, []byte(strings.Repeat("a", maxEffortWord))); !ok {
+		t.Fatal("a value of the longest length is refused")
+	}
+	if w, ok := effortWord(&buf, []byte(strings.Repeat("a", maxEffortWord+1))); ok {
+		t.Fatalf("a too-long value was cut to %q", w)
+	}
+}
+
+// The launch level follows Claude Code's order, as tried on 2.1.328: the
+// environment variable when it holds a level, else the last --effort flag.
+func TestLaunchEffort(t *testing.T) {
+	cases := []struct {
+		args []string
+		env  []string
+		want string
+	}{
+		{[]string{"claude"}, nil, ""},
+		{[]string{"claude", "--effort", "low"}, nil, "low"},
+		{[]string{"claude", "--effort=medium"}, nil, "medium"},
+		{[]string{"claude", "--effort", "HIGH"}, nil, "high"},
+		{[]string{"claude", "--effort", "ultracode"}, nil, "xhigh"},
+		{[]string{"claude", "--effort", "max"}, nil, "max"},
+		{[]string{"claude", "--effort", "low", "--effort", "high"}, nil, "high"},
+		{[]string{"claude", "--effort", "turbo"}, nil, ""},
+		{[]string{"claude", "--effort"}, nil, ""},
+		{[]string{"claude", "--", "--effort", "high"}, nil, ""},
+		{[]string{"claude", "-p", "--effort high"}, nil, ""},
+		{[]string{"claude", "--efforts", "high"}, nil, ""},
+		{[]string{"claude", "--effort", "low"}, []string{"CLAUDE_CODE_EFFORT_LEVEL=Max"}, "max"},
+		{[]string{"claude", "--effort", "low"}, []string{"CLAUDE_CODE_EFFORT_LEVEL=auto"}, ""},
+		{[]string{"claude", "--effort", "low"}, []string{"CLAUDE_CODE_EFFORT_LEVEL=unset"}, ""},
+		{[]string{"claude", "--effort", "low"}, []string{"CLAUDE_CODE_EFFORT_LEVEL=bogus"}, "low"},
+		{[]string{"claude"}, []string{"CLAUDE_CODE_EFFORT_LEVEL=xhigh"}, "xhigh"},
+		{[]string{"claude", "--effort", "med"}, nil, "medium"},
+		{[]string{"claude", "--effort", "MED"}, nil, "medium"},
+		{[]string{"claude", "--effort", "high"}, []string{"CLAUDE_CODE_EFFORT_LEVEL=med"}, "medium"},
+		{[]string{"claude", "--effort", "high"}, []string{"CLAUDE_CODE_EFFORT_LEVEL=3"}, ""},
+		{[]string{"claude", "--effort", "low"}, []string{"CLAUDE_CODE_EFFORT_LEVEL=12000"}, ""},
+		{[]string{"claude", "--effort", "low"}, []string{"CLAUDE_CODE_EFFORT_LEVEL="}, "low"},
+		{[]string{"claude", "--effort", "low"}, []string{"CLAUDE_CODE_EFFORT_LEVEL= High "}, "high"},
+		{[]string{"claude", "--effort", "low"}, []string{"CLAUDE_CODE_EFFORT_LEVEL=-1"}, ""},
+		{[]string{"claude", "--effort", "low"}, []string{"CLAUDE_CODE_EFFORT_LEVEL=+5"}, ""},
+		{[]string{"claude", "--effort", "low"}, []string{"CLAUDE_CODE_EFFORT_LEVEL=12000abc"}, ""},
+		{[]string{"claude", "--effort", "low"}, []string{"CLAUDE_CODE_EFFORT_LEVEL=12345678901234567890"}, ""},
+		{[]string{"claude", "--effort", "low"}, []string{"CLAUDE_CODE_EFFORT_LEVEL= 7 "}, ""},
+		{[]string{"claude", "--effort", "low"}, []string{"CLAUDE_CODE_EFFORT_LEVEL=x7"}, "low"},
+		{[]string{"claude", "--effort", "low"}, []string{"CLAUDE_CODE_EFFORT_LEVEL=-"}, "low"},
+		{[]string{"claude", "--effort", "low"}, []string{"CLAUDE_CODE_EFFORT_LEVEL=+"}, "low"},
+		{[]string{"claude", "--effort", "5"}, nil, ""},
+		{[]string{"claude", "--effort", strings.Repeat("high", 5)}, nil, ""},
+		// A parent's level, inherited by a child claude, is not a launch level.
+		{[]string{"claude", "--effort", "low"}, []string{"CLAUDE_EFFORT=medium"}, "low"},
+		{[]string{"claude"}, []string{"CLAUDE_EFFORT=medium"}, ""},
+	}
+	for _, c := range cases {
+		if got := procFactsFromProcArgs2(procArgs2(c.args, c.env)).LaunchEffort; got != c.want {
+			t.Errorf("procargs2 %q %q = %q, want %q", c.args, c.env, got, c.want)
+		}
+		if got := procFactsFromLinux(nul(c.args), nul(c.env)).LaunchEffort; got != c.want {
+			t.Errorf("linux %q %q = %q, want %q", c.args, c.env, got, c.want)
+		}
 	}
 }
 
@@ -618,5 +750,144 @@ func TestGlobSearchIsThrottled(t *testing.T) {
 	}
 	if p := a.findTranscript(coordID, "/home/dev/projects/alpha", true); p == "" {
 		t.Fatal("search did not find it")
+	}
+}
+
+// Before the first reply the card has the level the process was launched
+// with; the first reply's recorded level replaces it, and a reply that
+// records none (no level sent) leaves no level at all, not the launch one.
+func TestEffortLaunchThenRecorded(t *testing.T) {
+	e := newEnv(t)
+	e.setProc(4242, procStart)
+	e.setLaunch(4242, "low")
+	e.record(4242, nil)
+	c := run(t, e.adapter())
+	c.wait(t, 2*time.Second, "launch level", session(coordID, func(f model.SessionFact) bool {
+		return f.Effort == model.Of("low") && f.EffortAtLaunch
+	}))
+
+	p := filepath.Join(e.home, ".claude", "projects", projectDirName("/home/dev/projects/alpha"), coordID+".jsonl")
+	writeFile(t, p, []byte(`{"type":"user","isSidechain":false,"timestamp":"2026-11-17T08:00:00.000Z","cwd":"/home/dev/projects/alpha"}`+"\n"))
+	c.wait(t, 2*time.Second, "transcript read", session(coordID, func(f model.SessionFact) bool {
+		return f.Folder == "/home/dev/projects/alpha" && f.Effort == model.Of("low") && f.EffortAtLaunch
+	}))
+
+	appendFile(t, p, []byte(`{"type":"assistant","effort":"high","isSidechain":false,"timestamp":"2026-11-17T08:00:01.000Z","message":{"model":"claude-opus-5-5"}}`+"\n"))
+	c.wait(t, 2*time.Second, "recorded level", session(coordID, func(f model.SessionFact) bool {
+		return f.Effort == model.Of("high") && !f.EffortAtLaunch
+	}))
+
+	appendFile(t, p, []byte(`{"type":"assistant","isSidechain":false,"timestamp":"2026-11-17T08:00:02.000Z","message":{"model":"claude-opus-5-5"}}`+"\n"))
+	c.wait(t, 2*time.Second, "no level", session(coordID, func(f model.SessionFact) bool {
+		return f.Model == model.Of("claude-opus-5-5") && !f.Effort.OK && !f.EffortAtLaunch
+	}))
+}
+
+// An ended session's process is gone: its launch level is not kept.
+func TestEffortLaunchGoneWhenEnded(t *testing.T) {
+	e := newEnv(t)
+	e.setProc(4242, procStart)
+	e.setLaunch(4242, "max")
+	e.record(4242, nil)
+	c := run(t, e.adapter())
+	c.wait(t, 2*time.Second, "launch level", session(coordID, func(f model.SessionFact) bool { return f.Effort == model.Of("max") }))
+	e.setProc(4242, "")
+	c.wait(t, 2*time.Second, "ended without a level", session(coordID, func(f model.SessionFact) bool {
+		return f.Ended && !f.Effort.OK && !f.EffortAtLaunch
+	}))
+}
+
+// /clear keeps the process and starts a new session in it. An /effort made
+// before the clear carries over, so the launch level is not shown for the
+// new session; the first session of the process keeps it.
+func TestEffortLaunchOnlyForTheProcessFirstSession(t *testing.T) {
+	e := newEnv(t)
+	e.setProc(4242, procStart)
+	e.setLaunch(4242, "high")
+	e.record(4242, nil)
+	c := run(t, e.adapter())
+	c.wait(t, 2*time.Second, "launch level", session(coordID, func(f model.SessionFact) bool { return f.Effort == model.Of("high") && f.EffortAtLaunch }))
+	e.record(4242, func(m map[string]any) { m["sessionId"] = workerID })
+	c.wait(t, 2*time.Second, "the cleared session", session(workerID, func(f model.SessionFact) bool { return f.Live == model.Of(true) }))
+	c.wait(t, 2*time.Second, "the first session gone", func(f model.Fact) bool {
+		g, ok := f.(model.SessionGone)
+		return ok && g.Key.ID == coordID
+	})
+	for _, x := range c.all() {
+		if f, ok := x.(model.SessionFact); ok && f.Key.ID == workerID && (f.Effort.OK || f.EffortAtLaunch) {
+			t.Fatalf("a session after /clear shows a launch level: %+v", f.Effort)
+		}
+	}
+}
+
+// The session file goes away while the process still runs: the session has
+// ended, and its launch level goes with it.
+func TestEffortLaunchGoneWhenRecordRemoved(t *testing.T) {
+	e := newEnv(t)
+	e.setProc(4242, procStart)
+	e.setLaunch(4242, "max")
+	e.record(4242, nil)
+	p := filepath.Join(e.home, ".claude", "projects", projectDirName("/home/dev/projects/alpha"), coordID+".jsonl")
+	writeFile(t, p, []byte(`{"type":"user","isSidechain":false,"timestamp":"2026-11-17T08:00:00.000Z","cwd":"/home/dev/projects/alpha"}`+"\n"))
+	c := run(t, e.adapter())
+	c.wait(t, 2*time.Second, "launch level", session(coordID, func(f model.SessionFact) bool { return f.Effort == model.Of("max") && f.EffortAtLaunch }))
+	if err := os.Remove(e.recordPath(4242)); err != nil {
+		t.Fatal(err)
+	}
+	c.wait(t, 2*time.Second, "ended without a level", session(coordID, func(f model.SessionFact) bool {
+		return f.Ended && !f.Effort.OK && !f.EffortAtLaunch
+	}))
+}
+
+// The /clear rule keeps a process's first session until ps says the process
+// is gone: not when its session file is missing or unreadable for a scan
+// (Claude Code rewrites it at /clear), and not when ps fails.
+func TestFirstSessionKeptUntilTheProcessEnds(t *testing.T) {
+	e := newEnv(t)
+	e.setProc(4242, procStart)
+	e.setLaunch(4242, "high")
+	e.record(4242, nil)
+	r := &registry{a: e.adapter(), emit: func(model.Fact) {}, sessions: map[string]*sess{}, sent: map[string]model.SessionFact{}, firsts: map[string]firstSession{}}
+	ctx := context.Background()
+	r.rescan(ctx)
+	if len(r.firsts) != 1 {
+		t.Fatalf("firsts = %v, want the process", r.firsts)
+	}
+	writeFile(t, e.recordPath(4242), []byte(`{"pid":4242,"sessionId":`)) // mid-write
+	r.rescan(ctx)
+	if err := os.Remove(e.recordPath(4242)); err != nil {
+		t.Fatal(err)
+	}
+	r.rescan(ctx)
+	e.setPSBad(true)
+	r.rescan(ctx)
+	e.setPSBad(false)
+	if len(r.firsts) != 1 {
+		t.Fatalf("firsts = %v: dropped while the process lives", r.firsts)
+	}
+	// The same process, after /clear: a new session, no launch level.
+	e.record(4242, func(m map[string]any) { m["sessionId"] = workerID })
+	r.rescan(ctx)
+	if f := r.fact(workerID, r.sessions[workerID]); f.Effort.OK {
+		t.Fatalf("the session after /clear shows %+v", f.Effort)
+	}
+	// Another process, with no start time in its record, which ends: its entry goes.
+	const third = "33333333-3333-4333-8333-333333333333"
+	e.setProc(5151, procStart)
+	e.record(5151, func(m map[string]any) { m["sessionId"], m["procStart"] = third, "" })
+	r.rescan(ctx)
+	if len(r.firsts) != 2 {
+		t.Fatalf("firsts = %v, want two processes", r.firsts)
+	}
+	e.setProc(5151, "")
+	r.rescan(ctx)
+	if len(r.firsts) != 1 {
+		t.Fatalf("firsts = %v after a process ended", r.firsts)
+	}
+	// The pid now belongs to another program (a different start): its entry goes.
+	e.setProc(4242, "Wed Nov 18 09:00:00 2026")
+	r.rescan(ctx)
+	if len(r.firsts) != 0 {
+		t.Fatalf("firsts = %v after the pid was reused", r.firsts)
 	}
 }

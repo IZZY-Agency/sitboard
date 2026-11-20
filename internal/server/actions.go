@@ -8,6 +8,7 @@ import (
 	"mime"
 	"net/http"
 	"regexp"
+	"slices"
 	"time"
 
 	"github.com/IZZY-Agency/sitboard/internal/app"
@@ -77,12 +78,23 @@ func seen(opts Options) http.HandlerFunc {
 	}
 }
 
+// catchupRead moves the marker to the time the page sends: the newest item
+// it showed. The core clamps it; a missing or zero time is refused.
 func catchupRead(opts Options) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := readBody(w, r); !ok {
+		if !isJSON(w, r) {
 			return
 		}
-		if err := opts.Board.MarkCatchupRead(); err != nil {
+		body, ok := readBody(w, r)
+		if !ok {
+			return
+		}
+		var req contract.CatchupReadRequest
+		if err := json.Unmarshal(body, &req); err != nil || req.UpTo.IsZero() {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		if err := opts.Board.MarkCatchupRead(req.UpTo); err != nil {
 			http.Error(w, "could not save the catch-up marker", http.StatusInternalServerError)
 			return
 		}
@@ -119,6 +131,47 @@ func forgetGrouping(opts Options) http.HandlerFunc {
 			http.Error(w, "this project is not a grouping", http.StatusConflict)
 		default:
 			log.Printf("server: forget grouping: %v", err)
+			http.Error(w, "could not save the change", http.StatusInternalServerError)
+		}
+	}
+}
+
+// groupingSetting sets a folder to auto, always or never group. The server
+// resolves the folder from the project id; nothing else in the body is read
+// but the mode, which must be one the contract lists.
+func groupingSetting(opts Options) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !isJSON(w, r) {
+			return
+		}
+		body, ok := readBody(w, r)
+		if !ok {
+			return
+		}
+		var req contract.GroupingRequest
+		if err := json.Unmarshal(body, &req); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		if !contract.ValidProjectID(req.ProjectID) {
+			http.Error(w, "bad project id", http.StatusBadRequest)
+			return
+		}
+		if !slices.Contains(contract.GroupingModes, req.Mode) {
+			http.Error(w, "bad mode", http.StatusBadRequest)
+			return
+		}
+		switch err := opts.Board.SetGrouping(req.ProjectID, req.Mode); {
+		case err == nil:
+			w.WriteHeader(http.StatusNoContent)
+		case errors.Is(err, app.ErrUnknownProject):
+			http.Error(w, "unknown project", http.StatusNotFound)
+		case errors.Is(err, app.ErrNotGrouping):
+			http.Error(w, "this project is not a grouping", http.StatusConflict)
+		case errors.Is(err, app.ErrTooManySettings):
+			http.Error(w, "too many folders have a grouping setting", http.StatusConflict)
+		default:
+			log.Printf("server: grouping setting: %v", err)
 			http.Error(w, "could not save the change", http.StatusInternalServerError)
 		}
 	}

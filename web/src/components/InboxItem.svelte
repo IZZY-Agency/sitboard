@@ -3,6 +3,8 @@
   import type { Card } from '../contract.gen';
   import { agentName, attentionLines, canJump, cardTitle, columnTone, projectLabel, timeInState, type Index, type Line } from '../data/derive';
   import { flash } from '../motion';
+  import { critterState } from '../data/critter';
+  import Critter from './Critter.svelte';
 
   let {
     card,
@@ -46,7 +48,7 @@
   >
     <span class="visually-hidden">{canJump(card, agtermPresent) ? 'Jump to agterm:' : 'Show where it runs:'}</span>
     <span class="top">
-      <span class="dot tone-{tone}" class:pulse={card.column === 'working'}></span>
+      <Critter id={card.id} mood={critterState(card)} size={24} />
       <span class="agent u">{name}</span>
       {#if showProject}<span class="project u">{place.name}{#if place.part}<span class="part">{' / '}{place.part}</span>{/if}</span>{/if}
       <span class="since">{timeInState(card, now)}</span>

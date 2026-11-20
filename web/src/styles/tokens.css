@@ -37,15 +37,38 @@
      eye. Each stays at least 17 (CIEDE2000) from every text and state colour
      above, at least 9 from the two ambers to red-green colour-blind eyes, and
      reads at 8:1 or more on the page and on a card. A model with no family
-     keeps the neutral chip. */
+     keeps the neutral chip.
+     Haiku is the one exception: the owner chose this lime on 19 Nov 2026
+     over the rule. It is 14.3 from working green and 16.5 from the amber
+     hover, and 6.3 from the ambers to red-green colour-blind eyes;
+     tokens.test.ts holds it to those distances so it cannot drift further. */
   --model-fable: #54d1d1;
   --model-fable-line: rgb(84 209 209 / 50%);
   --model-opus: #e8a87c;
   --model-opus-line: rgb(232 168 124 / 50%);
   --model-sonnet: #f1adcc;
   --model-sonnet-line: rgb(241 173 204 / 50%);
-  --model-haiku: #a8b04f;
-  --model-haiku-line: rgb(168 176 79 / 50%);
+  --model-haiku: #c2d07a;
+  --model-haiku-line: rgb(194 208 122 / 50%);
+
+  /* Effort levels, on the level's word next to the model: neutral, from
+     faded (low) to bright (max). The word is always written, so the ramp
+     only helps the eye. low reads at 4.5:1 or more on the page and on a
+     card; max stays below the card title (--fg) and the needs-you amber, so
+     brightness alone cannot lift the top of the ramp any further. From high
+     up a second cue does: the level's box fills with a neutral tint, deeper
+     at each step, and the word goes to weight 600 (--effort-lift). Every
+     level still reads at 4.5:1 or more on its own fill. A level set at
+     launch keeps an empty box: the fill means a reply has run at it. */
+  --effort-low: #7b8091;
+  --effort-medium: #8f929c;
+  --effort-high: #a3a4a8;
+  --effort-xhigh: #b7b6b3;
+  --effort-max: #ccc9be;
+  --effort-high-fill: rgb(221 218 207 / 8%);
+  --effort-xhigh-fill: rgb(221 218 207 / 14%);
+  --effort-max-fill: rgb(221 218 207 / 22%);
+  --effort-lift: 600;
 
   /* Type */
   --font-ui: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;

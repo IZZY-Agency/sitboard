@@ -8,7 +8,7 @@
     byLongest,
     canJump,
     cardTitle,
-    columnTone,
+    effortOf,
     inbox,
     modelFamily,
     modelLabel,
@@ -26,6 +26,8 @@
   import { flipOpts, makeMove } from '../motion';
   import Count from '../components/Count.svelte';
   import InboxItem from '../components/InboxItem.svelte';
+  import Critter from '../components/Critter.svelte';
+  import { critterState } from '../data/critter';
 
   let {
     snapshot,
@@ -123,23 +125,28 @@
               {@const unsure = uncertainRole(card, ix)}
               {@const model = modelLabel(card.agent.model)}
               {@const family = modelFamily(card.agent.model)}
+              {@const effort = effortOf(card)}
               <button
                 type="button"
                 class="trow"
+                data-card={card.id}
                 animate:flip={flipOpts()}
                 in:receive={{ key: card.id }}
                 out:send={{ key: card.id }}
                 onclick={() => onjump(card)}
               >
                 <span class="visually-hidden">{canJump(card, snapshot.agtermPresent) ? 'Jump to agterm:' : 'Show where it runs:'}</span>
-                <span class="state" class:needs={card.column === 'needs_you'}>
-                  <span class="dot tone-{columnTone(card.column)}" class:pulse={card.column === 'working'}></span>{stateWord(card)}
-                </span>
-                <span class="agent u" style:--depth={r.depth}>{name}</span>
+                <span class="state" class:needs={card.column === 'needs_you'}>{stateWord(card)}</span>
+                <span class="who" style:--depth={r.depth}><Critter id={card.id} mood={critterState(card)} size={20} /><span class="agent u">{name}</span></span>
                 <span class="doing">
                   {#if team.solo}<span class="proj u">{projectName(card, ix)}</span>{/if}{#if unsure}<span class="proj">{unsure}</span>{/if}<span class="u">{cardTitle(card)}</span>
                 </span>
-                <span class="model u {family ? `model-${family}` : ''}" class:unknown={modelUnknown(card.agent.model)} title={model}>{model}</span>
+                <span class="mcell"
+                  ><span class="model u {family ? `model-${family}` : ''}" class:unknown={modelUnknown(card.agent.model)} title={model}>{model}</span
+                  >{#if effort}<span class="visually-hidden">{', effort '}</span><span class="eff effort-{effort.level}" class:launch={effort.launch} title={effort.title}
+                      >{effort.level}{#if effort.launch}<span class="at">{' at launch'}</span>{/if}</span
+                    >{/if}</span
+                >
                 <span class="prs tone-{pr?.tone ?? 'muted'} u"
                   >{#each (pr?.text ?? '').split(' · ').filter(Boolean) as part, i (i)}{#if i}{' · '}{/if}<span class="part" class:closes={part.startsWith('closes ')}>{part}</span>{/each}</span
                 >
@@ -245,8 +252,10 @@
     min-width: 920px;
   }
   .trow {
+    /* The critter's eyes are holes in the page ground, or in the hover wash. */
+    --hole: var(--bg);
     display: grid;
-    grid-template-columns: 160px 170px minmax(0, 1fr) 120px 250px 84px;
+    grid-template-columns: 160px 170px minmax(0, 1fr) 128px 250px 84px;
     align-items: center;
     width: 100%;
     min-height: 46px;
@@ -257,6 +266,7 @@
       transform var(--press) ease-out;
   }
   button.trow:hover {
+    --hole: color-mix(in srgb, rgb(221 218 207) 4%, var(--bg));
     background: rgb(221 218 207 / 4%);
   }
   button.trow:active {
@@ -294,8 +304,15 @@
   .state.needs {
     color: var(--amber);
   }
-  .agent {
+  .who {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
     padding-left: calc(var(--depth, 0) * 16px);
+  }
+  .agent {
+    min-width: 0;
     font-size: var(--text-m);
     color: var(--fg);
     overflow: hidden;
@@ -317,11 +334,18 @@
     font-size: var(--text-s);
     color: var(--muted);
   }
-  /* 15 characters fit ("model unknown", "gpt-5.4-codex" with room); a longer
+  /* The model's name, with its effort level on a second line. 16 characters
+     of the name fit ("model unknown", "gpt-5.4-codex" with room) and the
+     longest level, "xhigh at launch", with room in its smaller size; a longer
      id is cut with an ellipsis and stays whole in the tooltip. The padding
      keeps it off the Pull requests text. */
-  .model {
+  .mcell {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
     padding-right: 12px;
+  }
+  .model {
     font-size: var(--text-m);
     color: var(--model, inherit);
     overflow: hidden;
@@ -330,6 +354,27 @@
   }
   .model.unknown {
     color: var(--muted);
+  }
+  /* From high up the level sits on a small filled patch, heavier (base.css);
+     set at launch, it has no patch. */
+  .eff {
+    align-self: flex-start;
+    padding: 0 4px;
+    margin-left: -4px;
+    background: var(--effort-fill, none);
+    font-size: var(--text-s);
+    font-weight: var(--effort-weight, 400);
+    line-height: 1.3;
+    color: var(--effort);
+    white-space: nowrap;
+  }
+  .eff.launch {
+    background: none;
+  }
+  /* Set at launch: said in words, never by dimming (dim reads as low), and no brighter than the faintest level. */
+  .at {
+    color: var(--effort-low);
+    font-weight: 400;
   }
   /* The line is short by construction (prSummary), so it wraps rather than being cut. */
   .prs {

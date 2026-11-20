@@ -45,8 +45,8 @@ export function live(snapshot: Snapshot) {
   return feedOf({ conn: 'live', snapshot });
 }
 
-export function recordActions(answer: Partial<Record<'jump' | 'seen' | 'forgetGrouping', ActionResult>> = {}) {
-  const calls: Array<[string, string]> = [];
+export function recordActions(answer: Partial<Record<'jump' | 'seen' | 'forgetGrouping' | 'setGrouping', ActionResult>> = {}) {
+  const calls: Array<[string, string] | [string, string, string]> = [];
   const actions: Actions = {
     jump: async (id) => {
       calls.push(['jump', id]);
@@ -59,6 +59,10 @@ export function recordActions(answer: Partial<Record<'jump' | 'seen' | 'forgetGr
     forgetGrouping: async (id) => {
       calls.push(['forgetGrouping', id]);
       return answer.forgetGrouping ?? { ok: true };
+    },
+    setGrouping: async (id, mode) => {
+      calls.push(['setGrouping', id, mode]);
+      return answer.setGrouping ?? { ok: true };
     },
   };
   return { calls, actions };

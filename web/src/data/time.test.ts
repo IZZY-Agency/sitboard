@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { duration, since, clock } from './time';
+import { duration, since, clock, when } from './time';
 
 const S = 1000;
 const M = 60 * S;
@@ -37,5 +37,24 @@ describe('clock', () => {
   it('formats a time as HH:MM, 24-hour', () => {
     const d = new Date(2026, 10, 17, 9, 5);
     expect(clock(d.toISOString())).toBe('09:05');
+  });
+});
+
+describe('when', () => {
+  // Local times, so the test reads the same in every time zone.
+  const now = new Date(2026, 10, 19, 15, 0).getTime(); // Thu 19 Nov 15:00
+  const at = (y: number, mo: number, d: number, h: number, mi: number) => new Date(y, mo, d, h, mi).toISOString();
+  it('today: the clock only', () => {
+    expect(when(at(2026, 10, 19, 9, 5), now)).toBe('09:05');
+  });
+  it('this week: the day and the clock', () => {
+    expect(when(at(2026, 10, 18, 23, 59), now)).toBe('Wed 23:59');
+    expect(when(at(2026, 10, 13, 0, 1), now)).toBe('Fri 00:01');
+  });
+  it('a week or more back: the date', () => {
+    expect(when(at(2026, 10, 12, 9, 0), now)).toBe('12 Nov 09:00');
+  });
+  it('unreadable: nothing', () => {
+    expect(when('soon', now)).toBe('');
   });
 });

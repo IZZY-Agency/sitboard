@@ -2,14 +2,14 @@ package claude
 
 import "golang.org/x/sys/unix"
 
-// readAgtermID returns the agterm session id from a live process's
-// environment. Only works for the user's own processes.
-func readAgtermID(pid int) string {
+// readProcFacts reads a live process's arguments and environment once and
+// keeps only procFacts. Only works for the user's own processes.
+func readProcFacts(pid int) procFacts {
 	buf, err := unix.SysctlRaw("kern.procargs2", pid)
 	if err != nil {
-		return ""
+		return procFacts{}
 	}
-	id := agtermIDFromProcArgs2(buf)
-	clear(buf) // the rest of the environment is not kept
-	return id
+	f := procFactsFromProcArgs2(buf)
+	clear(buf) // the rest of the arguments and environment is not kept
+	return f
 }

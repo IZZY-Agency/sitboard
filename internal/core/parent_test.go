@@ -2,6 +2,7 @@ package core
 
 import (
 	"testing"
+	"time"
 
 	"github.com/IZZY-Agency/sitboard/internal/contract"
 	"github.com/IZZY-Agency/sitboard/internal/model"
@@ -157,5 +158,63 @@ func TestWorkerHintIsDerivedFromPeerSenders(t *testing.T) {
 		if c.Agent.Parent != p {
 			t.Errorf("%s: parent %q, want %q", id, c.Agent.Parent, p)
 		}
+	}
+}
+
+// Review of #82, B: sessions known only from catch-up's backfill do not
+// change the board. A live worker keeps its coordinator when an ended
+// session from yesterday has its name, or listed it too.
+func TestBackfillTakesNoPartInParents(t *testing.T) {
+	ended := func(id string) model.SessionFact {
+		s := session(id, model.StatusFinished, tNow.Add(-24*time.Hour))
+		s.Live, s.Ended, s.EndedAt, s.Backfill = model.Of(false), true, tNow.Add(-24*time.Hour), true
+		return s
+	}
+	for name, extra := range map[string]func() model.SessionFact{
+		"an ended session with the same name": func() model.SessionFact { s := ended("old-w"); s.Name = "worker-a"; return s },
+		"an ended coordinator that listed it": func() model.SessionFact {
+			s := ended("old-c")
+			s.Name, s.SpawnedNames = "coordinator-old", []string{"worker-a"}
+			return s
+		},
+		"an ended session that wrote to it": func() model.SessionFact {
+			s := ended("old-x")
+			s.Name, s.PeerSenders = "worker-a", []string{"coordinator-a"}
+			return s
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			b := newTestBoard(t)
+			coord := busySession("coord", tNow)
+			coord.Name, coord.SpawnedNames = "coordinator-a", []string{"worker-a"}
+			w := busySession("w1", tNow)
+			w.Name = "worker-a"
+			for _, f := range []model.Fact{coord, w, extra()} {
+				b.applySync(f)
+			}
+			c, ok := cardByID(t, b, "claude:w1")
+			if !ok || c.Agent.Parent != contract.ParentKnown {
+				t.Fatalf("worker's parent %q", c.Agent.Parent)
+			}
+			if c, _ := cardByID(t, b, "claude:coord"); c.Agent.Parent != contract.ParentNone {
+				t.Fatalf("coordinator's parent %q", c.Agent.Parent)
+			}
+		})
+	}
+}
+
+// A coordinator that ended during this run (not from the backfill) is still
+// the spawn record of the worker it started: the worker keeps its parent.
+func TestCoordinatorEndedInThisRunKeepsItsWorker(t *testing.T) {
+	b := newTestBoard(t)
+	coord := busySession("coord", tNow)
+	coord.Name, coord.SpawnedNames = "coordinator-a", []string{"worker-a"}
+	coord.Live, coord.Ended, coord.EndedAt = model.Of(false), true, tNow
+	w := busySession("w1", tNow)
+	w.Name = "worker-a"
+	b.applySync(coord)
+	b.applySync(w)
+	if c, ok := cardByID(t, b, "claude:w1"); !ok || c.Agent.Parent != contract.ParentKnown {
+		t.Fatalf("worker's parent %q", c.Agent.Parent)
 	}
 }

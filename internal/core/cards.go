@@ -2,13 +2,11 @@ package core
 
 import (
 	"cmp"
-	"fmt"
 	"path/filepath"
 	"slices"
 	"strings"
 	"time"
 	"unicode"
-	"unicode/utf8"
 
 	"github.com/IZZY-Agency/sitboard/internal/contract"
 	"github.com/IZZY-Agency/sitboard/internal/model"
@@ -91,6 +89,7 @@ func (b *Board) deriveLocked(now time.Time) (view, map[string]model.SessionKey) 
 		}
 	}
 
+	v.settings = b.settingsLocked()
 	v.umbrellas, v.groupings = b.groupLocked(projects, mainRoots, plainLive, b.qualifiedLocked(shown, parents, plainLive), now)
 
 	for _, c := range v.cards {
@@ -189,12 +188,9 @@ func (b *Board) cardLocked(s model.SessionFact, parent model.Known[model.Session
 	mainRoot := repo.MainRoot
 	project := contract.Project{
 		ID:   contract.ProjectID(mainRoot),
-		Name: clean(filepath.Base(mainRoot)),
+		Name: projectName(mainRoot),
 		Path: b.homeRel(mainRoot),
 		Repo: clean(repo.Slug),
-	}
-	if mainRoot == "" {
-		project.Name = "unknown folder"
 	}
 
 	card := contract.Card{
@@ -223,6 +219,7 @@ func (b *Board) cardLocked(s model.SessionFact, parent model.Known[model.Session
 	if !s.Model.OK {
 		card.Agent.Model = ""
 	}
+	card.Agent.Effort, card.Agent.EffortSource = agentEffort(s)
 	if hasTerm {
 		card.Agent.TerminalID = s.TerminalID
 		card.Agent.Workspace = clean(term.Workspace)
@@ -232,21 +229,12 @@ func (b *Board) cardLocked(s model.SessionFact, parent model.Known[model.Session
 	}
 	issues := map[contract.Issue]bool{}
 	for _, pr := range prs {
-		card.PullRequests = append(card.PullRequests, contract.PullRequest{
-			Repo:   clean(pr.Repo),
-			Number: pr.Number,
-			Title:  clean(pr.Title),
-			URL:    safeURL(pr.URL),
-			State:  contract.PRState(pr.State),
-			Checks: contract.Checks(pr.Checks),
-			Review: contract.Review(pr.Review),
-			Draft:  pr.Draft,
-		})
+		card.PullRequests = append(card.PullRequests, pagePR(pr))
 		if pr.State != model.PRStateOpen {
 			continue // a closed one never will close them; a merged one already did
 		}
 		for _, n := range pr.ClosingIssues {
-			is := contract.Issue{Repo: clean(pr.Repo), Number: n, URL: issueURL(pr.Repo, n)}
+			is := contract.Issue{Repo: clean(pr.Repo), Number: n, URL: model.IssueURL(pr.Repo, n)}
 			if !issues[is] {
 				issues[is] = true
 				card.Issues = append(card.Issues, is)
@@ -386,6 +374,15 @@ func cardArtifacts(refs []model.ArtifactRef) []contract.Artifact {
 		}
 	}
 	return out
+}
+
+// projectName is how a project is named on the page: its main root's base
+// name, cleaned.
+func projectName(mainRoot string) string {
+	if mainRoot == "" {
+		return "unknown folder"
+	}
+	return clean(filepath.Base(mainRoot))
 }
 
 // repoLocked is what git said about a folder, or the folder itself.
@@ -530,17 +527,40 @@ func isBidiControl(r rune) bool {
 		(r >= '\u202A' && r <= '\u202E') || (r >= '\u2066' && r <= '\u2069')
 }
 
-// safeURL passes only https links to the page.
-func safeURL(u string) string {
-	if !strings.HasPrefix(u, "https://") || !utf8.ValidString(u) || strings.ContainsAny(u, " \t\r\n\"'<>\\") {
-		return ""
+// pagePR is a pull request as the page receives it, on a card or in
+// catch-up: cleaned text, and an address built for its own repo and number.
+func pagePR(pr model.PullRequest) contract.PullRequest {
+	return contract.PullRequest{
+		Repo:   clean(pr.Repo),
+		Number: pr.Number,
+		Title:  clean(pr.Title),
+		URL:    prURL(pr),
+		State:  contract.PRState(pr.State),
+		Checks: contract.Checks(pr.Checks),
+		Review: contract.Review(pr.Review),
+		Draft:  pr.Draft,
 	}
-	return u
 }
 
-func issueURL(repo string, n int) string {
-	if strings.Count(repo, "/") != 1 || strings.ContainsAny(repo, " \t\r\n\"'<>\\?#") {
-		return ""
+// prURL passes a pull request's address to the page only when it is the one
+// model.PullRequestURL builds for that pull request's own repo and number: the
+// pattern holds, and the link cannot point at another pull request.
+func prURL(pr model.PullRequest) string {
+	if u := model.PullRequestURL(pr.Repo, pr.Number); u != "" && u == pr.URL {
+		return u
 	}
-	return fmt.Sprintf("https://github.com/%s/issues/%d", repo, n)
+	return ""
+}
+
+// agentEffort is the card's effort level and where it came from. Only the
+// known levels pass; anything else is no level.
+func agentEffort(s model.SessionFact) (contract.Effort, contract.EffortSource) {
+	e := model.KnownEffort(s.Effort.V)
+	if !s.Effort.OK || e == "" {
+		return contract.EffortUnknown, contract.EffortSourceNone
+	}
+	if s.EffortAtLaunch {
+		return contract.Effort(e), contract.EffortSourceLaunch
+	}
+	return contract.Effort(e), contract.EffortSourceRecorded
 }

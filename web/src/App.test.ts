@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { flushSync } from 'svelte';
 import App from './App.svelte';
 import { card, golden, project, snapshot } from './test/fixtures';
 import { feedOf, recordActions, render, settle, text } from './test/render';
@@ -55,9 +56,9 @@ describe('shell', () => {
     expect(q('section[aria-label="All projects"]')).not.toBeNull();
   });
 
-  it('has no Catch-up or Leftovers button in this cut', () => {
+  it('has no Leftovers button in this cut', () => {
     app(golden());
-    expect(text(q('header'))).not.toMatch(/catch-up|leftovers/i);
+    expect(text(q('header'))).not.toMatch(/leftovers/i);
   });
 
   it('header shows agent and project counts', () => {
@@ -73,7 +74,7 @@ describe('shell', () => {
       'codex reading… · status unknown for Codex sessions',
       'agterm found',
       'git found',
-      'github failing · not logged in',
+      'github failing · not logged in to github.com',
       '3 plain shells hidden',
     ]);
   });
@@ -373,5 +374,244 @@ describe('untrusted text', () => {
     const name = q(`[data-card="${c.id}"] .agent`)!;
     expect(name.textContent).toBe('abcevil');
     expect(name.classList.contains('u')).toBe(true); // unicode-bidi: isolate
+  });
+});
+
+describe('tab title and icon', () => {
+  const href = () => document.head.querySelector('link[rel="icon"]')?.getAttribute('href') ?? '';
+  const icon = () => href().replace(/\?.*$/, '');
+  beforeEach(() => {
+    document.title = 'sitboard';
+    document.head.querySelectorAll('link[rel="icon"]').forEach((l) => l.remove());
+  });
+
+  it('say how many agents need you in every project, whatever is selected, and go plain at zero', async () => {
+    const one = project('p_000000000001', 'one');
+    const two = project('p_000000000002', 'two');
+    const waiting = [
+      card({ projectId: one.id, column: 'needs_you', attention: ['blocked'], agent: { status: 'blocked' } }),
+      card({ projectId: two.id, column: 'needs_you', attention: ['unseen'], seen: false, agent: { status: 'finished' } }),
+      card({ projectId: two.id, column: 'in_review', attention: ['failing_checks'] }),
+    ];
+    const a = app(null, 'connecting');
+    expect(document.title).toBe('sitboard');
+    expect(icon()).toBe('/favicon.svg');
+    a.push({ conn: 'live', snapshot: snapshot(waiting, [one, two]) });
+    expect(document.title).toBe('(2) sitboard');
+    expect(icon()).toBe('/badge/2.svg');
+    a.push({ conn: 'live', snapshot: snapshot([waiting[2]], [one, two]) });
+    expect(document.title).toBe('sitboard');
+    expect(icon()).toBe('/favicon.svg');
+  });
+
+  it('load the "not live" icon once the board is live, once, before it is needed', async () => {
+    const spy = vi.spyOn(document, 'createElement');
+    const asked = () =>
+      spy.mock.results
+        .filter((r) => (r.value as Element).tagName === 'IMG' && ((r.value as HTMLImageElement).getAttribute('src') ?? '').startsWith('/badge/lost.svg'))
+        .map((r) => (r.value as HTMLImageElement).getAttribute('src'));
+    const a = app(null, 'connecting');
+    expect(asked()).toEqual([]);
+    const s = snapshot([], [], { build: { version: '0.3.0', commit: 'abc1234', os: 'darwin', arch: 'arm64' } });
+    a.push({ conn: 'live', snapshot: s });
+    expect(asked()).toEqual(['/badge/lost.svg?v=0.3.0%2Babc1234']);
+    a.push({ conn: 'reconnecting', snapshot: s });
+    a.push({ conn: 'live', snapshot: s });
+    expect(asked()).toHaveLength(1);
+    // An upgraded sitboard: the new build's icon, at its own address.
+    a.push({ conn: 'live', snapshot: { ...s, build: { ...s.build, version: '0.3.1', commit: 'def5678' } } });
+    expect(asked()).toEqual(['/badge/lost.svg?v=0.3.0%2Babc1234', '/badge/lost.svg?v=0.3.1%2Bdef5678']);
+    spy.mockRestore();
+  });
+
+  it('give the badges the address of the build that serves them; the plain mark keeps its own', () => {
+    const s = snapshot(
+      [card({ column: 'needs_you', attention: ['blocked'], agent: { status: 'blocked' } })],
+      [project('p_000000000001', 'one')],
+      { build: { version: '0.3.0', commit: 'abc1234', os: 'darwin', arch: 'arm64' } },
+    );
+    const a = app(s);
+    expect(href()).toBe('/badge/1.svg?v=0.3.0%2Babc1234');
+    a.push({ conn: 'reconnecting', snapshot: s });
+    expect(href()).toBe('/badge/lost.svg?v=0.3.0%2Babc1234');
+    a.push({ conn: 'live', snapshot: { ...s, cards: [] } });
+    expect(href()).toBe('/favicon.svg');
+  });
+
+  it('drop the number while the connection is down, and drop a card marked seen here', async () => {
+    const u = card({ column: 'needs_you', attention: ['unseen'], seen: false, agent: { status: 'finished' } });
+    const b = card({ column: 'needs_you', attention: ['blocked'], agent: { status: 'blocked' } });
+    const s = snapshot([u, b], [project('p_000000000001', 'one')]);
+    const a = app(s);
+    expect(document.title).toBe('(2) sitboard');
+    (q(`[data-card="${u.id}"] .seen`) as HTMLButtonElement).click();
+    await settle();
+    expect(document.title).toBe('(1) sitboard');
+    expect(icon()).toBe('/badge/1.svg');
+    a.push({ conn: 'reconnecting', snapshot: s });
+    expect(document.title).toBe('sitboard · reconnecting');
+    expect(icon()).toBe('/badge/lost.svg');
+  });
+});
+
+describe('notification switch', () => {
+  function perm(current: NotificationPermission, answer: NotificationPermission = 'granted') {
+    const p = {
+      now: current,
+      asked: 0,
+      release: null as null | (() => void),
+      hold: false,
+      permission: {
+        supported: () => true,
+        current: () => p.now,
+        request: () => {
+          p.asked++;
+          return new Promise<NotificationPermission>((resolve) => {
+            const done = () => {
+              p.now = answer;
+              resolve(answer);
+            };
+            if (p.hold) p.release = done;
+            else done();
+          });
+        },
+      },
+    };
+    return p;
+  }
+  function mounted(permission: ReturnType<typeof perm>['permission']) {
+    const f = feedOf({ conn: 'live', snapshot: golden() });
+    r = render(App, { feed: f.feed, actions: recordActions().actions, permission });
+  }
+  const button = () => q('header button.notify') as HTMLButtonElement;
+  const status = () => text(q('.page > [role="status"]'));
+
+  it('sits in the header just before the live mark, off, and the page asks the browser nothing at load', () => {
+    const p = perm('default');
+    mounted(p.permission);
+    expect(button().closest('.controls')?.nextElementSibling?.classList.contains('live')).toBe(true);
+    expect(text(button())).toBe('Notify off');
+    // The state is in the name; no aria-pressed to say it twice, one hint.
+    expect(button().hasAttribute('aria-pressed')).toBe(false);
+    expect(button().hasAttribute('aria-describedby')).toBe(false);
+    expect(button().getAttribute('title')).toMatch(/desktop notification/i);
+    expect(p.asked).toBe(0);
+  });
+
+  it('the owner’s click asks the browser and turns it on, remembered for this address, and says so once', async () => {
+    const p = perm('default');
+    mounted(p.permission);
+    button().click();
+    await settle();
+    expect(p.asked).toBe(1);
+    expect(text(button())).toBe('Notify on');
+    expect(localStorage.getItem('sitboard.notify')).toBe('on');
+    expect(status()).toBe('Desktop notifications on.');
+    button().click();
+    await settle();
+    expect(text(button())).toBe('Notify off');
+    expect(status()).toBe('Desktop notifications off.');
+  });
+
+  it('the same outcome twice is read out twice: the live region empties before it speaks again', async () => {
+    const p = perm('default', 'default'); // the owner closes the browser's question without answering
+    mounted(p.permission);
+    button().click();
+    await settle();
+    expect(status()).toBe('The browser did not allow notifications. They stay off.');
+    button().click();
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    flushSync();
+    expect(status()).toBe('');
+    await settle();
+    expect(status()).toBe('The browser did not allow notifications. They stay off.');
+    expect(p.asked).toBe(2);
+  });
+
+  it('while the browser asks, the switch keeps keyboard focus and ignores clicks', async () => {
+    const p = perm('default');
+    p.hold = true;
+    mounted(p.permission);
+    button().focus();
+    button().click();
+    await settle();
+    expect(text(button())).toBe('Notify asking…');
+    expect(button().getAttribute('aria-disabled')).toBe('true');
+    expect(button().disabled).toBe(false);
+    expect(document.activeElement).toBe(button());
+    button().click();
+    await settle();
+    expect(p.asked).toBe(1);
+    p.release!();
+    await settle();
+    expect(text(button())).toBe('Notify on');
+    expect(document.activeElement).toBe(button());
+  });
+
+  it('blocked by the browser: a click shows what to do, read out once', async () => {
+    localStorage.setItem('sitboard.notify', 'on');
+    mounted(perm('denied').permission);
+    expect(text(button())).toBe('Notify blocked');
+    button().click();
+    await settle();
+    const notice = q('section[aria-label="Action failed"]');
+    expect(text(notice)).toMatch(/Turn on notifications failed: the browser blocks notifications .*site settings/);
+    expect(status()).toMatch(/site settings/);
+  });
+
+  it('opens on when it was turned on here and the browser still allows it', () => {
+    localStorage.setItem('sitboard.notify', 'on');
+    mounted(perm('granted').permission);
+    expect(text(button())).toBe('Notify on');
+  });
+
+  it('follows another tab of this address that turns it off, or on', async () => {
+    localStorage.setItem('sitboard.notify', 'on');
+    mounted(perm('granted').permission);
+    localStorage.removeItem('sitboard.notify');
+    window.dispatchEvent(new StorageEvent('storage', { key: 'sitboard.notify', newValue: null }));
+    await settle();
+    expect(text(button())).toBe('Notify off');
+    window.dispatchEvent(new StorageEvent('storage', { key: 'sitboard.notify', newValue: 'on' }));
+    await settle();
+    expect(text(button())).toBe('Notify on');
+    window.dispatchEvent(new StorageEvent('storage', { key: 'sitboard.view', newValue: 'teams' }));
+    await settle();
+    expect(text(button())).toBe('Notify on');
+  });
+});
+
+describe('desktop notification', () => {
+  const shown: Array<[string, NotificationOptions]> = [];
+  class FakeNotification {
+    static permission: NotificationPermission = 'granted';
+    static requestPermission = async () => 'granted' as const;
+    onclick: (() => void) | null = null;
+    constructor(title: string, opts: NotificationOptions) {
+      shown.push([title, opts]);
+    }
+    close() {}
+  }
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    shown.length = 0;
+  });
+
+  it('turned on, fires for an agent that starts needing you, not for what waited at load, with no names', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('Notification', FakeNotification);
+    vi.spyOn(document, 'hasFocus').mockReturnValue(false);
+    localStorage.setItem('sitboard.notify', 'on');
+    const P = [project('p_000000000001', 'one')];
+    const old = card({ column: 'needs_you', attention: ['blocked'], agent: { status: 'blocked', name: 'old-name' } });
+    const fresh = card({ column: 'working', agent: { name: 'fresh-name' } });
+    const a = app(snapshot([old, fresh], P));
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(shown).toEqual([]);
+    a.push({ conn: 'live', snapshot: snapshot([old, { ...fresh, column: 'needs_you', attention: ['unseen'], agent: { ...fresh.agent, status: 'finished', statusSince: '2026-11-17T10:00:00Z' } }], P) });
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(shown).toEqual([['sitboard', { body: '2 agents need you', tag: 'sitboard' }]]);
   });
 });

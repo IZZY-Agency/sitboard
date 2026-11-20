@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.3.0
+
+Catch-up, a critter for every agent, effort levels, links on cards, a tap on the shoulder when an agent needs you, and grouping you can set.
+
+What is new:
+
+- Catch-up. The Catch-up button in the header says how many items are new and opens a panel over the current view: what happened since you last pressed "Caught up", up to 7 days back, grouped by project. It lists finished turns, pull requests opened and merged, and artifacts published. Opening it marks nothing read; "Caught up" does. It covers the Claude Code sessions that ran in the last 7 days, including those that had already ended before sitboard started, which it finds by their transcripts; while it is still reading those, the panel says so.
+- Every agent has a critter: a small creature drawn from its session, the same in every view and after a restart. Its eyes, its outline and the line under its feet show the agent's state. It takes the place of the state dot on cards, in the needs-you queue, in Teams rows and in Lanes; the columns and words still say the state. Critters move only while you can see them, and with reduced motion they stay still.
+- Cards show the session's effort level (low, medium, high, xhigh or max) next to its model, on the Board, in Lanes and in Teams: the level the session's latest reply ran at or, before its first reply, the level it was started with, marked "at launch". From high up the level's box is filled, deeper at each step, so high, xhigh and max stand out; a level set at launch is not filled, and on the Board its box is dashed.
+- A tap on the shoulder. The tab's title ("(3) sitboard") and its icon show how many agents need you, and the icon shows a "?" when the board is not live. Turn on Notify in the header for a desktop notification when an agent starts needing you: for one agent it says why, for several how many, and it never names an agent, a project or a task. It stays quiet while the board is in front of you. The switch is off until you turn it on, and the choice holds for every tab of that board's address in that browser.
+- Pull requests on a card, and the issues they close, are links to GitHub, opened in a new tab without a referrer. Their numbers are underlined and carry a small ↗, as do the pull request links in Catch-up, so a link is visible without hovering.
+- Grouping settings. A project with parts can be set to "Always group", so its folder keeps grouping, and the "Forget grouping" confirm now offers "Forget once" or "Never group". The status bar says when folders have a setting and opens their list, where each can be set back to auto.
+- `--state <file>` gives a board its own state file, and `--no-state` keeps seen marks, the catch-up marker and groupings in memory only, for a run that saves nothing.
+
+What changed:
+
+- One state file, one board. A second sitboard on the same state file now refuses to start (exit code 1). Until now it started a second board, and the two silently overwrote each other's seen marks and groupings. Give the second one its own file with `--state <file>`, or run it with `--no-state`. A lock file, `state.json.lock`, now sits beside the state file: a running sitboard writes its process number and machine name there, and a clean stop empties it. On a folder that does not support locks, sitboard warns and runs without the lock. sitboard 0.2.0 and older take no lock, so they are not stopped; when another program, such as an older sitboard, has changed the state file, the board warns once before its next write replaces those changes.
+- sitboard refuses to start when the state file cannot be used (a folder it cannot write to, or a file that is not a sitboard state file), instead of failing at the first save or replacing another program's file.
+- A card's pull request lines are no longer part of its jump button: a click on a pull request opens it.
+- Haiku's model colour is a brighter lime.
+- sitboard now reads the transcripts of the Claude Code sessions that ran in the last 7 days, not only of running ones, to find the sessions that had ended before it started. It keeps only the facts it derives from them, in memory.
+- When it first sees a session in a running `claude` process, sitboard reads the process's arguments and environment, as before for the agterm session id. It now keeps a second fact from them: the effort level the session was started with (the `--effort` flag or `CLAUDE_CODE_EFFORT_LEVEL`), as one of the five level words. On Linux it now also reads `/proc/<pid>/cmdline` for this. Every other argument and variable is read past and not kept, logged or served.
+- The page now gets a second piece of free text from a transcript: when the session's own record has no name (as for a session that has ended), the name Claude Code recorded for it in the transcript (yours, or one it made itself, for example from a plan), cleaned and shortened. When the record has the name, the page got it from there already. The page also gets the effort levels, and the home-relative paths of the folders you set to always or never group (up to 200), whether or not an agent works in them.
+- The state file also keeps the folders you set to always or never group, and, for catch-up items that are still unread although they happened before the moment you marked, a hash of each item's identity (not the identity itself) and its time, at most 1000. A state file that holds a grouping setting is written as version 2; one without stays version 1. Upgrading needs nothing: 0.3.0 reads the files of 0.2.0 and 0.1.0 as they are.
+
+Limits:
+
+- Links on cards are on the Board only, not yet in Lanes or Teams.
+- Catch-up does not cover: sessions that ran more than 7 days ago; sessions whose transcript Claude Code has already removed; `claude -p`, SDK and MCP-server runs; and, after a restart, something that happened before the moment you marked but that sitboard learned only after the restart (say, a merge GitHub reported late). What it had learned before stopping stays unread, up to 1000 items; after a crash, what arrived in its last 10 seconds may not. Of the repositories known only from sessions that had already ended, GitHub is asked about the 20 newest; pull requests in the others are not listed. With `--no-state`, Catch-up lists the last 7 days again after every start.
+- The effort level "at launch" can differ from the one the first reply runs at: when `CLAUDE_CODE_EFFORT_LEVEL` is set in a Claude Code settings file, or when the model cannot run that level.
+- Desktop notifications need your browser's permission; sitboard on another port asks again.
+- If you go back to 0.2.0 or 0.1.0 after setting a folder to always or never group, it refuses to start: it says the state file "was written by a newer sitboard (file version 2, this build reads up to 1)" and leaves the file as it is. Before going back, set every folder back to auto (the file is then version 1 again), or move the state file aside. A version 1 file opens in them as before; on their next write they drop the catch-up items still unread behind the marker, which then count as read.
+
 ## 0.2.0
 
 Model names in colour, links to the artifacts a session published, and a way to undo a project grouping.

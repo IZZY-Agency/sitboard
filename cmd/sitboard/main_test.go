@@ -83,7 +83,13 @@ type running struct {
 
 func start(t *testing.T, cfg config) *running {
 	t.Helper()
-	home := t.TempDir()
+	return startIn(t, cfg, t.TempDir())
+}
+
+// startIn runs sitboard with home as the home folder; opts change its
+// environment.
+func startIn(t *testing.T, cfg config, home string, opts ...func(*runEnv)) *running {
+	t.Helper()
 	out := &syncBuffer{}
 	var opened []string
 	var mu sync.Mutex
@@ -99,6 +105,9 @@ func start(t *testing.T, cfg config) *running {
 		},
 		goos:   "linux",
 		getenv: func(string) string { return "" },
+	}
+	for _, o := range opts {
+		o(&env)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	r := &running{out: out, opened: &opened, cancel: cancel, done: make(chan error, 1)}
@@ -213,11 +222,20 @@ func TestPrintsTokenisedLinkExactlyOnceOnStart(t *testing.T) {
 	}
 }
 
+// A second sitboard with its own state file (here on the same home folder)
+// runs beside the first: on the first one's port it falls back and says so.
+// On the same state file it is refused (TestSecondInstanceOnOneStateFileIsRefused).
 func TestSecondInstanceRunsOnItsOwnPort(t *testing.T) {
-	one := start(t, cfgWith(0, true))
-	two := start(t, cfgWith(0, true))
+	home := t.TempDir()
+	one := startIn(t, cfgWith(0, true), home)
+	cfg := cfgWith(mustAtoi(t, one.port), false)
+	cfg.statePath = filepath.Join(t.TempDir(), "own.json")
+	two := startIn(t, cfg, home)
 	if one.port == two.port || one.token == two.token {
 		t.Fatalf("instances share port %s / token", one.port)
+	}
+	if !strings.Contains(two.out.String(), "port "+one.port+" is taken") {
+		t.Errorf("no fallback notice:\n%s", two.out.String())
 	}
 	for _, r := range []*running{one, two} {
 		c := client(t, r)

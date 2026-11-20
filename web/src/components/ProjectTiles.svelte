@@ -9,6 +9,8 @@
   import { ms, VIEW_MS } from '../motion';
   import Count from './Count.svelte';
   import Dots from './Dots.svelte';
+  import type { GroupingMode } from '../contract.gen';
+  import AlwaysGrouping from './AlwaysGrouping.svelte';
   import ForgetGrouping from './ForgetGrouping.svelte';
   import GroupSwitch from './GroupSwitch.svelte';
   import PartsRow, { type PartChip } from './PartsRow.svelte';
@@ -20,6 +22,8 @@
     mode,
     onmode,
     onforget,
+    onsetting,
+    settings,
   }: {
     g: Grouping;
     sel: Sel;
@@ -28,6 +32,10 @@
     onmode: (m: Mode) => void;
     /** Forgets a project's grouping; resolves true when the server did. */
     onforget?: (p: { id: string; name: string }) => Promise<boolean>;
+    /** Sets a folder's grouping; resolves true when the server did. */
+    onsetting?: (p: { id: string; name: string }, mode: GroupingMode) => Promise<boolean>;
+    /** project id -> its setting, for folders set to always or never. */
+    settings?: ReadonlyMap<string, GroupingMode>;
   } = $props();
 
   const band = $derived(tileBand(g));
@@ -67,8 +75,10 @@
 
   // After forgetting, focus goes back to the project's tile; the parts row
   // leaves with the next snapshot.
-  async function forget(p: { id: string; name: string }) {
-    const ok = (await onforget?.(p)) ?? false;
+  let asking = $state(false); // the forget confirm is open: it takes the row
+
+  async function forget(p: { id: string; name: string }, act = onforget) {
+    const ok = (await act?.(p)) ?? false;
     if (ok) (strip?.querySelector<HTMLElement>('[aria-pressed="true"]') ?? strip?.querySelector<HTMLElement>('button'))?.focus();
     return ok;
   }
@@ -140,9 +150,18 @@
   <div class="parts" transition:slide={{ duration: ms(VIEW_MS) }}>
     <PartsRow label="Parts of {top.name}" {chips} active={chipActive} onselect={pickChip}>
       {#snippet end()}
-        {#if onforget && top.parts.length}
+        {#if top.parts.length}
           {@const p = { id: top.id, name: top.name }}
-          {#key top.id}<ForgetGrouping name={top.name} onforget={() => forget(p)} />{/key}
+          {@const mode = settings?.get(top.id) ?? 'auto'}
+          {#key top.id}<div class="acts">
+              {#if onsetting && !(asking && mode !== 'always')}<AlwaysGrouping {mode} onset={(m) => onsetting(p, m)} />{/if}
+              {#if onforget && mode !== 'always'}<ForgetGrouping
+                  bind:asking
+                  name={top.name}
+                  onforget={() => forget(p)}
+                  onnever={onsetting ? () => forget(p, (q) => onsetting(q, 'never')) : undefined}
+                />{/if}
+            </div>{/key}
         {/if}
       {/snippet}
     </PartsRow>
@@ -150,6 +169,15 @@
 {/if}
 
 <style>
+  /* Always group, then Forget grouping; a confirm that opens takes the row. */
+  .acts {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    justify-content: flex-end;
+    gap: 4px;
+  }
+
   .band {
     display: flex;
     align-items: flex-start;

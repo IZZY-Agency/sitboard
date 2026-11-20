@@ -72,4 +72,94 @@ describe('store', () => {
     void b.forgetGrouping(p);
     expect(calls).toEqual(['p_main', 'p_main']);
   });
+
+  it('one setting request per folder and mode at a time; another mode is its own request', async () => {
+    const calls: string[] = [];
+    const answers: Array<(v: ActionResult) => void> = [];
+    const actions: Actions = {
+      ...recordActions().actions,
+      setGrouping: (id, mode) => {
+        calls.push(`${id} ${mode}`);
+        return new Promise<ActionResult>((res) => answers.push(res));
+      },
+    };
+    const b = new BoardState(() => actions);
+    const p = { id: 'p_main', name: 'mainapp' };
+    const first = b.setFolderGrouping(p, 'never');
+    const second = b.setFolderGrouping(p, 'never');
+    void b.setFolderGrouping(p, 'always');
+    expect(calls).toEqual(['p_main never', 'p_main always']);
+    answers[0]({ ok: true });
+    expect(await first).toBe(true);
+    expect(await second).toBe(true);
+    void b.setFolderGrouping(p, 'never');
+    expect(calls).toEqual(['p_main never', 'p_main always', 'p_main never']);
+  });
+
+  it('a setting the server answers after its snapshot already showed it is said at once', async () => {
+    vi.useFakeTimers();
+    const base = snapshot([card({ projectId: 'p_main' })], [project('p_main', 'mainapp')]);
+    const f = feedOf({ conn: 'live', snapshot: base });
+    const actions: Actions = {
+      ...recordActions().actions,
+      setGrouping: async (id, mode) => {
+        // The server publishes before it answers.
+        f.push({ conn: 'live', snapshot: { ...base, seq: 2, groupingSettings: [{ projectId: id, name: 'mainapp', path: '~/projects/mainapp', mode }] } });
+        return { ok: true };
+      },
+    };
+    const b = new BoardState(() => actions);
+    b.start(f.feed);
+    expect(await b.setFolderGrouping({ id: 'p_main', name: 'mainapp' }, 'never')).toBe(true);
+    vi.runAllTimers();
+    expect(b.said).toBe('mainapp never groups now. Its parts are no longer grouped under it.');
+  });
+
+  it('a snapshot from before the change, still on its way when the answer comes, is not announced', async () => {
+    vi.useFakeTimers();
+    const base = snapshot([card({ projectId: 'p_main' })], [project('p_main', 'mainapp')]);
+    const f = feedOf({ conn: 'live', snapshot: base });
+    const b = new BoardState(() => recordActions().actions);
+    b.start(f.feed);
+    expect(await b.setFolderGrouping({ id: 'p_main', name: 'mainapp' }, 'never')).toBe(true);
+    // Published before the change (still auto), arriving after the 204.
+    f.push({ conn: 'live', snapshot: { ...base, seq: 2 } });
+    vi.advanceTimersByTime(1);
+    expect(b.said).toBe('');
+    f.push({ conn: 'live', snapshot: { ...base, seq: 3, groupingSettings: [{ projectId: 'p_main', name: 'mainapp', path: '~/projects/mainapp', mode: 'never' }] } });
+    vi.runAllTimers();
+    expect(b.said).toBe('mainapp never groups now. Its parts are no longer grouped under it.');
+  });
+
+  it('a setting no snapshot shows within a few seconds is not said later', async () => {
+    vi.useFakeTimers();
+    const base = snapshot([card({ projectId: 'p_main' })], [project('p_main', 'mainapp')]);
+    const f = feedOf({ conn: 'live', snapshot: base });
+    const b = new BoardState(() => recordActions().actions);
+    b.start(f.feed);
+    expect(await b.setFolderGrouping({ id: 'p_main', name: 'mainapp' }, 'never')).toBe(true);
+    vi.advanceTimersByTime(4999);
+    f.push({ conn: 'live', snapshot: { ...base, seq: 2 } }); // still the old mode: keeps waiting
+    vi.advanceTimersByTime(1);
+    // Much later, another tab sets it to always: this tab's never is not announced as anything.
+    f.push({ conn: 'live', snapshot: { ...base, seq: 3, groupingSettings: [{ projectId: 'p_main', name: 'mainapp', path: '~/projects/mainapp', mode: 'always' }] } });
+    vi.runAllTimers();
+    expect(b.said).toBe('');
+  });
+
+  it('a failed setting names it with a retry; a final refusal has none; a later success clears it', async () => {
+    let answer: ActionResult = { ok: false, kind: 'failed', message: 'sitboard could not save it' };
+    const actions: Actions = { ...recordActions().actions, setGrouping: async () => answer };
+    const b = new BoardState(() => actions);
+    const p = { id: 'p_main', name: 'mainapp' };
+    expect(await b.setFolderGrouping(p, 'always')).toBe(false);
+    expect(b.notice).toMatchObject({ kind: 'failed', what: 'Set mainapp to always group', message: 'sitboard could not save it' });
+    expect(b.notice?.kind === 'failed' && b.notice.retry).toBeTypeOf('function');
+    answer = { ok: false, kind: 'failed', message: 'it is no longer grouped', final: true };
+    expect(await b.setFolderGrouping(p, 'auto')).toBe(false);
+    expect(b.notice).toMatchObject({ what: 'Set mainapp back to auto grouping', retry: undefined });
+    answer = { ok: true };
+    expect(await b.setFolderGrouping(p, 'never')).toBe(true);
+    expect(b.notice).toBeNull();
+  });
 });

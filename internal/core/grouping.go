@@ -3,6 +3,7 @@ package core
 import (
 	"cmp"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log"
 	"maps"
@@ -51,6 +52,16 @@ import (
 //     umbrella needs an agent sitting in its folder, so the hold lasts as
 //     long as the forgotten grouping could be inferred again. Holds live in
 //     the state file, so a restart does not regroup the folder.
+//   - The owner can set a folder to always or never group (SetGrouping);
+//     with no setting it is on auto, all of the above. Never: the folder is
+//     neither an umbrella nor remembered, even with two agents in it; it can
+//     still fold as a plain folder into an umbrella above it, and folders
+//     below it group as usual. Always: the folder is an umbrella whether or
+//     not agents sit in it, with no expiry and no gone check, as long as it
+//     has no project of its own that is no longer plain; like a remembered
+//     umbrella it is listed only while one of its parts is. A setting drops
+//     any forget hold on the folder; forgetting a grouping removes its
+//     setting. Settings live in the state file and never expire.
 //   - Counts stay each project's own; Card.ProjectID stays the part.
 
 // maxPlainDepth is how far below an umbrella a plain folder still folds.
@@ -123,6 +134,11 @@ func (b *Board) qualifiedLocked(shown []model.SessionFact, parents map[model.Ses
 	for f := range b.forgotten {
 		delete(out, f) // the owner forgot it: it does not group while held
 	}
+	for f, mode := range b.settings {
+		if mode == state.GroupingNever {
+			delete(out, f)
+		}
+	}
 	return out
 }
 
@@ -161,6 +177,15 @@ func (b *Board) groupLocked(projects map[string]*contract.Project, mainRoots map
 		}
 		if _, held := b.forgotten[u]; held {
 			continue
+		}
+		umbrellas[u] = true // never a folder set to never: New and SetGrouping drop those
+	}
+	for u, mode := range b.settings {
+		if mode != state.GroupingAlways || !b.mayBeUmbrella(u) {
+			continue
+		}
+		if ownRoot[u] && !b.plain[u] {
+			continue // it has a project of its own that is no longer plain
 		}
 		umbrellas[u] = true
 	}
@@ -401,6 +426,7 @@ func (b *Board) ForgetGrouping(projectID string) error {
 	delete(b.vacantFrom, folder)
 	delete(b.forgotTo, folder)
 	delete(b.release, folder)
+	delete(b.settings, folder) // forgetting is auto, held (the store did the same)
 	b.forgotten[folder] = at
 	if len(b.forgotten) > state.MaxUmbrellas { // the same cut as the state file
 		kept := state.PruneUmbrellas(b.forgotten, now)
@@ -411,6 +437,102 @@ func (b *Board) ForgetGrouping(projectID string) error {
 			}
 		}
 		b.forgotten = kept
+	}
+	b.rebuildLocked()
+	return nil
+}
+
+// settingsLocked lists the grouping settings for the snapshot, sorted by
+// name, then project id. Callers hold b.mu.
+func (b *Board) settingsLocked() []contract.GroupingSetting {
+	out := make([]contract.GroupingSetting, 0, len(b.settings))
+	for f, mode := range b.settings {
+		out = append(out, contract.GroupingSetting{
+			ProjectID: contract.ProjectID(f),
+			Name:      clean(filepath.Base(f)),
+			Path:      b.homeRel(f),
+			Mode:      contract.GroupingMode(mode),
+		})
+	}
+	slices.SortFunc(out, func(x, y contract.GroupingSetting) int {
+		return cmp.Or(cmp.Compare(x.Name, y.Name), cmp.Compare(x.ProjectID, y.ProjectID))
+	})
+	return out
+}
+
+// ErrTooManySettings is what SetGrouping refuses past
+// state.MaxGroupingSettings.
+var ErrTooManySettings = app.ErrTooManySettings
+
+// SetGrouping sets the folder of a grouping on the board, or of a folder
+// with a setting, to auto, always or never (see the rules at the top of this
+// file). The state file is written first; when that fails nothing changes.
+func (b *Board) SetGrouping(projectID string, mode contract.GroupingMode) error {
+	if !slices.Contains(contract.GroupingModes, mode) {
+		return fmt.Errorf("core: %d-byte grouping mode is not auto, always or never", len(mode))
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	folder, ok := b.view.groupings[projectID]
+	if !ok {
+		for f := range b.settings {
+			if contract.ProjectID(f) == projectID {
+				folder, ok = f, true
+				break
+			}
+		}
+	}
+	if !ok {
+		for _, p := range b.view.projects {
+			if p.ID == projectID {
+				return ErrNotGrouping
+			}
+		}
+		return ErrUnknownProject
+	}
+	prev, had := b.settings[folder]
+	if (mode == contract.GroupingAuto && !had) || prev == string(mode) {
+		return nil // nothing changes
+	}
+	if mode != contract.GroupingAuto && !had && len(b.settings) >= state.MaxGroupingSettings {
+		return ErrTooManySettings
+	}
+	now := b.now()
+	if b.opts.State != nil {
+		b.writeMu.Lock()
+		err := b.opts.State.SetGrouping(folder, string(mode), now)
+		b.writeMu.Unlock()
+		if errors.Is(err, state.ErrTooManySettings) {
+			return ErrTooManySettings
+		}
+		if err != nil {
+			return err
+		}
+	}
+	// No forget hold to drop in memory: a held folder is never a grouping
+	// on the board, and never has a setting (New drops one a hand-edited
+	// file lists as both). A release the next tick still writes for a
+	// folder just released and grouping again finds no hold in the file
+	// (the store dropped it) and changes nothing.
+	switch mode {
+	case contract.GroupingAuto:
+		delete(b.settings, folder)
+		if prev == state.GroupingAlways {
+			// Remembered, as the store did. Queued for the next tick too: a
+			// tick that read this folder as too old before the setting
+			// changed may drop it from the file after this write.
+			b.umbrellas[folder] = now
+			b.umbrellaTo[folder] = now
+			delete(b.missing, folder)
+		}
+	case contract.GroupingNever:
+		b.settings[folder] = string(mode)
+		delete(b.umbrellas, folder)
+		delete(b.umbrellaTo, folder)
+		delete(b.liveSince, folder)
+		delete(b.missing, folder)
+	default:
+		b.settings[folder] = string(mode)
 	}
 	b.rebuildLocked()
 	return nil
@@ -452,6 +574,9 @@ func (b *Board) flushUmbrellas() {
 	}
 	var old []string
 	for u, at := range b.umbrellas {
+		if b.settings[u] == state.GroupingAlways {
+			continue // it does not age while it is set to always
+		}
 		if now.Sub(at) > state.UmbrellaRetention {
 			old = append(old, u)
 			delete(b.umbrellas, u)

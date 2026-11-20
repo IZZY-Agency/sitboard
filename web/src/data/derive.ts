@@ -4,6 +4,8 @@
 import {
   ARTIFACT_URL_PATTERN,
   ColumnValues,
+  ISSUE_URL_PATTERN,
+  PULL_REQUEST_URL_PATTERN,
   type Artifact,
   type Attention,
   type Card,
@@ -166,6 +168,34 @@ export function modelUnknown(model: string): boolean {
   return !clean(model);
 }
 
+export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+export type EffortLevel = (typeof EFFORT_LEVELS)[number];
+
+/** A card's effort level, ready to show; null when none is known. */
+export interface EffortShown {
+  level: EffortLevel;
+  /** Set at launch and not yet confirmed by a reply. */
+  launch: boolean;
+  /** The chip's hover text: what the level is and where it comes from. */
+  title: string;
+}
+
+export function effortOf(card: Card): EffortShown | null {
+  const level = (EFFORT_LEVELS as readonly string[]).includes(card.agent.effort) ? (card.agent.effort as EffortLevel) : null;
+  if (!level) return null;
+  if (card.agent.effortSource === 'launch') {
+    return {
+      level,
+      launch: true,
+      title: `Effort ${level}, set at launch (the --effort flag or CLAUDE_CODE_EFFORT_LEVEL). Not yet confirmed: the level the first reply runs at replaces it. It differs when CLAUDE_CODE_EFFORT_LEVEL is set in a settings file, or when the model cannot run this level.`,
+    };
+  }
+  if (card.agent.effortSource === 'recorded') {
+    return { level, launch: false, title: `Effort ${level}: the level the last reply ran at. A change shows at the next reply.` };
+  }
+  return null;
+}
+
 export function agentName(card: Card): string {
   return clean(card.agent.name) || 'unnamed session';
 }
@@ -233,17 +263,44 @@ export interface Line {
   tone: Tone;
 }
 
-export function prLine(pr: PullRequest): Line {
-  const n = `#${pr.number}`;
-  if (pr.state === 'merged') return { text: `${n} merged`, tone: 'done' };
-  if (pr.state === 'closed') return { text: `${n} closed`, tone: 'muted' };
-  const parts = [n];
+/** A pull request's line in two parts: its number (the link's cue goes on it) and the words after it. */
+export interface PrParts {
+  num: string;
+  rest: string;
+  tone: Tone;
+}
+
+export function prLineParts(pr: PullRequest): PrParts {
+  const num = `#${pr.number}`;
+  if (pr.state === 'merged') return { num, rest: 'merged', tone: 'done' };
+  if (pr.state === 'closed') return { num, rest: 'closed', tone: 'muted' };
+  const parts: string[] = [];
   if (pr.draft) parts.push('draft');
   const tone: Tone = pr.checks === 'failing' ? 'failing' : pr.checks === 'running' ? 'coordinator' : 'body';
   parts.push(pr.checks === 'none' ? 'open' : `checks ${pr.checks}`);
   if (pr.review === 'changes_requested') parts.push('· changes requested');
   if (pr.review === 'approved') parts.push('· approved');
-  return { text: parts.join(' '), tone };
+  return { num, rest: parts.join(' '), tone };
+}
+
+export function prLine(pr: PullRequest): Line {
+  const p = prLineParts(pr);
+  return { text: `${p.num} ${p.rest}`, tone: p.tone };
+}
+
+/**
+ * A pull request's link, or null. The page links only the address of this
+ * very pull request: it must match PULL_REQUEST_URL_PATTERN and be the one
+ * for its own repo and number, so a tampered snapshot cannot put another
+ * repository's address on the row.
+ */
+export function prHref(pr: Pick<PullRequest, 'repo' | 'number' | 'url'>): string | null {
+  return PULL_REQUEST_URL_PATTERN.test(pr.url) && pr.url === `https://github.com/${pr.repo}/pull/${pr.number}` ? pr.url : null;
+}
+
+/** An issue's link, or null: the same rule as prHref, with /issues/. */
+export function issueHref(is: Pick<Issue, 'repo' | 'number' | 'url'>): string | null {
+  return ISSUE_URL_PATTERN.test(is.url) && is.url === `https://github.com/${is.repo}/issues/${is.number}` ? is.url : null;
 }
 
 /** At most this many pull request lines on a card, the last one possibly "+N more merged". */
@@ -336,6 +393,23 @@ export function prSummary(prs: readonly PullRequest[]): Line | null {
  * card, never to one line.
  */
 export function closesText(issues: readonly Issue[], home: string): string {
+  const p = closesParts(issues, home);
+  if (!p) return '';
+  return `closes ${p.items.map((i) => i.label).join(' ')}${p.extra > 0 ? ` +${p.extra}` : ''}`;
+}
+
+/** One issue as the closes line shows it, with its link when its address has the one allowed form. */
+export interface ClosesItem {
+  label: string;
+  href: string | null;
+}
+
+/**
+ * closesText in parts, so a card can link each number: the issues shown
+ * (closesText's labels, in its order) and how many more there are. null when
+ * there is no issue.
+ */
+export function closesParts(issues: readonly Issue[], home: string): { items: ClosesItem[]; extra: number } | null {
   const key = (repo: string) => repo.toLowerCase();
   const short = (repo: string) => repo.slice(repo.lastIndexOf('/') + 1);
   const seen = new Set<string>();
@@ -348,7 +422,7 @@ export function closesText(issues: readonly Issue[], home: string): string {
     list.push(i);
     if (!shown.has(key(i.repo))) shown.set(key(i.repo), i.repo);
   }
-  if (list.length === 0) return '';
+  if (list.length === 0) return null;
   const own = key(home) || (shown.size === 1 ? [...shown.keys()][0] : '');
   const owners = new Map<string, Set<string>>(); // short name key → the repositories using it
   for (const r of own ? [...shown.keys(), own] : shown.keys()) {
@@ -362,8 +436,15 @@ export function closesText(issues: readonly Issue[], home: string): string {
     const name = shown.get(r) as string;
     return `${clean((owners.get(short(r))?.size ?? 0) > 1 ? name : short(name))}#${i.number}`;
   };
-  const extra = list.length - NUMS_IN_LINE;
-  return `closes ${list.slice(0, NUMS_IN_LINE).map(label).join(' ')}${extra > 0 ? ` +${extra}` : ''}`;
+  return {
+    items: list.slice(0, NUMS_IN_LINE).map((i) => ({ label: label(i), href: issueHref(i) })),
+    extra: Math.max(0, list.length - NUMS_IN_LINE),
+  };
+}
+
+/** The closes line for a card in parts, measured against its own project's repository. */
+export function cardClosesParts(card: Card, ix: Index): { items: ClosesItem[]; extra: number } | null {
+  return closesParts(card.issues, ix.projects.get(card.projectId)?.repo ?? '');
 }
 
 /** The closes text for a card, measured against its own project's repository. */
@@ -494,16 +575,18 @@ export function lanes(s: Pick<Snapshot, 'cards' | 'projects'>): LaneRow[] {
 }
 
 /**
- * A lane note, shown as `head · model · tail` (an empty end left out), then
- * `closes`. `closes` stays muted whatever the note's tone. The model takes its
- * family's hue (`hue`) only in a muted note: in a needs-you or failing note
- * the state stays the strongest signal, so the model takes the note's tone.
+ * A lane note, shown as `head · model effort · tail` (an empty end left out),
+ * then `closes`. `closes` stays muted whatever the note's tone. The model
+ * takes its family's hue (`hue`) and the effort its place on the ramp only in
+ * a muted note: in a needs-you or failing note the state stays the strongest
+ * signal, so both take the note's tone.
  */
 export interface LaneNote {
   tone: Tone;
   head: string;
   model: string;
   hue: ModelFamily | '';
+  effort: EffortShown | null;
   tail: string;
   closes: string;
 }
@@ -533,6 +616,7 @@ export function laneNote(card: Card, ix: Index): LaneNote {
     head: front.join(' · '),
     model,
     hue: tone === 'muted' ? modelFamily(card.agent.model) : '',
+    effort: effortOf(card),
     tail: back.join(' · '),
     closes: prs ? cardCloses(card, ix) : '',
   };

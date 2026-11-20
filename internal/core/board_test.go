@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"testing"
@@ -12,6 +13,7 @@ import (
 	"github.com/IZZY-Agency/sitboard/internal/contract"
 	"github.com/IZZY-Agency/sitboard/internal/model"
 	"github.com/IZZY-Agency/sitboard/internal/source"
+	"github.com/IZZY-Agency/sitboard/internal/state"
 )
 
 func TestEmptySnapshotHasArraysNotNil(t *testing.T) {
@@ -19,7 +21,7 @@ func TestEmptySnapshotHasArraysNotNil(t *testing.T) {
 	if s.Version != contract.Version {
 		t.Fatalf("version %d", s.Version)
 	}
-	if s.Cards == nil || s.Projects == nil || s.Sources == nil {
+	if s.Cards == nil || s.Projects == nil || s.Sources == nil || s.GroupingSettings == nil {
 		t.Fatal("snapshot slices must be empty, not nil")
 	}
 }
@@ -53,6 +55,9 @@ func TestSnapshotMatchesContractGoldenShape(t *testing.T) {
 	e.board.applySync(s)
 	e.board.applySync(model.TerminalFact{ID: termUUID, Workspace: "alpha", HasAgent: true})
 	e.board.SetSources([]source.Status{{Kind: source.KindClaude, State: source.StateOK}})
+	e.board.mu.Lock()
+	e.board.settings[filepath.Join(filepath.Dir(alpha), "alpha-broad")] = state.GroupingNever
+	e.board.mu.Unlock()
 	e.board.tick()
 
 	raw, err := json.Marshal(e.board.Snapshot())

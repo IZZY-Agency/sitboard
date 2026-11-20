@@ -4,6 +4,8 @@ import { mount } from 'svelte';
 import App from '../src/App.svelte';
 import Harness from './Harness.svelte';
 import { initial, SCENARIOS, step, type Scenario } from './scenarios';
+import { CATCHUPS, catchupClient, type CatchupCase } from './catchup';
+import { saveSwitch, type Permission } from '../src/data/notify';
 import type { Feed, FeedState } from '../src/data/client';
 import type { Actions } from '../src/data/actions';
 import type { Snapshot } from '../src/contract.gen';
@@ -14,6 +16,7 @@ import '../src/styles/base.css';
 const params = new URLSearchParams(location.search);
 const sc = (SCENARIOS as readonly string[]).includes(params.get('s') ?? '') ? (params.get('s') as Scenario) : 'golden';
 const liveMode = params.get('live') === '1';
+const cu = (CATCHUPS as readonly string[]).includes(params.get('c') ?? '') ? (params.get('c') as CatchupCase) : 'few';
 
 let current = initial(sc);
 let push: ((s: FeedState) => void) | null = null;
@@ -54,6 +57,30 @@ const actions: Actions = {
     setTimeout(() => publish(next), 300);
     return { ok: true };
   },
+  // The server sets a folder's grouping: never splits the grouping and lists
+  // the folder; always lists it; auto takes it off the list (back from
+  // never, the parts are not regrouped here: the server would wait for
+  // agents to qualify the folder again).
+  async setGrouping(id, mode) {
+    if (!current) return { ok: true };
+    const next = JSON.parse(JSON.stringify(current)) as Snapshot;
+    const listed = next.groupingSettings.find((s) => s.projectId === id);
+    const p = next.projects.find((x) => x.id === id);
+    if (!listed && !p) return { ok: false, kind: 'failed', message: 'it is no longer on the board', final: true };
+    next.groupingSettings = next.groupingSettings.filter((s) => s.projectId !== id);
+    if (mode !== 'auto') {
+      const name = listed?.name ?? p!.name;
+      next.groupingSettings.push({ projectId: id, name, path: listed?.path ?? p!.path, mode });
+      next.groupingSettings.sort((a, b) => a.name.localeCompare(b.name) || a.projectId.localeCompare(b.projectId));
+    }
+    if (mode === 'never') {
+      for (const q of next.projects) if (q.parentId === id) q.parentId = '';
+      if (!next.cards.some((c) => c.projectId === id)) next.projects = next.projects.filter((q) => q.id !== id);
+    }
+    next.seq++;
+    setTimeout(() => publish(next), 300);
+    return { ok: true };
+  },
   async seen(id) {
     if (!current) return { ok: true };
     const next = JSON.parse(JSON.stringify(current)) as Snapshot;
@@ -69,5 +96,20 @@ const actions: Actions = {
   },
 };
 
-mount(Harness, { target: document.getElementById('harness')!, props: { scenario: sc, scenarios: SCENARIOS, live: liveMode } });
-mount(App, { target: document.getElementById('app')!, props: { feed, actions } });
+mount(Harness, { target: document.getElementById('harness')!, props: { scenario: sc, scenarios: SCENARIOS, live: liveMode, catchup: cu, catchups: CATCHUPS } });
+// ?n= sets the Notify switch's state for pictures: off, asking (click it), on,
+// denied or none. A stand-in for the browser's permission; no notification is
+// ever shown by the harness.
+const NOTIFY = ['off', 'asking', 'on', 'denied', 'none'] as const;
+const n = (NOTIFY as readonly string[]).includes(params.get('n') ?? '') ? params.get('n') : null;
+const permission: Permission | undefined = n
+  ? {
+      supported: () => n !== 'none',
+      current: () => (n === 'denied' ? 'denied' : n === 'on' ? 'granted' : 'default'),
+      request: () => new Promise<NotificationPermission>(() => {}), // 'asking' stays asking
+    }
+  : undefined;
+if (n === 'on') saveSwitch(true);
+else if (n) saveSwitch(false);
+
+mount(App, { target: document.getElementById('app')!, props: { feed, actions, catchup: catchupClient(cu), ...(permission ? { permission } : {}) } });

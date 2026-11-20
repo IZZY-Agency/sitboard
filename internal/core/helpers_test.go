@@ -77,6 +77,7 @@ type fakePRs struct {
 	mu    sync.Mutex
 	prs   []model.PullRequest
 	calls []lookupCall
+	err   error // when set, every lookup fails with it
 }
 
 func (f *fakePRs) Probe(context.Context) source.Status {
@@ -87,6 +88,9 @@ func (f *fakePRs) Lookup(_ context.Context, repo string, numbers []int, branches
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, lookupCall{repo, numbers, branches})
+	if f.err != nil {
+		return nil, f.err
+	}
 	var out []model.PullRequest
 	for _, pr := range f.prs {
 		if pr.Repo != repo {

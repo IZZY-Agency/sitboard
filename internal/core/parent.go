@@ -25,6 +25,13 @@ func (b *Board) parentsLocked() map[model.SessionKey]model.Known[model.SessionKe
 	records := make([]spawnRecord, 0, len(b.sessions))
 	carriers := map[string]int{} // name -> sessions carrying it (own or terminal name)
 	for _, s := range b.sessions {
+		// A session known only from catch-up's backfill is neither a spawn
+		// record nor a name carrier, so the board is not changed by it. It
+		// then has no part in the rest either: it is never anyone's parent,
+		// has no terminal, and its own parent and hint are never shown.
+		if s.Backfill {
+			continue
+		}
 		if len(s.SpawnedTerminalIDs) > 0 || len(s.SpawnedNames) > 0 {
 			records = append(records, spawnRecord{key: s.Key, terminalIDs: s.SpawnedTerminalIDs, names: s.SpawnedNames})
 		}

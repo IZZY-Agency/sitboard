@@ -11,7 +11,7 @@ GOLANGCI := $(shell command -v golangci-lint 2>/dev/null || echo go run github.c
 # release` stamps it into the binaries, scripts/publish.sh tags it, and
 # CHANGELOG.md must open with its entry. A dev build (`make build`) prints
 # `git describe` instead.
-RELEASE_VERSION := 0.2.0
+RELEASE_VERSION := 0.3.0
 RELEASE_DIR := bin/release/$(RELEASE_VERSION)
 # Published builds sign (and notarize) the macOS binaries; empty: unsigned.
 SIGN_IDENTITY ?=

@@ -13,9 +13,12 @@
 //   - Every string can come from session records, git or GitHub and is
 //     untrusted: the page renders it as text, never as markup.
 //   - No transcript content, no absolute path, no token ever appears here,
-//     with one exception: Artifact.Title is text taken from the session's
-//     transcript (the title its own publish reported), cleaned of control
-//     and invisible characters and capped like every other title.
+//     with two exceptions: Artifact.Title (the title its own publish
+//     reported) and Agent.Name of a session whose record has no name (the
+//     agent-name its transcript records), which CatchupItem.AgentName
+//     repeats. Both are text taken from the session's transcript, cleaned
+//     of control and invisible characters and capped like every other title
+//     or name.
 //     Every path is home-relative ("~/..."). A folder outside the home folder
 //     is given by its base name only ("alpha", never "/srv/alpha").
 package contract
@@ -34,7 +37,7 @@ import (
 
 // Version of the API. The page stops and shows "reload the page" when a
 // snapshot carries a different version than it was built for.
-const Version = 5
+const Version = 10
 
 // HTTP surface, all under one origin.
 const (
@@ -44,15 +47,26 @@ const (
 	PathLeftovers   = "/api/v1/leftovers"    // GET: Leftovers
 	PathJump        = "/api/v1/jump"         // POST CardRequest: focus the card's terminal
 	PathSeen        = "/api/v1/seen"         // POST CardRequest: mark the card seen
-	PathCatchupRead = "/api/v1/catchup/read" // POST, empty body: move the catch-up marker
+	PathCatchupRead = "/api/v1/catchup/read" // POST CatchupReadRequest: move the catch-up marker
 	// POST ProjectRequest: forget the grouping of a project that has parts.
 	PathForgetGrouping = "/api/v1/grouping/forget"
+	// POST GroupingRequest: set a folder's grouping to auto, always or never.
+	PathGroupingSetting = "/api/v1/grouping/setting"
 )
 
 // ArtifactURLPattern is the only form of Artifact.URL: a claude.ai artifact
 // address. The page links only a URL that matches it. Equal to
 // model.ArtifactURLPattern, which the adapters check against.
 const ArtifactURLPattern = `^https://claude\.ai/(?:artifact/[A-Za-z0-9_-]{8,64}|code/artifact/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$`
+
+// PullRequestURLPattern is the only form of PullRequest.URL and
+// IssueURLPattern the only form of Issue.URL: an address on github.com built
+// from the repo and the number. The page links only a URL that matches. Equal
+// to model.PullRequestURLPattern and model.IssueURLPattern.
+const (
+	PullRequestURLPattern = `^https://github\.com/[A-Za-z0-9_][A-Za-z0-9_-]*/\.*[A-Za-z0-9_-][A-Za-z0-9_.-]*/pull/[1-9][0-9]{0,9}$`
+	IssueURLPattern       = `^https://github\.com/[A-Za-z0-9_][A-Za-z0-9_-]*/\.*[A-Za-z0-9_-][A-Za-z0-9_.-]*/issues/[1-9][0-9]{0,9}$`
+)
 
 // EventSnapshot is the server-sent event name; its data is a Snapshot.
 // The server sends one on connect, then one after each change.
@@ -189,6 +203,40 @@ const (
 // ParentStates lists every parent state.
 var ParentStates = []ParentState{ParentKnown, ParentNone, ParentUnknown}
 
+// Effort is a session's reasoning effort level, lowest first. "" when unknown.
+type Effort string
+
+const (
+	EffortUnknown Effort = ""
+	EffortLow     Effort = "low"
+	EffortMedium  Effort = "medium"
+	EffortHigh    Effort = "high"
+	EffortXHigh   Effort = "xhigh"
+	EffortMax     Effort = "max"
+)
+
+// Efforts lists every effort value.
+var Efforts = []Effort{EffortUnknown, EffortLow, EffortMedium, EffortHigh, EffortXHigh, EffortMax}
+
+// EffortSource says where Agent.Effort comes from.
+//   - recorded: the level the session's last reply ran at, from its
+//     transcript. After a change (/effort, /model) it is the old level until
+//     the next reply.
+//   - launch: before the first reply, the level the process was started with
+//     (its --effort flag, or CLAUDE_CODE_EFFORT_LEVEL, which overrides the
+//     flag). The first reply replaces it.
+//   - none: no level is known.
+type EffortSource string
+
+const (
+	EffortSourceRecorded EffortSource = "recorded"
+	EffortSourceLaunch   EffortSource = "launch"
+	EffortSourceNone     EffortSource = "none"
+)
+
+// EffortSources lists every effort source.
+var EffortSources = []EffortSource{EffortSourceRecorded, EffortSourceLaunch, EffortSourceNone}
+
 // PRState is a pull request's state.
 type PRState string
 
@@ -262,10 +310,12 @@ const (
 	CatchupTurnFinished CatchupKind = "turn_finished"
 	CatchupPROpened     CatchupKind = "pr_opened"
 	CatchupPRMerged     CatchupKind = "pr_merged"
+	// CatchupArtifactPublished: a claude.ai artifact the session published.
+	CatchupArtifactPublished CatchupKind = "artifact_published"
 )
 
 // CatchupKinds lists every catch-up item kind.
-var CatchupKinds = []CatchupKind{CatchupTurnFinished, CatchupPROpened, CatchupPRMerged}
+var CatchupKinds = []CatchupKind{CatchupTurnFinished, CatchupPROpened, CatchupPRMerged, CatchupArtifactPublished}
 
 // LeftoverKind is the kind of a leftover.
 type LeftoverKind string
@@ -278,6 +328,30 @@ const (
 
 // LeftoverKinds lists every leftover kind.
 var LeftoverKinds = []LeftoverKind{LeftoverWorktree, LeftoverBranch, LeftoverSession}
+
+// GroupingMode is the owner's setting for a folder. Auto (no setting) groups
+// as sitboard sees it: a plain folder where agents sit, remembered for 30
+// days, unless forgotten. Always groups the folder whenever one of its parts
+// is on the board, without expiry. Never: the folder never groups.
+type GroupingMode string
+
+const (
+	GroupingAuto   GroupingMode = "auto"
+	GroupingAlways GroupingMode = "always"
+	GroupingNever  GroupingMode = "never"
+)
+
+// GroupingModes lists every grouping mode.
+var GroupingModes = []GroupingMode{GroupingAuto, GroupingAlways, GroupingNever}
+
+// GroupingSetting is a folder the owner set to always or never group, whether
+// or not it is on the board. A folder on auto is not listed.
+type GroupingSetting struct {
+	ProjectID string       `json:"projectId"` // ProjectID of the folder; the id to send back in a GroupingRequest
+	Name      string       `json:"name"`      // the folder's base name
+	Path      string       `json:"path"`      // home-relative, "~/..."; the base name only outside the home folder
+	Mode      GroupingMode `json:"mode"`      // GroupingAlways or GroupingNever
+}
 
 // Snapshot is the whole board. Seq rises by one each time the content changes.
 // Seq is per run: it restarts at zero when sitboard restarts, so the page
@@ -293,6 +367,9 @@ type Snapshot struct {
 	Counts        Counts         `json:"counts"`      // totals over all projects
 	AgtermPresent bool           `json:"agtermPresent"`
 	Build         Build          `json:"build"`
+	// GroupingSettings are the folders set to always or never group, sorted
+	// by name, then project id.
+	GroupingSettings []GroupingSetting `json:"groupingSettings"`
 }
 
 // Build is the sitboard build that serves the page. Version and Commit are as
@@ -370,19 +447,23 @@ type Card struct {
 
 // Agent is the session behind a card.
 type Agent struct {
-	Tool         Tool        `json:"tool"`
-	Name         string      `json:"name"`  // "" when the session has no name
-	Model        string      `json:"model"` // "" when unknown
-	Status       AgentStatus `json:"status"`
-	StatusSince  time.Time   `json:"statusSince,omitzero"`
-	StartedAt    time.Time   `json:"startedAt,omitzero"`
-	LastActivity time.Time   `json:"lastActivity,omitzero"`
-	Live         Tri         `json:"live"`
-	Folder       string      `json:"folder"` // home-relative; "" when unknown
-	Parent       ParentState `json:"parent"`
-	ParentCardID string      `json:"parentCardId"` // "" when the parent has no card
-	TerminalID   string      `json:"terminalId"`   // agterm session id, "" when none
-	Workspace    string      `json:"workspace"`    // agterm workspace name, "" when none
+	Tool  Tool   `json:"tool"`
+	Name  string `json:"name"`  // "" when the session has no name
+	Model string `json:"model"` // "" when unknown
+	// Effort is the reasoning effort level; EffortSource says where it came
+	// from. EffortUnknown always goes with EffortSourceNone.
+	Effort       Effort       `json:"effort"`
+	EffortSource EffortSource `json:"effortSource"`
+	Status       AgentStatus  `json:"status"`
+	StatusSince  time.Time    `json:"statusSince,omitzero"`
+	StartedAt    time.Time    `json:"startedAt,omitzero"`
+	LastActivity time.Time    `json:"lastActivity,omitzero"`
+	Live         Tri          `json:"live"`
+	Folder       string       `json:"folder"` // home-relative; "" when unknown
+	Parent       ParentState  `json:"parent"`
+	ParentCardID string       `json:"parentCardId"` // "" when the parent has no card
+	TerminalID   string       `json:"terminalId"`   // agterm session id, "" when none
+	Workspace    string       `json:"workspace"`    // agterm workspace name, "" when none
 }
 
 // PullRequest linked to a card.
@@ -390,7 +471,7 @@ type PullRequest struct {
 	Repo   string  `json:"repo"` // "owner/name"
 	Number int     `json:"number"`
 	Title  string  `json:"title"`
-	URL    string  `json:"url"`
+	URL    string  `json:"url"` // matches PullRequestURLPattern; "" when none can be built
 	State  PRState `json:"state"`
 	Checks Checks  `json:"checks"`
 	Review Review  `json:"review"`
@@ -408,24 +489,50 @@ type Artifact struct {
 type Issue struct {
 	Repo   string `json:"repo"`
 	Number int    `json:"number"`
-	URL    string `json:"url"`
+	URL    string `json:"url"` // matches IssueURLPattern; "" when none can be built
 }
 
-// Catchup is what happened since the marker, up to 7 days back, newest first.
+// Catchup is what the board learned since the marker, up to 7 days back,
+// newest first by the time each thing happened. An item counts as unread when
+// the board learned it after the marker, even when it happened earlier (a
+// merge GitHub reports a minute late). Items that happened before this run of
+// sitboard started count by their own time, so a restart does not list again
+// what was already read.
 type Catchup struct {
-	Marker time.Time     `json:"marker,omitzero"` // absent before the first "mark read"
-	Items  []CatchupItem `json:"items"`
+	Marker time.Time `json:"marker,omitzero"` // absent before the first "mark read"
+	// AsOf is when this list was made. The page sends it back as UpTo: it
+	// covers exactly the items in this list and nothing learned later.
+	AsOf  time.Time `json:"asOf"`
+	Total int       `json:"total"` // unread items before the cap; > len(Items) when some were left out
+	// Unsaved: the marker lives in memory only (--no-state), so every start
+	// of sitboard begins with no marker again.
+	Unsaved bool `json:"unsaved,omitempty"`
+	// Pending: sessions that had ended before sitboard started are still
+	// being read, so items from them may still arrive.
+	Pending bool          `json:"pending,omitempty"`
+	Items   []CatchupItem `json:"items"`
 }
 
-// CatchupItem is one finished turn, opened or merged pull request.
+// CatchupItem is one finished turn, opened or merged pull request, or
+// published artifact.
 type CatchupItem struct {
 	At          time.Time    `json:"at"`
 	Kind        CatchupKind  `json:"kind"`
 	CardID      string       `json:"cardId"` // "" when the card has left the board
 	ProjectID   string       `json:"projectId"`
+	ProjectName string       `json:"projectName"` // as Project.Name: the project may have left the board
 	AgentName   string       `json:"agentName"`
 	Title       string       `json:"title"`
-	PullRequest *PullRequest `json:"pullRequest,omitempty"`
+	PullRequest *PullRequest `json:"pullRequest,omitempty"` // pr_opened and pr_merged only
+	Artifact    *Artifact    `json:"artifact,omitempty"`    // artifact_published only
+}
+
+// CatchupReadRequest is the body of POST PathCatchupRead. UpTo is the AsOf of
+// the list the page showed: the marker moves there, never past the newest
+// list made, never past the server's now and never back, so an item the board
+// learned after that list stays unread. Any other field is ignored.
+type CatchupReadRequest struct {
+	UpTo time.Time `json:"upTo"`
 }
 
 // Leftovers lists merged work whose worktree, branch or session still exists.
@@ -454,4 +561,12 @@ type CardRequest struct {
 // ignored; the server resolves the folder from the project id itself.
 type ProjectRequest struct {
 	ProjectID string `json:"projectId"`
+}
+
+// GroupingRequest is the body of POST PathGroupingSetting. ProjectID is a
+// grouping on the board or a folder in Snapshot.GroupingSettings; the server
+// resolves the folder from it. Any other field is ignored.
+type GroupingRequest struct {
+	ProjectID string       `json:"projectId"`
+	Mode      GroupingMode `json:"mode"`
 }

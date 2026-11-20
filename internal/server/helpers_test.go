@@ -9,6 +9,7 @@ import (
 	"sync"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	"github.com/IZZY-Agency/sitboard/internal/app"
 	"github.com/IZZY-Agency/sitboard/internal/contract"
@@ -32,9 +33,12 @@ type fakeBoard struct {
 	terminals map[string]string
 	seen      []string
 	catchup   int
-	groupings map[string]bool // project id -> it has parts
-	forgotten []string        // project ids ForgetGrouping accepted
-	forgetErr error           // what ForgetGrouping returns for a grouping
+	upTo      time.Time
+	groupings map[string]bool            // project id -> it has parts
+	forgotten []string                   // project ids ForgetGrouping accepted
+	forgetErr error                      // what ForgetGrouping returns for a grouping
+	set       []contract.GroupingRequest // what SetGrouping accepted
+	setErr    error                      // what SetGrouping returns for a grouping
 }
 
 var _ app.Board = (*fakeBoard)(nil)
@@ -107,9 +111,10 @@ func (f *fakeBoard) MarkSeen(id string) error {
 	return nil
 }
 
-func (f *fakeBoard) MarkCatchupRead() error {
+func (f *fakeBoard) MarkCatchupRead(upTo time.Time) error {
 	f.mu.Lock()
 	f.catchup++
+	f.upTo = upTo
 	f.mu.Unlock()
 	return nil
 }
@@ -129,6 +134,24 @@ func (f *fakeBoard) ForgetGrouping(id string) error {
 		return f.forgetErr
 	}
 	f.forgotten = append(f.forgotten, id)
+	return nil
+}
+
+func (f *fakeBoard) SetGrouping(id string, mode contract.GroupingMode) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.groupings[id] {
+		for _, p := range f.snap.Projects {
+			if p.ID == id {
+				return app.ErrNotGrouping
+			}
+		}
+		return app.ErrUnknownProject
+	}
+	if f.setErr != nil {
+		return f.setErr
+	}
+	f.set = append(f.set, contract.GroupingRequest{ProjectID: id, Mode: mode})
 	return nil
 }
 
@@ -161,6 +184,8 @@ var testAssets = fstest.MapFS{
 	"fonts/mono.woff2":          {Data: []byte("wOF2")},
 	"assets/icon.svg":           {Data: []byte("<svg/>")},
 	"assets/nested/data-1.json": {Data: []byte("{}")},
+	"badge/lost.svg":            {Data: []byte("<svg/>")},
+	"favicon.svg":               {Data: []byte("<svg/>")},
 }
 
 type harness struct {

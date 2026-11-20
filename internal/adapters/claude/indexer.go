@@ -11,11 +11,13 @@ import (
 	"time"
 )
 
-// job asks the indexer to bring one live session's transcripts up to date.
+// job asks the indexer to bring one session's transcripts up to date.
 type job struct {
 	id     string
 	main   string // the session's transcript
 	subDir string // its in-process subagents' transcripts
+	ended  bool   // its last pass: indexed once, after the live sessions
+	gen    int    // which end of the session the last pass is for
 }
 
 // result is a session's derived facts after an indexer pass.
@@ -23,7 +25,20 @@ type result struct {
 	id        string
 	d         derived
 	subagents int
+	final     bool // the last pass of an ended session
+	gen       int  // for a last pass: which end of the session it is for
+	readable  bool // at least one line of the main transcript could be read
 }
+
+// endedReadCap bounds what is read of one transcript that is first opened
+// for an ended session's last pass: only its last endedReadCap bytes, from the
+// first whole line, so one huge transcript cannot hold the indexer for long.
+// What is skipped is older; it can only leave facts out, never add a wrong one.
+var endedReadCap int64 = 64 << 20 // a variable for tests
+
+// finalTries is how many passes an ended session's last pass waits for its
+// folder lookups before it is sent with the folder known so far.
+const finalTries = 5
 
 // indexer tails transcripts in the background, so the registry can paint the
 // board before any transcript is read. It owns its tailers; the registry
@@ -39,6 +54,8 @@ type indexer struct {
 	last    map[string]result    // last result sent, by session id
 	subs    map[string][]string  // session id → subagent transcript paths
 	subMod  map[string]time.Time // session id → subagent folder's last change
+	done    map[string]int       // ended sessions: the end whose last pass was sent
+	tries   map[string]int       // ended sessions: passes that waited for the folder
 	// passUntil is how long the current pass waits for folder lookups, in
 	// all: one deadline for every session, never one per session.
 	passUntil time.Time
@@ -48,6 +65,7 @@ func newIndexer(a *adapter) *indexer {
 	return &indexer{
 		a: a, results: make(chan result), wake: make(chan struct{}, 1),
 		tailers: map[string]*tailer{}, last: map[string]result{}, subs: map[string][]string{}, subMod: map[string]time.Time{},
+		done: map[string]int{}, tries: map[string]int{},
 	}
 }
 
@@ -76,10 +94,13 @@ func (ix *indexer) run(ctx context.Context) {
 		jobs := ix.wanted
 		ix.mu.Unlock()
 		ix.forget(jobs)
-		// Small transcripts first: most cards fill in at once, the big ones follow.
+		// Live sessions first, then the ended ones; small transcripts first in
+		// each, so most cards fill in at once and the big ones follow.
 		order := make([]job, 0, len(jobs))
 		for _, j := range jobs {
-			order = append(order, j)
+			if gen, done := ix.done[j.id]; !j.ended || !done || gen != j.gen {
+				order = append(order, j)
+			}
 		}
 		sizes := map[string]int64{}
 		for _, j := range order {
@@ -88,6 +109,12 @@ func (ix *indexer) run(ctx context.Context) {
 			}
 		}
 		slices.SortFunc(order, func(x, y job) int {
+			if x.ended != y.ended {
+				if y.ended {
+					return -1
+				}
+				return 1
+			}
 			if c := sizes[x.id] - sizes[y.id]; c != 0 {
 				if c < 0 {
 					return -1
@@ -97,11 +124,28 @@ func (ix *indexer) run(ctx context.Context) {
 			return strings.Compare(x.id, y.id)
 		})
 		ix.passUntil = time.Now().Add(ix.a.prober.budget)
+		endedRan := false // each pass runs at least one ended job, so the backlog always moves
+	pass:
 		for _, j := range order {
 			if ctx.Err() != nil {
 				return
 			}
-			res := ix.index(ctx, j)
+			if j.ended && endedRan {
+				select {
+				case <-ix.wake: // new work: the live sessions go first again
+					ix.wake <- struct{}{}
+					break pass
+				default:
+				}
+			}
+			res, ok := ix.index(ctx, j)
+			endedRan = endedRan || j.ended
+			if !ok {
+				continue // its folder is still being looked up: next pass
+			}
+			if j.ended {
+				ix.finish(j)
+			}
 			if old, ok := ix.last[j.id]; ok && reflect.DeepEqual(old, res) {
 				continue
 			}
@@ -113,6 +157,19 @@ func (ix *indexer) run(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// finish drops what an ended session's last pass needed: only its derived
+// facts are kept, in the registry.
+func (ix *indexer) finish(j job) {
+	ix.done[j.id] = j.gen
+	delete(ix.tries, j.id)
+	delete(ix.tailers, j.main)
+	for _, p := range ix.subs[j.id] {
+		delete(ix.tailers, p)
+	}
+	delete(ix.subs, j.id)
+	delete(ix.subMod, j.id)
 }
 
 // forget drops the tailers of sessions no longer wanted.
@@ -136,26 +193,52 @@ func (ix *indexer) forget(jobs map[string]job) {
 			delete(ix.subMod, id)
 		}
 	}
+	for id := range ix.done {
+		if j, ok := jobs[id]; !ok || !j.ended {
+			delete(ix.done, id) // gone, or alive again
+		}
+	}
+	for id := range ix.tries {
+		if _, ok := jobs[id]; !ok {
+			delete(ix.tries, id)
+		}
+	}
 }
 
-func (ix *indexer) tail(ctx context.Context, path string, now time.Time) *tailer {
+func (ix *indexer) tail(ctx context.Context, path string, now time.Time, ended bool) *tailer {
 	t := ix.tailers[path]
 	if t == nil {
 		t = newTailer(path, ix.a.prober)
+		if ended {
+			t.readCap = endedReadCap
+		}
 		ix.tailers[path] = t
 	}
 	t.probeUntil = ix.passUntil
+	if ended {
+		t.probeUntil = time.Now().Add(ix.a.prober.budget) // its own wait, not what is left of the pass's
+	}
 	_, _ = t.update(ctx, now) // a vanished file keeps what was read; the registry notices the end
 	return t
 }
 
 // index updates one session's transcripts and merges what they say. The
 // subagents add their pull requests, artifacts, spawns and activity; the main transcript
-// alone says the model, folder, turns and messages received.
-func (ix *indexer) index(ctx context.Context, j job) result {
+// alone says the model, effort, folder, turns and messages received. For an
+// ended session's last pass it reports false while the folder is still being
+// looked up, up to finalTries passes.
+func (ix *indexer) index(ctx context.Context, j job) (result, bool) {
 	now := ix.a.now()
-	main := ix.tail(ctx, j.main, now)
-	res := result{id: j.id, d: main.d}
+	main := ix.tail(ctx, j.main, now, j.ended)
+	if j.ended && !main.settled() {
+		if ix.tries[j.id]++; ix.tries[j.id] < finalTries {
+			return result{}, false
+		}
+	}
+	res := result{id: j.id, d: main.d, final: j.ended, readable: main.parsed > 0}
+	if j.ended {
+		res.gen = j.gen
+	}
 	res.d.TurnEnds = slices.Clone(main.d.TurnEnds)
 	res.d.CreatedPRs = slices.Clone(main.d.CreatedPRs)
 	res.d.Artifacts = slices.Clone(main.d.Artifacts)
@@ -184,7 +267,7 @@ func (ix *indexer) index(ctx context.Context, j job) result {
 		if ctx.Err() != nil {
 			break
 		}
-		sd := ix.tail(ctx, p, now).d
+		sd := ix.tail(ctx, p, now, j.ended).d
 		for _, pr := range sd.CreatedPRs {
 			if !slices.Contains(res.d.CreatedPRs, pr) && len(res.d.CreatedPRs) < maxPRs {
 				res.d.CreatedPRs = append(res.d.CreatedPRs, pr)
@@ -201,5 +284,5 @@ func (ix *indexer) index(ctx context.Context, j job) result {
 			res.d.LastActivity = sd.LastActivity
 		}
 	}
-	return res
+	return res, true
 }

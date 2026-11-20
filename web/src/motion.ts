@@ -1,4 +1,6 @@
-// Motion shows a change of state; nothing moves for decoration or on page load.
+// Motion shows a change of state, and nothing moves on page load. The one
+// exception is the agents' critters (Critter.svelte): a calm loop for working
+// and needing-you agents, only while they can be seen.
 // Svelte transitions run through the Web Animations API, so a CSS media query
 // cannot stop them: every duration here reads prefersReducedMotion.
 

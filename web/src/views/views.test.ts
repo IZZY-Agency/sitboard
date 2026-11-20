@@ -72,7 +72,7 @@ describe('Board', () => {
     }));
     const c = card({ pullRequests: many });
     view(Board, snapshot([c], [project(c.projectId, 'one')]));
-    const lines = qa(`[data-card="${c.id}"] .pr`).map(text);
+    const lines = qa(`[data-card="${c.id}"] .pr`).map((l) => text(l).replace(' (pull request, opens in a new tab)', ''));
     expect(lines).toEqual(['#100 checks running', '#99 merged', '+23 more merged']);
   });
 
@@ -80,8 +80,83 @@ describe('Board', () => {
     const g = golden(); // the card in review has one pull request and closes one issue
     view(Board, g);
     const closes = q(`[data-card="${g.cards[3].id}"] .pr.closes`)!;
-    expect(text(closes)).toBe('closes #7');
+    expect(text(closes)).toBe('closes #7 (issue, opens in a new tab)');
     expect(closes.closest('.prs')).not.toBeNull();
+  });
+
+  it('a card links its pull requests and the issues they close, in a row of their own under the card button', () => {
+    const g = golden(); // the card in review has pull request #101, closing issue #7
+    let jumps = 0;
+    r = render(Board, { snapshot: g, ix: indexOf(g), now: NOW, arrivals: new Map(), onjump: () => jumps++, onseen: noop });
+    const c = g.cards[3];
+    const el = q(`[data-card="${c.id}"]`)!;
+    const links = [...el.querySelectorAll('.prs a')] as HTMLAnchorElement[];
+    expect(links.map((l) => l.getAttribute('href'))).toEqual([c.pullRequests[0].url, c.issues[0].url]);
+    expect(links.map(text)).toEqual(['#101 checks failing (pull request, opens in a new tab)', '#7 (issue, opens in a new tab)']);
+    // The number is its own span, marked as a link that opens elsewhere (.ext draws the arrow as generated
+    // content, so no arrow is in the text, in a copy of it, or in the link's name).
+    for (const l of links) expect(l.querySelectorAll('.name > .num.ext')).toHaveLength(1);
+    expect(links.map((l) => text(l.querySelector('.num')))).toEqual(['#101', '#7']);
+    expect(el.querySelector('.arrow')).toBeNull();
+    expect(text(el)).not.toContain('↗');
+    for (const l of links) {
+      expect(l.target).toBe('_blank');
+      expect(l.rel.split(' ').sort()).toEqual(['noopener', 'noreferrer']);
+      expect(l.closest('button')).toBeNull();
+    }
+    expect(q(`[data-card="${c.id}"] .prs`)!.getAttribute('aria-label')).toBe('Pull requests');
+    // The card's button no longer holds the pull request lines.
+    expect(text(el.querySelector('.main'))).not.toContain('#101 checks failing');
+    links[0].addEventListener('click', (e) => e.preventDefault()); // no navigation in the test
+    links[0].click();
+    expect(jumps).toBe(0);
+  });
+
+  it('keyboard order on a card: the jump button, its pull requests, the issues, its artifacts, then Mark seen', () => {
+    const pr = (n: number) => ({ repo: 'o/r', number: n, title: 't', url: `https://github.com/o/r/pull/${n}`, state: 'open' as const, checks: 'passing' as const, review: '' as const, draft: false });
+    const c = card({
+      attention: ['unseen'],
+      pullRequests: [pr(5), pr(4)],
+      issues: [{ repo: 'o/r', number: 3, url: 'https://github.com/o/r/issues/3' }],
+      artifacts: [{ title: 'Placeholder', url: 'https://claude.ai/artifact/exampleArtifact0001' }],
+    });
+    view(Board, snapshot([c], [{ ...project(c.projectId, 'one'), repo: 'o/r' }]));
+    const order = [...q(`[data-card="${c.id}"]`)!.querySelectorAll('button, a[href]')].map((e) =>
+      e.tagName === 'BUTTON' ? (e.classList.contains('seen') ? 'seen' : 'jump') : e.getAttribute('href'),
+    );
+    expect(order).toEqual(['jump', pr(5).url, pr(4).url, 'https://github.com/o/r/issues/3', c.artifacts[0].url, 'seen']);
+  });
+
+  it('only a pull request\'s or an issue\'s own github.com address becomes a link; anything else stays text', () => {
+    const pr = (n: number, url: string) => ({ repo: 'o/r', number: n, title: 't', url, state: 'open' as const, checks: 'none' as const, review: '' as const, draft: false });
+    const c = card({
+      pullRequests: [
+        pr(9, 'javascript:alert(1)'),
+        pr(8, 'https://github.com/attacker-org/phish/pull/1'),
+        pr(7, 'https://github.com/o/r/pull/4'),
+      ],
+      issues: [
+        { repo: 'o/r', number: 2, url: 'javascript:alert(2)' },
+        { repo: 'o/r', number: 1, url: 'https://github.com/attacker-org/phish/issues/1' },
+      ],
+    });
+    view(Board, snapshot([c], [{ ...project(c.projectId, 'one'), repo: 'o/r' }]));
+    expect(qa(`[data-card="${c.id}"] a`)).toHaveLength(0);
+    expect(qa(`[data-card="${c.id}"] .pr`).map(text)).toEqual(['#9 open', '#8 open', '#7 open', 'closes #2 #1']);
+    expect(r!.target.innerHTML).not.toContain('javascript:');
+    expect(r!.target.innerHTML).not.toContain('attacker-org');
+    expect(r!.target.innerHTML).not.toContain('/pull/4');
+  });
+
+  it('Lanes and Teams keep the compact pull request text inside the row button, with no link in a button', () => {
+    for (const V of [Lanes, Teams]) {
+      const g = golden();
+      view(V, g);
+      expect(text(r!.target)).toContain('#101');
+      expect(qa('button a, button [href]')).toHaveLength(0);
+      r!.destroy();
+      r = null;
+    }
   });
 
   it('a card with issues but no pull request shows nothing extra', () => {
@@ -247,7 +322,7 @@ describe('Teams', () => {
     expect(panels.map((p) => text(p.querySelector('.ptitle')))).toEqual(['coordinator-a', 'Solo agents']);
     expect(text(panels[0].querySelector('.pmeta'))).toContain('~/projects/alpha');
     expect(text(panels[0].querySelector('.projs'))).toBe('alpha');
-    const agents = [...panels[0].querySelectorAll('button.trow .agent')] as HTMLElement[];
+    const agents = [...panels[0].querySelectorAll('button.trow .who')] as HTMLElement[];
     expect(agents.map(text)[0]).toBe('coordinator-a');
     expect(agents[0].style.getPropertyValue('--depth')).toBe('0');
     expect(agents.slice(1).every((a) => a.style.getPropertyValue('--depth') === '1')).toBe(true);
@@ -258,7 +333,7 @@ describe('Teams', () => {
     const w = card({ projectId: 'p_a', agent: { name: 'helper', parent: 'known', parentCardId: boss.id } });
     const lost = card({ projectId: 'p_a', agent: { name: 'lost', parent: 'unknown' } });
     view(Teams, snapshot([lost, w, boss], [project('p_a', 'alpha')]));
-    const agents = [...r!.target.querySelectorAll('.panel button.trow .agent')] as HTMLElement[];
+    const agents = [...r!.target.querySelectorAll('.panel button.trow .who')] as HTMLElement[];
     expect(agents.map(text)).toEqual(['boss', 'helper', 'lost']);
     expect(agents[2].style.getPropertyValue('--depth')).toBe('0');
   });
@@ -345,3 +420,69 @@ describe('Teams', () => {
     expect(qa('button.trow .state').map(text)).toContain('Status unknown');
   });
 });
+
+describe('the effort level sits next to the model in every view', () => {
+  const cards = () => {
+    const a = card({ agent: { name: 'a', model: 'claude-fable-5-2', effort: 'max', effortSource: 'recorded' } });
+    const b = card({ agent: { name: 'b', model: 'claude-opus-5-5', effort: 'low', effortSource: 'recorded' } });
+    const c = card({ agent: { name: 'c', model: '', effort: 'high', effortSource: 'launch' } });
+    const d = card({ agent: { name: 'd', model: 'claude-sonnet-5-5', effort: '', effortSource: 'none' } });
+    const e = card({ agent: { name: 'e', model: 'claude-haiku-5-5', effort: 'medium', effortSource: 'none' } });
+    return snapshot([a, b, c, d, e], [project(a.projectId, 'one')]);
+  };
+  // agent, effort text, ramp class, set at launch
+  const want = [
+    ['a', 'max', 'effort-max', false],
+    ['b', 'low', 'effort-low', false],
+    ['c', 'high at launch', 'effort-high', true],
+  ];
+  const row = (root: Element | null, sel: string) => {
+    const e = root?.querySelector(sel);
+    return e ? [text(e), [...e.classList].find((k) => k.startsWith('effort-')), e.querySelector('.at') !== null] : null;
+  };
+
+  it('Board: inside the model chip, on the ramp; at launch said in words and a dashed rule; none when unknown', () => {
+    view(Board, cards());
+    const got = qa('[data-card]')
+      .map((el) => [text(el.querySelector('.agent')), row(el, '.chip .eff')])
+      .filter(([, r]) => r !== null)
+      .map(([n, r]) => [n, ...(r as unknown[])])
+      .sort((x, y) => String(x[0]).localeCompare(String(y[0])));
+    expect(got).toEqual(want);
+    const launch = qa('[data-card] .chip .eff.launch');
+    expect(launch.length).toBe(1);
+    expect(launch[0].parentElement!.getAttribute('title')).toContain('set at launch');
+    expect(qa('[data-card] .chip')[0].getAttribute('title') ?? '').not.toContain('launch');
+    // Heard as "effort …", never glued to the model name.
+    const card = (n: string) => text(qa('[data-card]').find((e) => text(e.querySelector('.agent')) === n)!);
+    expect(card('a')).toContain('Fable 5.2, effort max');
+    expect(card('c')).toContain('model unknown, effort high at launch');
+    expect(card('d')).not.toContain('effort');
+  });
+
+  it('Lanes: after the model in the note, its level always marked (the colour is the CSS: ramp in a muted note or from high up)', () => {
+    const s = cards();
+    s.cards.push(card({ column: 'needs_you', agent: { name: 'n', model: 'claude-opus-5-5', effort: 'xhigh', effortSource: 'recorded' } }));
+    view(Lanes, s);
+    const note = (n: string) => qa('.cell .it').find((e) => text(e.querySelector('.agent')) === n)!.querySelector('.note')!;
+    for (const [n, t, k, l] of want) expect(row(note(String(n)), '.eff')).toEqual([t, k, l]);
+    expect(text(note('a'))).toContain('Fable 5.2, effort max');
+    expect(text(note('c'))).toContain('model unknown, effort high at launch');
+    expect(note('d').querySelector('.eff')).toBeNull();
+    expect(note('e').querySelector('.eff')).toBeNull();
+    expect(row(note('n'), '.eff')).toEqual(['xhigh', 'effort-xhigh', false]);
+    expect(note('c').querySelector('.eff')!.classList.contains('launch')).toBe(true);
+    expect(note('a').querySelector('.eff')!.classList.contains('launch')).toBe(false);
+  });
+
+  it('Teams: on its own line under the model name', () => {
+    view(Teams, cards());
+    const cell = (n: string) => qa('button.trow').find((e) => text(e.querySelector('.agent')) === n)!.querySelector('.mcell')!;
+    for (const [n, t, k, l] of want) expect(row(cell(String(n)), '.eff')).toEqual([t, k, l]);
+    expect(cell('d').querySelector('.eff')).toBeNull();
+    expect(cell('c').querySelector('.eff')!.getAttribute('title')).toContain('set at launch');
+    expect(text(cell('a'))).toBe('Fable 5.2, effort max');
+    expect(text(cell('c'))).toBe('model unknown, effort high at launch');
+  });
+});
+

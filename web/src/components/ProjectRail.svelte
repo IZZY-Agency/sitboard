@@ -11,6 +11,8 @@
   import { ms, VIEW_MS } from '../motion';
   import Count from './Count.svelte';
   import Dots from './Dots.svelte';
+  import type { GroupingMode } from '../contract.gen';
+  import AlwaysGrouping from './AlwaysGrouping.svelte';
   import ForgetGrouping from './ForgetGrouping.svelte';
   import GroupSwitch from './GroupSwitch.svelte';
 
@@ -21,6 +23,8 @@
     mode,
     onmode,
     onforget,
+    onsetting,
+    settings,
   }: {
     g: Grouping;
     sel: Sel;
@@ -29,6 +33,10 @@
     onmode: (m: Mode) => void;
     /** Forgets a project's grouping; resolves true when the server did. */
     onforget?: (p: { id: string; name: string }) => Promise<boolean>;
+    /** Sets a folder's grouping; resolves true when the server did. */
+    onsetting?: (p: { id: string; name: string }, mode: GroupingMode) => Promise<boolean>;
+    /** project id -> its setting, for folders set to always or never. */
+    settings?: ReadonlyMap<string, GroupingMode>;
   } = $props();
 
   const all = $derived(dotsOf(g.cards));
@@ -69,15 +77,18 @@
     'all',
     ...g.groups.flatMap((grp) => [
       `g:${grp.key}`,
-      ...grp.projects.flatMap((p) => [`p:${p.id}`, ...(p.parts.length && isOpen(p.id) ? [...p.parts.map((e) => `q:${e.id}`), ...(forgets(p.id) ? [`f:${p.id}`] : [])] : [])]),
+      ...grp.projects.flatMap((p) => [`p:${p.id}`, ...(p.parts.length && isOpen(p.id) ? [...p.parts.map((e) => `q:${e.id}`), ...(sets(p.id) ? [`a:${p.id}`] : []), ...(forgets(p.id) ? [`f:${p.id}`] : [])] : [])]),
     ]),
   ]);
   const stop = $derived(tabStop(rowKeys, focused, keyOf(sel)));
-  // "Forget grouping" shows under the parts of the selected project only.
-  const forgets = (id: string) => !!onforget && selTop === id && !!g.topById.get(id)?.parts.length;
+  // "Always group" and "Forget grouping" show under the parts of the selected
+  // project only; forget not while it is set to always ("Back to auto" first).
+  const modeOf = (id: string): GroupingMode => settings?.get(id) ?? 'auto';
+  const sets = (id: string) => !!onsetting && selTop === id && !!g.topById.get(id)?.parts.length;
+  const forgets = (id: string) => !!onforget && selTop === id && !!g.topById.get(id)?.parts.length && modeOf(id) !== 'always';
 
-  async function forget(p: { id: string; name: string }) {
-    const ok = (await onforget?.(p)) ?? false;
+  async function forget(p: { id: string; name: string }, act = onforget) {
+    const ok = (await act?.(p)) ?? false;
     if (ok) nav?.querySelector<HTMLElement>(`[data-key="p:${CSS.escape(p.id)}"]`)?.focus();
     return ok;
   }
@@ -262,6 +273,18 @@
                       </button>
                     </li>
                   {/each}
+                  {#if sets(p.id) && onsetting}
+                    {@const ap = { id: p.id, name: p.name }}
+                    <li>
+                      {#key p.id}<AlwaysGrouping
+                          compact
+                          mode={modeOf(p.id)}
+                          dataKey="a:{p.id}"
+                          tabindex={stop === `a:${p.id}` ? 0 : -1}
+                          onset={(m) => onsetting(ap, m)}
+                        />{/key}
+                    </li>
+                  {/if}
                   {#if forgets(p.id)}
                     {@const fp = { id: p.id, name: p.name }}
                     <li>
@@ -271,6 +294,7 @@
                           dataKey="f:{p.id}"
                           tabindex={stop === `f:${p.id}` ? 0 : -1}
                           onforget={() => forget(fp)}
+                          onnever={onsetting ? () => forget(fp, (q) => onsetting(q, 'never')) : undefined}
                         />{/key}
                     </li>
                   {/if}

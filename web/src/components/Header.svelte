@@ -1,10 +1,13 @@
 <script lang="ts">
+  import type { Snippet } from 'svelte';
   import Mark from './Mark.svelte';
   import type { Conn } from '../data/client';
   import type { View } from '../data/view';
   import { clock } from '../data/time';
   import Count from './Count.svelte';
   import ViewSwitcher from './ViewSwitcher.svelte';
+  import NotifyToggle from './NotifyToggle.svelte';
+  import type { SwitchState } from '../data/notify';
 
   let {
     view,
@@ -13,6 +16,9 @@
     projects,
     conn,
     generatedAt,
+    notify = null,
+    onnotify = () => {},
+    catchup,
   }: {
     view: View;
     onview: (v: View) => void;
@@ -20,6 +26,10 @@
     projects: number | null;
     conn: Conn;
     generatedAt: string | null;
+    notify?: SwitchState | null;
+    onnotify?: () => void;
+    /** The Catch-up button, right after the totals. */
+    catchup?: Snippet;
   } = $props();
 
   const live = $derived.by(() => {
@@ -53,6 +63,8 @@
         {projects === 1 ? 'project' : 'projects'}
       </span>
     {/if}
+    <!-- The header's controls (Catch-up, then Notify): one line above 560 px, their own row below. -->
+    <span class="controls">{@render catchup?.()}{#if notify}<NotifyToggle state={notify} ontoggle={onnotify} />{/if}</span>
     <span class="live {live.kind}" role="status"><span class="dot" aria-hidden="true"></span>{live.text}</span>
   </div>
 </header>
@@ -91,6 +103,53 @@
   }
   .num {
     color: var(--fg);
+  }
+  /* A phone: the controls stay on one row and the totals drop below them. */
+  .controls {
+    display: contents;
+  }
+  /* A phone: Live goes up beside the brand, the switcher has its own row, the
+     controls theirs, and the totals come last. Holds at 360 px with both
+     controls in their widest state. */
+  @media (max-width: 559px) {
+    header {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      grid-template-areas:
+        'brand live'
+        'views views'
+        'controls controls'
+        'totals totals';
+      gap: 8px 12px;
+    }
+    .brand {
+      grid-area: brand;
+    }
+    header > :global(nav) {
+      grid-area: views;
+      justify-self: start;
+    }
+    .right {
+      display: contents;
+    }
+    .controls {
+      grid-area: controls;
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 8px;
+    }
+    .controls:empty {
+      display: none;
+    }
+    .live {
+      grid-area: live;
+      justify-self: end;
+    }
+    .totals {
+      grid-area: totals;
+      justify-self: end;
+    }
   }
   .live {
     display: inline-flex;

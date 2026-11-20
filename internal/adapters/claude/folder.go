@@ -159,6 +159,12 @@ func (t *tailer) chooseFolder(now time.Time) bool {
 	return t.d.Folder != old
 }
 
+// settled reports that no folder lookup is pending: the folder chosen is
+// final for what was read.
+func (t *tailer) settled() bool {
+	return t.probing == nil && !t.unresolved()
+}
+
 func (t *tailer) unresolved() bool {
 	for _, h := range t.held {
 		if h.group == "" || h.checked.IsZero() {
@@ -191,6 +197,13 @@ func (t *tailer) probe(now time.Time) {
 			ch <- p.run(jobs, home)
 		}()
 		t.probing = ch
+	}
+	select { // an answer already in is taken, whatever the deadline says
+	case r := <-t.probing:
+		t.probing = nil
+		t.apply(r, now)
+		return
+	default:
 	}
 	until := t.probeUntil
 	if until.IsZero() {

@@ -159,7 +159,7 @@ func TestConcurrentUse(t *testing.T) {
 // them on the next write, so an older build refuses it.
 func TestNewerFileVersionIsRefused(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "state.json")
-	data := `{"version": 2, "seen": {"claude:1234": "2026-11-17T10:00:00Z"}, "pins": ["x"]}`
+	data := `{"version": 3, "seen": {"claude:1234": "2026-11-17T10:00:00Z"}, "pins": ["x"]}`
 	if err := os.WriteFile(file, []byte(data), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -179,17 +179,19 @@ func TestNewerFileVersionIsRefused(t *testing.T) {
 	}
 }
 
-func TestCurrentAndUnversionedFilesOpen(t *testing.T) {
-	for _, data := range []string{
-		`{"version": 1, "seen": {}}`,
-		`{"seen": {}}`,
+// Every sitboard writes "version": 1, so a file without a version is not a
+// state file (see TestOnlySitboardStateFilesOpen in version_test.go).
+func TestCurrentFilesOpenUnversionedAreRefused(t *testing.T) {
+	for data, opens := range map[string]bool{
+		`{"version": 1, "seen": {}}`: true,
+		`{"seen": {}}`:               false,
 	} {
 		file := filepath.Join(t.TempDir(), "state.json")
 		if err := os.WriteFile(file, []byte(data), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := Open(file); err != nil {
-			t.Fatalf("Open(%s): %v", data, err)
+		if _, err := Open(file); (err == nil) != opens {
+			t.Fatalf("Open(%s): %v, want opens=%v", data, err, opens)
 		}
 	}
 }

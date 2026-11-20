@@ -1,8 +1,8 @@
-// The page's actions: jump to the card's terminal, mark it seen, and forget a
-// project's grouping. The page sends a card or project id only; the server
-// resolves everything else.
+// The page's actions: jump to the card's terminal, mark it seen, forget a
+// project's grouping, and set a folder's grouping. The page sends a card or
+// project id (and a mode) only; the server resolves everything else.
 
-import { Paths } from '../contract.gen';
+import { Paths, type GroupingMode } from '../contract.gen';
 
 export type ActionResult =
   | { ok: true }
@@ -14,6 +14,7 @@ export interface Actions {
   jump(cardId: string): Promise<ActionResult>;
   seen(cardId: string): Promise<ActionResult>;
   forgetGrouping(projectId: string): Promise<ActionResult>;
+  setGrouping(projectId: string, mode: GroupingMode): Promise<ActionResult>;
 }
 
 export function createActions(fetchFn: typeof fetch): Actions {
@@ -37,6 +38,16 @@ export function createActions(fetchFn: typeof fetch): Actions {
       if (res.status === 409) return { ok: false, kind: 'failed', message: 'it is no longer grouped', final: true };
       if (res.status === 500) return { ok: false, kind: 'failed', message: 'sitboard could not save it' };
     }
+    if (path === Paths.groupingSetting) {
+      if (res.status === 404) return { ok: false, kind: 'failed', message: 'it is no longer on the board', final: true };
+      if (res.status === 409) {
+        // The server says which: too many settings, or no longer a grouping.
+        const why = await res.text().catch(() => '');
+        if (why.includes('too many')) return { ok: false, kind: 'failed', message: 'too many folders have a setting already', final: true };
+        return { ok: false, kind: 'failed', message: 'it is no longer grouped', final: true };
+      }
+      if (res.status === 500) return { ok: false, kind: 'failed', message: 'sitboard could not save it' };
+    }
     if (res.status === 409) return { ok: false, kind: 'no_terminal' };
     if (res.status === 404) return { ok: false, kind: 'failed', message: 'this card is no longer on the board' };
     return { ok: false, kind: 'failed', message: `sitboard answered ${res.status}` };
@@ -45,5 +56,6 @@ export function createActions(fetchFn: typeof fetch): Actions {
     jump: (cardId) => post(Paths.jump, { cardId }),
     seen: (cardId) => post(Paths.seen, { cardId }),
     forgetGrouping: (projectId) => post(Paths.forgetGrouping, { projectId }),
+    setGrouping: (projectId, mode) => post(Paths.groupingSetting, { projectId, mode }),
   };
 }

@@ -1,11 +1,27 @@
 {
   "marker": "2026-11-17T08:00:00Z",
+  "asOf": "2026-11-17T10:00:00Z",
+  "total": 4,
   "items": [
+    {
+      "at": "2026-11-17T09:58:00Z",
+      "kind": "artifact_published",
+      "cardId": "claude:11111111-1111-4111-8111-111111111111",
+      "projectId": "p_5b0ca1eb8975",
+      "projectName": "example-repo",
+      "agentName": "coordinator-a",
+      "title": "Placeholder artifact title",
+      "artifact": {
+        "title": "Placeholder artifact title",
+        "url": "https://claude.ai/artifact/exampleArtifact0001"
+      }
+    },
     {
       "at": "2026-11-17T09:55:00Z",
       "kind": "turn_finished",
       "cardId": "claude:11111111-1111-4111-8111-111111111111",
       "projectId": "p_5b0ca1eb8975",
+      "projectName": "example-repo",
       "agentName": "coordinator-a",
       "title": "coordinator-a"
     },
@@ -14,6 +30,7 @@
       "kind": "pr_opened",
       "cardId": "claude:44444444-4444-4444-8444-444444444444",
       "projectId": "p_5b0ca1eb8975",
+      "projectName": "example-repo",
       "agentName": "worker-c",
       "title": "Placeholder pull request title",
       "pullRequest": {
@@ -32,6 +49,7 @@
       "kind": "pr_merged",
       "cardId": "",
       "projectId": "p_5b0ca1eb8975",
+      "projectName": "example-repo",
       "agentName": "worker-f",
       "title": "Another placeholder title",
       "pullRequest": {

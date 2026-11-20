@@ -58,7 +58,7 @@ func ts(s string) time.Time {
 }
 
 func TestTailReadsOnlyAppendedBytes(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "s.jsonl")
+	p := filepath.Join(t.TempDir(), coordID+".jsonl")
 	first := fixture(t, "coordinator.jsonl")
 	writeFile(t, p, first)
 	tl := newTailer(p, staticProber(t))
@@ -170,7 +170,7 @@ func TestHugeAndBadLinesAreSkipped(t *testing.T) {
 }
 
 func TestDerivesModelFolderLastActivityTurnEnds(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "s.jsonl")
+	p := filepath.Join(t.TempDir(), coordID+".jsonl")
 	writeFile(t, p, fixture(t, "coordinator.jsonl"))
 	tl := newTailer(p, staticProber(t))
 	if _, err := tl.update(context.Background(), fixedNow); err != nil {
@@ -445,5 +445,43 @@ func TestUnchangedFileIsNotOpened(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(p, 0o644) })
 	if _, err := tl.update(context.Background(), fixedNow); err != nil {
 		t.Fatalf("an unchanged file was opened: %v", err)
+	}
+}
+
+// The effort level is the last main-chain reply's. A subagent's reply, a
+// <synthetic> line or a non-reply never changes it; a reply without a level,
+// or with an unknown word, clears it.
+func TestEffortFollowsTheLastMainReply(t *testing.T) {
+	line := func(s string) string { return s + "\n" }
+	var b bytes.Buffer
+	b.WriteString(line(`{"type":"assistant","effort":"low","isSidechain":false,"timestamp":"2026-11-17T08:00:00.000Z","message":{"model":"claude-opus-5-5"}}`))
+	b.WriteString(line(`{"type":"assistant","effort":"max","isSidechain":false,"timestamp":"2026-11-17T08:00:01.000Z","message":{"model":"claude-opus-5-5"}}`))
+	b.WriteString(line(`{"type":"assistant","effort":"low","isSidechain":true,"timestamp":"2026-11-17T08:00:02.000Z","message":{"model":"claude-haiku-5-5"}}`))
+	b.WriteString(line(`{"type":"assistant","isSidechain":false,"timestamp":"2026-11-17T08:00:03.000Z","message":{"model":"<synthetic>"}}`))
+	b.WriteString(line(`{"type":"user","effort":"low","isSidechain":false,"timestamp":"2026-11-17T08:00:04.000Z"}`))
+	tl := tailOf(t, b.Bytes())
+	if tl.d.Effort != "max" {
+		t.Fatalf("Effort = %q, want max", tl.d.Effort)
+	}
+	for _, c := range []struct{ line, want string }{
+		{`{"type":"assistant","effort":"xhigh","isSidechain":false,"message":{"model":"claude-opus-5-5"}}`, "xhigh"},
+		{`{"type":"assistant","effort":"turbo","isSidechain":false,"message":{"model":"claude-opus-5-5"}}`, ""},
+		{`{"type":"assistant","effort":"high","isSidechain":false,"message":{"model":"claude-opus-5-5"}}`, "high"},
+		{`{"type":"assistant","effort":{"level":"max"},"isSidechain":false,"message":{"model":"claude-opus-5-5"}}`, ""},
+		{`{"type":"assistant","effort":"medium","isSidechain":false,"message":{"model":"claude-opus-5-5"}}`, "medium"},
+		{`{"type":"assistant","perTurnEffort":null,"isSidechain":false,"message":{"model":"claude-opus-5-5"}}`, ""},
+	} {
+		b.WriteString(line(c.line))
+		tl = tailOf(t, b.Bytes())
+		if tl.d.Effort != c.want {
+			t.Fatalf("after %s: Effort = %q, want %q", c.line, tl.d.Effort, c.want)
+		}
+	}
+}
+
+func TestDerivesEffortFromFixture(t *testing.T) {
+	tl := tailOf(t, fixture(t, "coordinator.jsonl"))
+	if tl.d.Effort != "xhigh" {
+		t.Fatalf("Effort = %q (the <synthetic> line must not clear it)", tl.d.Effort)
 	}
 }

@@ -16,7 +16,9 @@
 package model
 
 import (
+	"math"
 	"regexp"
+	"strconv"
 	"time"
 )
 
@@ -75,6 +77,52 @@ var artifactURLRe = regexp.MustCompile(ArtifactURLPattern)
 // ValidArtifactURL reports whether u matches ArtifactURLPattern.
 func ValidArtifactURL(u string) bool { return artifactURLRe.MatchString(u) }
 
+// GitHubHost is the only host pull requests are looked up on: the git source
+// turns only github.com remotes into a repo slug, and every gh call names this
+// host. A link to a pull request or an issue is built for it alone, from the
+// repo slug and the number, never taken from a tool's output.
+const GitHubHost = "github.com"
+
+// githubRepoPattern is "owner/name" as a link may carry it: an owner of
+// letters, digits, "_" and "-" that does not start with "-", and a name of
+// letters, digits, "_", "." and "-" that is not all dots (so never "." or "..").
+const githubRepoPattern = `[A-Za-z0-9_][A-Za-z0-9_-]*/\.*[A-Za-z0-9_-][A-Za-z0-9_.-]*`
+
+// PullRequestURLPattern and IssueURLPattern are the only forms of pull
+// request and issue link that reach the page. contract.PullRequestURLPattern
+// and contract.IssueURLPattern, which the page checks links against, must stay
+// equal to them (a test checks).
+const (
+	PullRequestURLPattern = `^https://github\.com/` + githubRepoPattern + `/pull/[1-9][0-9]{0,9}$`
+	IssueURLPattern       = `^https://github\.com/` + githubRepoPattern + `/issues/[1-9][0-9]{0,9}$`
+)
+
+var (
+	pullRequestURLRe = regexp.MustCompile(PullRequestURLPattern)
+	issueURLRe       = regexp.MustCompile(IssueURLPattern)
+)
+
+// PullRequestURL is the address of pull request n of repo ("owner/name") on
+// GitHubHost, or "" when repo or n cannot make one that matches
+// PullRequestURLPattern.
+func PullRequestURL(repo string, n int) string { return githubURL(pullRequestURLRe, repo, "pull", n) }
+
+// IssueURL is the address of issue n of repo on GitHubHost, or "" when repo or
+// n cannot make one that matches IssueURLPattern.
+func IssueURL(repo string, n int) string { return githubURL(issueURLRe, repo, "issues", n) }
+
+// GitHub numbers pull requests and issues with a 32-bit Int.
+func githubURL(re *regexp.Regexp, repo, kind string, n int) string {
+	if n < 1 || n > math.MaxInt32 {
+		return ""
+	}
+	u := "https://" + GitHubHost + "/" + repo + "/" + kind + "/" + strconv.Itoa(n)
+	if !re.MatchString(u) {
+		return ""
+	}
+	return u
+}
+
 // ArtifactRef is a claude.ai artifact a session published. The same URL is the
 // same artifact: a republish updates its title and time, it is not a second one.
 type ArtifactRef struct {
@@ -101,7 +149,14 @@ type SessionFact struct {
 	Name        string // the session's own name or title; "" when it has none
 	ToolVersion string // "" when unknown
 
-	Model       Known[string]
+	Model Known[string]
+	// Effort is the reasoning effort level, one of EffortLevels. Claude Code:
+	// the level the session's last reply ran at, as its transcript records it.
+	// Before the first reply, the level the process was launched with
+	// (EffortAtLaunch); it is replaced by the recorded one.
+	Effort         Known[string]
+	EffortAtLaunch bool
+
 	Status      Known[Status]
 	StatusSince time.Time
 
@@ -144,6 +199,14 @@ type SessionFact struct {
 	// coordinator can be flagged by mistake. The core should derive the hint
 	// from PeerSenders instead; adapters keep filling WorkerHint until it does.
 	WorkerHint bool
+	// Backfill: the session had ended before sitboard started and is known
+	// only from its transcript. It feeds catch-up and pull request lookups,
+	// never the board: it takes no part in matching who spawned whom.
+	Backfill bool
+	// Headless: its transcript says it was started without a person at it
+	// (claude -p, an SDK, the MCP server). Catch-up leaves it out; the board
+	// shows it as before.
+	Headless bool
 
 	// PeerSenders are the names of the sessions that sent this session a
 	// message (Claude Code: user lines with origin.kind "peer"), deduplicated
@@ -162,6 +225,19 @@ type SessionFact struct {
 	TurnEnds  []time.Time // finished turns, last 7 days, oldest first
 }
 
+// EffortLevels are Claude Code's reasoning effort levels, lowest first.
+var EffortLevels = []string{"low", "medium", "high", "xhigh", "max"}
+
+// KnownEffort returns the EffortLevels constant equal to s, otherwise "".
+func KnownEffort(s string) string {
+	for _, l := range EffortLevels {
+		if s == l {
+			return l
+		}
+	}
+	return ""
+}
+
 // SessionGone says a session's records no longer exist for its adapter (see
 // SessionFact for ended versus gone). The core drops it.
 type SessionGone struct{ Key SessionKey }
@@ -173,6 +249,11 @@ type SessionGone struct{ Key SessionKey }
 // Kind is a source.Kind value carried as a plain string, because package
 // source imports this package and the reverse import would be a cycle.
 type SourceReady struct{ Kind string }
+
+// BackfillDone says a watcher has read the sessions that had ended before
+// sitboard started (Kind as in SourceReady). Until it comes, catch-up may
+// still grow with items from earlier sessions.
+type BackfillDone struct{ Kind string }
 
 // TerminalFact is the agterm adapter's complete current view of one terminal
 // session. It replaces the previous TerminalFact with the same ID.
@@ -201,6 +282,7 @@ func (TerminalFact) isFact()     {}
 func (TerminalGone) isFact()     {}
 func (TerminalSelected) isFact() {}
 func (SourceReady) isFact()      {}
+func (BackfillDone) isFact()     {}
 
 // Repo is what git says about a folder.
 type Repo struct {
@@ -251,7 +333,7 @@ type PullRequest struct {
 	Repo          string // "owner/name"
 	Number        int
 	Title         string
-	URL           string
+	URL           string // PullRequestURL(Repo, Number): built, never read from gh
 	HeadBranch    string
 	State         PRState
 	Draft         bool

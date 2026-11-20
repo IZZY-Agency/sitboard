@@ -1,5 +1,5 @@
 {
-  "version": 5,
+  "version": 10,
   "seq": 42,
   "generatedAt": "2026-11-17T10:00:00Z",
   "sources": [
@@ -39,7 +39,7 @@
       "kind": "github",
       "state": "failing",
       "version": "2.80.0",
-      "detail": "not logged in",
+      "detail": "not logged in to github.com",
       "tested": true,
       "ready": true
     }
@@ -89,6 +89,8 @@
         "tool": "claude",
         "name": "coordinator-a",
         "model": "claude-opus-4-7",
+        "effort": "xhigh",
+        "effortSource": "recorded",
         "status": "finished",
         "statusSince": "2026-11-17T09:55:00Z",
         "startedAt": "2026-11-17T08:00:00Z",
@@ -128,6 +130,8 @@
         "tool": "claude",
         "name": "worker-a",
         "model": "claude-opus-4-7",
+        "effort": "high",
+        "effortSource": "recorded",
         "status": "busy",
         "statusSince": "2026-11-17T09:10:00Z",
         "startedAt": "2026-11-17T09:00:00Z",
@@ -156,6 +160,8 @@
         "tool": "claude",
         "name": "worker-b",
         "model": "claude-opus-4-7",
+        "effort": "max",
+        "effortSource": "recorded",
         "status": "finished",
         "statusSince": "2026-11-17T09:50:00Z",
         "startedAt": "2026-11-17T09:00:00Z",
@@ -186,6 +192,8 @@
         "tool": "claude",
         "name": "worker-c",
         "model": "claude-opus-4-7",
+        "effort": "medium",
+        "effortSource": "recorded",
         "status": "finished",
         "statusSince": "2026-11-17T09:40:00Z",
         "startedAt": "2026-11-17T09:00:00Z",
@@ -231,6 +239,8 @@
         "tool": "claude",
         "name": "worker-d",
         "model": "claude-opus-4-7",
+        "effort": "low",
+        "effortSource": "recorded",
         "status": "ended",
         "statusSince": "2026-11-17T08:30:00Z",
         "startedAt": "2026-11-17T07:00:00Z",
@@ -271,7 +281,9 @@
       "agent": {
         "tool": "claude",
         "name": "solo-a",
-        "model": "claude-opus-4-7",
+        "model": "",
+        "effort": "high",
+        "effortSource": "launch",
         "status": "blocked",
         "statusSince": "2026-11-17T09:58:00Z",
         "startedAt": "2026-11-17T09:30:00Z",
@@ -305,6 +317,8 @@
         "tool": "codex",
         "name": "worker-e",
         "model": "",
+        "effort": "",
+        "effortSource": "none",
         "status": "unknown",
         "lastActivity": "2026-11-17T07:45:00Z",
         "live": "unknown",
@@ -333,5 +347,19 @@
     "commit": "unknown",
     "os": "darwin",
     "arch": "arm64"
-  }
+  },
+  "groupingSettings": [
+    {
+      "projectId": "p_a1b2c3d4e5f6",
+      "name": "alpha-broad",
+      "path": "~/projects/alpha-broad",
+      "mode": "never"
+    },
+    {
+      "projectId": "p_0f1e2d3c4b5a",
+      "name": "gamma",
+      "path": "~/projects/gamma",
+      "mode": "always"
+    }
+  ]
 }

@@ -16,13 +16,19 @@ import {
   needsYouArrivals,
   overviewWords,
   prLine,
+  prLineParts,
   prSummary,
   cardPrs,
   cardPrSummary,
   artifactHref,
   artifactTitle,
   cardArtifacts,
+  closesParts,
   closesText,
+  issueHref,
+  prHref,
+  effortOf,
+  EFFORT_LEVELS,
   projectTabs,
   roleLine,
   sourcesReady,
@@ -32,7 +38,7 @@ import {
   timeInState,
 } from './derive';
 import { card, golden, project, snapshot } from '../test/fixtures';
-import type { Artifact, PullRequest, SourceStatus } from '../contract.gen';
+import type { Artifact, Card, PullRequest, SourceStatus } from '../contract.gen';
 
 const NOW = Date.parse('2026-11-17T10:00:00Z');
 const pr = (number: number, over: Partial<PullRequest> = {}): PullRequest => ({
@@ -185,6 +191,9 @@ describe('words', () => {
     expect(prLine(pr(2, { checks: 'failing' })).tone).toBe('failing');
     expect(prLine(pr(3, { state: 'merged' }))).toEqual({ text: '#3 merged', tone: 'done' });
     expect(prLine(pr(4, { checks: 'none', draft: true })).text).toBe('#4 draft open');
+    // The number apart from the words after it, which are what the link's cue does not touch.
+    expect(prLineParts(pr(4, { checks: 'none', draft: true }))).toEqual({ num: '#4', rest: 'draft open', tone: 'body' });
+    expect(prLineParts(pr(3, { state: 'merged' }))).toEqual({ num: '#3', rest: 'merged', tone: 'done' });
     expect(prSummary([])).toBeNull();
   });
 
@@ -458,3 +467,96 @@ describe('artifacts', () => {
     expect(cardArtifacts(list)).toEqual({ shown: [art(1), art(2), art(3)], more: null });
   });
 });
+
+describe('pull request and issue links', () => {
+  const pr = (url: string, repo = 'o/r', number = 1) => ({ repo, number, url });
+
+  it('links only a github.com pull request or issue address of the one allowed form', () => {
+    expect(prHref(pr('https://github.com/example-org/example-repo/pull/12', 'example-org/example-repo', 12))).toBe('https://github.com/example-org/example-repo/pull/12');
+    expect(prHref(pr('https://github.com/Example_Org/.dotfiles/pull/1', 'Example_Org/.dotfiles'))).not.toBeNull();
+    expect(issueHref(pr('https://github.com/example-org/example.repo/issues/7', 'example-org/example.repo', 7))).toBe('https://github.com/example-org/example.repo/issues/7');
+    for (const bad of [
+      '',
+      'javascript:alert(1)',
+      'JavaScript:alert(1)//https://github.com/o/r/pull/1',
+      'data:text/html,x',
+      'http://github.com/o/r/pull/1',
+      '//github.com/o/r/pull/1',
+      'https://github.com.evil.example/o/r/pull/1',
+      'https://evil.example/o/r/pull/1',
+      'https://ghe.example.com/o/r/pull/1',
+      'https://github.com/o/r/pull/1abc',
+      'https://github.com/o/r/pull/0',
+      'https://github.com/o/r/pull/01',
+      'https://github.com/o/r/pull/12345678901',
+      'https://github.com/o/r/pull/-1',
+      'https://github.com/o/r/pull/1/files',
+      'https://github.com/o/r/pull/1?x',
+      'https://github.com/o/r/pull/1#x',
+      'https://github.com/o/r/pull/1\n',
+      'https://github.com/o/../pull/1',
+      'https://github.com/o/./pull/1',
+      'https://github.com/../r/pull/1',
+      'https://github.com/o/r/x/pull/1',
+      'https://github.com/o%2Fx/r/pull/1',
+      'https://github.com/-o/r/pull/1',
+      'https://github.com/o.x/r/pull/1',
+      'https://github.com:443/o/r/pull/1',
+      'https://github.com/o/r/issues/1',
+    ]) {
+      expect(prHref(pr(bad)), bad).toBeNull();
+    }
+    expect(issueHref(pr('https://github.com/o/r/pull/1'))).toBeNull();
+    expect(issueHref(pr('javascript:alert(1)'))).toBeNull();
+    expect(issueHref(pr('https://github.com/o/../issues/1'))).toBeNull();
+  });
+
+  it('links an address only on the row it belongs to: its own repo and number', () => {
+    // Every address here has the allowed form; none is this row's own.
+    for (const [url, repo, n] of [
+      ['https://github.com/attacker-org/phish/pull/1', 'o/r', 1],
+      ['https://github.com/o/r/pull/2', 'o/r', 1],
+      ['https://github.com/o/r/pull/1', 'o/other', 1],
+      ['https://github.com/O/R/pull/1', 'o/r', 1],
+      ['https://github.com/o/r/pull/1', '', 1],
+    ] as const) {
+      expect(prHref(pr(url, repo, n)), `${url} on ${repo}#${n}`).toBeNull();
+      expect(issueHref(pr(url.replace('/pull/', '/issues/'), repo, n)), `${url} on ${repo}#${n}`).toBeNull();
+    }
+    expect(prHref(pr('https://github.com/o/r/pull/1'))).toBe('https://github.com/o/r/pull/1');
+    expect(issueHref(pr('https://github.com/o/r/issues/1'))).toBe('https://github.com/o/r/issues/1');
+  });
+
+  it('closes in parts: the same labels as the text, each with its link or none', () => {
+    const ok = { repo: 'org/repo', number: 7, url: 'https://github.com/org/repo/issues/7' };
+    const bad = { repo: 'org/other', number: 8, url: 'javascript:alert(1)' };
+    const more = { repo: 'org/repo', number: 9, url: 'https://github.com/org/repo/issues/9' };
+    expect(closesParts([], 'org/repo')).toBeNull();
+    expect(closesParts([ok, bad, more], 'org/repo')).toEqual({
+      items: [
+        { label: '#7', href: ok.url },
+        { label: 'other#8', href: null },
+      ],
+      extra: 1,
+    });
+    expect(closesText([ok, bad, more], 'org/repo')).toBe('closes #7 other#8 +1');
+  });
+});
+describe('effortOf', () => {
+  it('a known level with its source; anything else is no level', () => {
+    const at = (effort: string, effortSource: string) =>
+      effortOf(card({ agent: { effort, effortSource } as unknown as Partial<Card['agent']> }));
+    expect(at('xhigh', 'recorded')).toMatchObject({ level: 'xhigh', launch: false });
+    expect(at('xhigh', 'recorded')!.title).toContain('last reply');
+    expect(at('low', 'launch')).toMatchObject({ level: 'low', launch: true });
+    expect(at('low', 'launch')!.title).toContain('set at launch');
+    // The cases sitboard cannot see are said, so the hover never overclaims.
+    expect(at('low', 'launch')!.title).toContain('CLAUDE_CODE_EFFORT_LEVEL is set in a settings file');
+    expect(at('low', 'launch')!.title).toContain('cannot run this level');
+    expect(at('', 'none')).toBeNull();
+    expect(at('high', 'none')).toBeNull();
+    expect(at('turbo', 'recorded')).toBeNull();
+    expect(EFFORT_LEVELS).toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
+  });
+});
+

@@ -52,6 +52,25 @@ button {
   text-align: left;
 }
 
+/* The sign of a link that opens elsewhere: a small arrow after its text, drawn
+   as generated content so it is neither copied with the text nor read aloud
+   (the empty alternative after the slash). The row's own tone at 70% (3:1 or
+   more on a card in every tone), full strength on hover and focus. An
+   inline-block, so an underline on the text does not run under it at rest. */
+.ext::after {
+  content: '\2009↗' / '';
+  display: inline-block;
+  font-size: 14px;
+  line-height: 1;
+  color: color-mix(in srgb, currentColor 70%, transparent);
+}
+a:hover .ext::after,
+a:focus-visible .ext::after,
+a.ext:hover::after,
+a.ext:focus-visible::after {
+  color: currentColor;
+}
+
 /* Untrusted text is isolated so it cannot reorder its neighbours. */
 .u {
   unicode-bidi: isolate;
@@ -87,14 +106,6 @@ button {
   height: 7px;
   border-radius: 50%;
   background: var(--dot, var(--state-idle));
-}
-.dot.pulse {
-  animation: pulse 2s ease-in-out infinite;
-}
-@keyframes pulse {
-  50% {
-    opacity: 0.35;
-  }
 }
 
 .tone-needs {
@@ -151,6 +162,31 @@ button {
 .model-haiku {
   --model: var(--model-haiku);
   --model-line: var(--model-haiku-line);
+}
+
+/* An effort level's place on the ramp (effortOf). From high up it also
+   brings a fill and a heavier weight, which each view puts on the level's
+   box; a level set at launch drops the fill. */
+.effort-low {
+  --effort: var(--effort-low);
+}
+.effort-medium {
+  --effort: var(--effort-medium);
+}
+.effort-high {
+  --effort: var(--effort-high);
+  --effort-fill: var(--effort-high-fill);
+  --effort-weight: var(--effort-lift);
+}
+.effort-xhigh {
+  --effort: var(--effort-xhigh);
+  --effort-fill: var(--effort-xhigh-fill);
+  --effort-weight: var(--effort-lift);
+}
+.effort-max {
+  --effort: var(--effort-max);
+  --effort-fill: var(--effort-max-fill);
+  --effort-weight: var(--effort-lift);
 }
 
 @media (prefers-reduced-motion: reduce) {

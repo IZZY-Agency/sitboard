@@ -1,15 +1,23 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, setContext, tick } from 'svelte';
   import { fade } from 'svelte/transition';
-  import type { Card } from './contract.gen';
+  import type { Card, GroupingMode, GroupingSetting } from './contract.gen';
   import type { Actions } from './data/actions';
   import type { Feed } from './data/client';
   import { indexOf, sourcesReady } from './data/derive';
   import { ALL, countsOf, filterCards, grouping as groupingOf, sameSel, selName, validSel, type Sel } from './data/groups';
   import { clock } from './data/time';
   import { BoardState } from './data/store.svelte';
+  import { iconVersion, showSignal, tabSignal, warmLostIcon } from './data/nudge';
+  import { browserPermission, NotifySwitch, OUTCOME_TEXT, startNotifier } from './data/notifier.svelte';
+  import type { Permission } from './data/notify';
+  import { MOVES } from './data/critter';
   import { loadGrouping, loadView, saveGrouping, saveView, type Grouping, type View } from './data/view';
-  import { ms, VIEW_MS } from './motion';
+  import { flash, ms, VIEW_MS } from './motion';
+  import { createCatchupClient, type CatchupClient } from './data/catchup';
+  import { CatchupState } from './data/catchup.svelte';
+  import CatchupButton from './components/CatchupButton.svelte';
+  import CatchupPanel, { type Refocus } from './components/CatchupPanel.svelte';
   import Header from './components/Header.svelte';
   import StatusBar from './components/StatusBar.svelte';
   import ActionNotice from './components/ActionNotice.svelte';
@@ -22,17 +30,28 @@
   import Lanes from './views/Lanes.svelte';
   import Teams from './views/Teams.svelte';
 
-  let { feed, actions, tick = 10_000 }: { feed: Feed; actions: Actions; tick?: number } = $props();
+  let {
+    feed,
+    actions,
+    catchup = createCatchupClient((...a) => fetch(...a)),
+    tick: every = 10_000,
+    permission = browserPermission(),
+  }: { feed: Feed; actions: Actions; catchup?: CatchupClient; tick?: number; permission?: Permission } = $props();
 
   const board = new BoardState(() => actions);
+  const cu = new CatchupState(() => catchup);
+  // Every critter on the page reads its move on a change of state from here.
+  setContext(MOVES, board.moves);
   let view = $state<View>(loadView());
   let now = $state(Date.now());
 
   onMount(() => {
     const stop = board.start(feed);
-    const clock = setInterval(() => (now = Date.now()), tick);
+    const stopCatchup = cu.start();
+    const clock = setInterval(() => (now = Date.now()), every);
     return () => {
       stop();
+      stopCatchup();
       clearInterval(clock);
     };
   });
@@ -45,6 +64,51 @@
   });
 
   const snap = $derived(board.snapshot);
+  // The tab's title and icon say how many agents need you, from every project.
+  const signal = $derived(tabSignal(board.conn, snap?.cards ?? null));
+  // The badges' addresses carry the build sitboard last said it is.
+  const iconV = $derived(iconVersion(board.raw?.build));
+  $effect(() => showSignal(document, signal, iconV));
+  // Loaded while live, once per build, so the browser has it when it is needed.
+  let warmed = '';
+  $effect(() => {
+    if (board.conn !== 'live' || !iconV || warmed === iconV) return;
+    warmed = iconV;
+    warmLostIcon(document, iconV);
+  });
+
+  // The desktop notification: off until the owner turns it on in the header.
+  // svelte-ignore state_referenced_locally
+  const notify = new NotifySwitch(permission);
+  let notifier: ReturnType<typeof startNotifier> | null = null;
+  onMount(() => {
+    notifier = startNotifier(notify);
+    return () => {
+      notifier?.stop();
+      clearTimeout(sayTimer);
+    };
+  });
+  const NOTIFY_WHAT = 'Turn on notifications';
+  // What a click on the switch came to, said once by the page's live region:
+  // what needs the owner to act as a notice, the rest as a status line.
+  async function toggleNotify() {
+    const r = await notify.toggle();
+    if (r === 'busy') return;
+    if (r === 'denied' || r === 'none') {
+      board.notice = { kind: 'failed', what: NOTIFY_WHAT, message: OUTCOME_TEXT[r] };
+      return;
+    }
+    if (board.notice?.kind === 'failed' && board.notice.what === NOTIFY_WHAT) board.dismiss();
+    board.said = '';
+    sayTimer = setTimeout(() => (board.said = OUTCOME_TEXT[r]), 0); // emptied first, so the same words twice are read twice
+  }
+  let sayTimer: ReturnType<typeof setTimeout> | undefined;
+
+  // Every snapshot the board accepts, in order; seen marks do not matter here.
+  $effect(() => {
+    const s = board.raw;
+    if (s) notifier?.observe(s);
+  });
   // While the connection is down the board is shown as it was, and time stops with it.
   const frozen = $derived(board.lostAt !== null && board.conn !== 'live');
   const viewNow = $derived(frozen ? (board.lostAt as number) : now);
@@ -57,6 +121,10 @@
   });
   const said = $derived(announce || board.said);
   const onforget = (p: { id: string; name: string }) => board.forgetGrouping(p);
+  const onsetting = (p: { id: string; name: string }, mode: GroupingMode) => board.setFolderGrouping(p, mode);
+  const onauto = (s: GroupingSetting) => board.setFolderGrouping({ id: s.projectId, name: s.name }, 'auto');
+  // project id -> its grouping setting, for the parts row's controls.
+  const settings = $derived(new Map((snap?.groupingSettings ?? []).map((s) => [s.projectId, s.mode])));
   function onkeydown(e: KeyboardEvent) {
     if (e.key === 'Escape' && board.notice) board.dismiss();
   }
@@ -89,13 +157,83 @@
     saveView(v);
   }
   const onjump = (c: Card) => void board.jump(c);
+
+  // Catch-up: a panel over the current view. Opening it loads the list again
+  // and marks nothing read.
+  const CATCHUP_ID = 'catchup-panel';
+  let catchupOpen = $state(false);
+  let catchupBtn = $state<HTMLButtonElement>();
+  let headerEl = $state<HTMLElement>();
+  let panelTop = $state(0);
+  // The panel starts where the header ends on screen, and follows it while the page scrolls.
+  function measure() {
+    panelTop = Math.max(0, Math.round(headerEl?.getBoundingClientRect().bottom ?? 0));
+  }
+  $effect(() => {
+    if (!catchupOpen) return;
+    measure();
+    window.addEventListener('scroll', measure, { passive: true });
+    window.addEventListener('resize', measure);
+    return () => {
+      window.removeEventListener('scroll', measure);
+      window.removeEventListener('resize', measure);
+    };
+  });
+  const onBoard = $derived(new Set(snap ? snap.cards.map((c) => c.id) : []));
+  const showCatchup = $derived(board.conn !== 'unauthorized' && board.conn !== 'outdated');
+
+  async function openCatchup() {
+    catchupOpen = true;
+    void cu.refresh();
+    await tick();
+    document.getElementById(CATCHUP_ID)?.focus();
+  }
+  function closeCatchup(refocus: Refocus) {
+    catchupOpen = false;
+    if (refocus === 'button') catchupBtn?.focus();
+  }
+  // "Card" in the panel: close it, then bring the card into view and focus it.
+  // A project filter that hides the card is lifted first.
+  async function showCard(cardId: string) {
+    catchupOpen = false;
+    const find = () => [...document.querySelectorAll<HTMLElement>('[data-card]')].find((e) => e.dataset.card === cardId);
+    if (!find() && sel.kind !== 'all') {
+      picked = ALL;
+      await tick();
+    }
+    const el = find();
+    if (!el) return;
+    el.scrollIntoView?.({ block: 'center', behavior: ms(1) ? 'smooth' : 'auto' });
+    const target = el.matches('button') ? el : el.querySelector<HTMLElement>('button');
+    target?.focus({ preventScroll: true });
+    flash(el);
+  }
   const onseen = (c: Card) => void board.seen(c);
 </script>
 
 <svelte:window {onkeydown} />
 
 <div class="page">
-  <Header {view} onview={setView} agents={snap ? snap.cards.length : null} {projects} conn={board.conn} generatedAt={snap?.generatedAt ?? null} />
+  <div bind:this={headerEl}>
+    <Header {view} onview={setView} agents={snap ? snap.cards.length : null} {projects} conn={board.conn} generatedAt={snap?.generatedAt ?? null} notify={notify.state} onnotify={() => void toggleNotify()}>
+      {#snippet catchup()}
+        {#if showCatchup}
+          <CatchupButton
+            bind:button={catchupBtn}
+            count={cu.count}
+            listed={cu.data?.items.length ?? 0}
+            status={cu.status}
+            open={catchupOpen}
+            controls={CATCHUP_ID}
+            onclick={() => (catchupOpen ? closeCatchup('button') : void openCatchup())}
+          />
+        {/if}
+      {/snippet}
+    </Header>
+  </div>
+  {#if catchupOpen && showCatchup}
+    <CatchupPanel id={CATCHUP_ID} {cu} {now} {onBoard} toggle={catchupBtn} top={panelTop} onclose={closeCatchup} onshowcard={(id) => void showCard(id)} />
+  {/if}
 
   {#if frozen && snap && board.conn !== 'unauthorized' && board.conn !== 'outdated'}
     <p class="lost" role="alert">
@@ -121,9 +259,9 @@
         {#key grouping}
           <div class="grouping" in:fade={{ duration: ms(VIEW_MS) }}>
             {#if grouping === 'tiles'}
-              <ProjectTiles g={grp} {sel} onselect={select} mode={grouping} onmode={setGrouping} {onforget} />
+              <ProjectTiles g={grp} {sel} onselect={select} mode={grouping} onmode={setGrouping} {onforget} {onsetting} {settings} />
             {:else}
-              <ProjectRail g={grp} {sel} onselect={select} mode={grouping} onmode={setGrouping} {onforget} />
+              <ProjectRail g={grp} {sel} onselect={select} mode={grouping} onmode={setGrouping} {onforget} {onsetting} {settings} />
             {/if}
           </div>
         {/key}
@@ -144,7 +282,7 @@
     {/if}
   </div>
 
-  <StatusBar snapshot={board.conn === 'unauthorized' ? null : snap} />
+  <StatusBar snapshot={board.conn === 'unauthorized' ? null : snap} {onauto} />
 
   <div class="visually-hidden" role="status" aria-live="polite">{said}</div>
   {#if board.notice}

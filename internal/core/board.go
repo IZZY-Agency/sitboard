@@ -36,6 +36,9 @@ type Options struct {
 	Now        func() time.Time // the only clock the core reads; nil means time.Now
 	StaleAfter time.Duration    // a busy card with no activity for this long is stale
 	Roots      []string         // when set, only folders under these count
+	// StateInMemory: State keeps nothing past this run (--no-state). Catch-up
+	// says so, so a fresh list after a start is not taken for a first look.
+	StateInMemory bool
 }
 
 // publishEvery caps how often subscribers get a snapshot: at most four a
@@ -50,37 +53,48 @@ type Board struct {
 	roots []string
 	build contract.Build // read once: build info does not change while it runs
 
-	mu         sync.Mutex
-	sessions   map[model.SessionKey]model.SessionFact
-	terminals  map[string]model.TerminalFact
-	repos      map[string]model.Repo // by folder; a folder absent here is still being resolved
-	repoGen    map[string]uint64     // by folder: the latest git lookup started; older answers are dropped
-	plain      map[string]bool       // by folder: git answered that it is in no repository (see isPlain)
-	umbrellas  map[string]time.Time  // umbrella folder -> last time an agent sat in it (live or remembered)
-	umbrellaTo map[string]time.Time  // umbrella times to write to the state file on the next tick
-	liveSince  map[string]time.Time  // live umbrella -> when it became live, until it is remembered
-	missing    map[string]int        // remembered umbrella -> checks in a row that found it gone
-	forgotten  map[string]time.Time  // folder whose grouping the owner forgot -> last time an agent sat in it
-	forgotTo   map[string]time.Time  // forgotten times to write to the state file on the next tick
-	vacantFrom map[string]time.Time  // forgotten folder -> since when no agent sits in it
-	release    map[string]time.Time  // forgotten folders to drop from the state file on the next tick -> their time when released
-	goneAt     time.Time             // when the gone check last started
-	goneBusy   bool                  // a gone check's worker is running
-	closed     bool                  // Run returned: no more state writes from checks, no more publishes
-	prs        map[model.PRRef]model.PullRequest
-	branchPRs  map[string]map[string][]model.PullRequest // repo -> head branch -> pull requests
-	lookedUp   map[string]time.Time                      // repo -> last GitHub lookup (wall clock)
-	pending    map[string]bool                           // repos with pull request refs never looked up
-	asked      map[string]bool                           // refs and branches GitHub was asked about
-	resolved   time.Time                                 // last time live folders were resolved again
-	memSeen    map[string]time.Time                      // used when no state store is given
-	selected   map[string]time.Time                      // terminal id -> last selection in agterm
-	seenWrites map[string]time.Time                      // seen marks to write once b.mu is released
-	writeMu    sync.Mutex                                // orders state file writes; taken after b.mu, never before
-	lastTick   time.Time
-	resumedAt  time.Time
-	sources    []contract.SourceStatus
-	ready      map[contract.SourceKind]bool // watchers that sent model.SourceReady
+	mu          sync.Mutex
+	sessions    map[model.SessionKey]model.SessionFact
+	terminals   map[string]model.TerminalFact
+	repos       map[string]model.Repo // by folder; a folder absent here is still being resolved
+	repoGen     map[string]uint64     // by folder: the latest git lookup started; older answers are dropped
+	plain       map[string]bool       // by folder: git answered that it is in no repository (see isPlain)
+	umbrellas   map[string]time.Time  // umbrella folder -> last time an agent sat in it (live or remembered)
+	umbrellaTo  map[string]time.Time  // umbrella times to write to the state file on the next tick
+	liveSince   map[string]time.Time  // live umbrella -> when it became live, until it is remembered
+	missing     map[string]int        // remembered umbrella -> checks in a row that found it gone
+	forgotten   map[string]time.Time  // folder whose grouping the owner forgot -> last time an agent sat in it
+	forgotTo    map[string]time.Time  // forgotten times to write to the state file on the next tick
+	vacantFrom  map[string]time.Time  // forgotten folder -> since when no agent sits in it
+	release     map[string]time.Time  // forgotten folders to drop from the state file on the next tick -> their time when released
+	settings    map[string]string     // folder -> state.GroupingAlways or state.GroupingNever; absent: auto
+	goneAt      time.Time             // when the gone check last started
+	goneBusy    bool                  // a gone check's worker is running
+	closed      bool                  // Run returned: no more state writes from checks, no more publishes
+	prs         map[model.PRRef]model.PullRequest
+	branchPRs   map[string]map[string][]model.PullRequest // repo -> head branch -> pull requests
+	lookedUp    map[string]time.Time                      // repo -> last GitHub lookup (wall clock)
+	pending     map[string]bool                           // repos with pull request refs never looked up
+	asked       map[string]bool                           // refs and branches GitHub was asked about
+	resolved    time.Time                                 // last time live folders were resolved again
+	memSeen     map[string]time.Time                      // used when no state store is given
+	selected    map[string]time.Time                      // terminal id -> last selection in agterm
+	seenWrites  map[string]time.Time                      // seen marks to write once b.mu is released
+	writeMu     sync.Mutex                                // orders state file writes; taken after b.mu, never before
+	lastTick    time.Time
+	resumedAt   time.Time
+	sources     []contract.SourceStatus
+	ready       map[contract.SourceKind]bool // watchers that sent model.SourceReady
+	backfilled  map[contract.SourceKind]bool // watchers that sent model.BackfillDone
+	runStart    time.Time                    // when this board was made: catch-up's line between this run and earlier ones
+	startMarker time.Time                    // the catch-up marker as loaded at start
+	lastAsOf    time.Time                    // the newest catch-up list's AsOf
+	learned     map[string]learnedItem       // catch-up item -> when a list first held it
+	startUnread map[string]time.Time         // catch-up items the last run saved as unread (state key -> own time)
+	unreadSaved map[string]time.Time         // what the state file holds as unread now
+	listed      bool                         // a catch-up list was made, or the marker moved, in this run
+	missingRefs map[model.PRRef]bool         // pull requests a lookup did not find: ended sessions stop asking
+	goneRepos   map[string]bool              // repos GitHub did not find: ended sessions stop asking
 
 	seq       uint64
 	view      view
@@ -106,6 +120,7 @@ type view struct {
 	agterm      bool
 	umbrellas   []string          // umbrella folders with an agent in them now, sorted
 	groupings   map[string]string // project id -> umbrella folder, for umbrellas that have parts now
+	settings    []contract.GroupingSetting
 }
 
 // New returns an empty board.
@@ -115,35 +130,54 @@ func New(opts Options) *Board {
 	}
 	home, _ := os.UserHomeDir()
 	b := &Board{
-		opts:       opts,
-		home:       filepath.Clean(home),
-		build:      buildOf(buildinfo.Version, buildinfo.Commit),
-		sessions:   map[model.SessionKey]model.SessionFact{},
-		terminals:  map[string]model.TerminalFact{},
-		repos:      map[string]model.Repo{},
-		repoGen:    map[string]uint64{},
-		plain:      map[string]bool{},
-		umbrellas:  map[string]time.Time{},
-		umbrellaTo: map[string]time.Time{},
-		liveSince:  map[string]time.Time{},
-		missing:    map[string]int{},
-		forgotten:  map[string]time.Time{},
-		forgotTo:   map[string]time.Time{},
-		vacantFrom: map[string]time.Time{},
-		release:    map[string]time.Time{},
-		prs:        map[model.PRRef]model.PullRequest{},
-		branchPRs:  map[string]map[string][]model.PullRequest{},
-		lookedUp:   map[string]time.Time{},
-		pending:    map[string]bool{},
-		asked:      map[string]bool{},
-		memSeen:    map[string]time.Time{},
-		selected:   map[string]time.Time{},
-		seenWrites: map[string]time.Time{},
-		sources:    []contract.SourceStatus{},
-		ready:      map[contract.SourceKind]bool{},
-		cardKeys:   map[string]model.SessionKey{},
-		subs:       map[chan contract.Snapshot]struct{}{},
-		refreshCh:  make(chan struct{}, 1),
+		opts:        opts,
+		home:        filepath.Clean(home),
+		build:       buildOf(buildinfo.Version, buildinfo.Commit),
+		sessions:    map[model.SessionKey]model.SessionFact{},
+		terminals:   map[string]model.TerminalFact{},
+		repos:       map[string]model.Repo{},
+		repoGen:     map[string]uint64{},
+		plain:       map[string]bool{},
+		umbrellas:   map[string]time.Time{},
+		umbrellaTo:  map[string]time.Time{},
+		liveSince:   map[string]time.Time{},
+		missing:     map[string]int{},
+		forgotten:   map[string]time.Time{},
+		forgotTo:    map[string]time.Time{},
+		vacantFrom:  map[string]time.Time{},
+		release:     map[string]time.Time{},
+		settings:    map[string]string{},
+		prs:         map[model.PRRef]model.PullRequest{},
+		branchPRs:   map[string]map[string][]model.PullRequest{},
+		lookedUp:    map[string]time.Time{},
+		pending:     map[string]bool{},
+		asked:       map[string]bool{},
+		memSeen:     map[string]time.Time{},
+		selected:    map[string]time.Time{},
+		seenWrites:  map[string]time.Time{},
+		sources:     []contract.SourceStatus{},
+		ready:       map[contract.SourceKind]bool{},
+		backfilled:  map[contract.SourceKind]bool{},
+		cardKeys:    map[string]model.SessionKey{},
+		subs:        map[chan contract.Snapshot]struct{}{},
+		refreshCh:   make(chan struct{}, 1),
+		learned:     map[string]learnedItem{},
+		missingRefs: map[model.PRRef]bool{},
+		goneRepos:   map[string]bool{},
+	}
+	b.runStart = b.now()
+	if opts.State != nil {
+		b.startMarker = opts.State.CatchupMarker()
+		b.startUnread = opts.State.CatchupUnread()
+		b.unreadSaved = b.startUnread
+	}
+	// A saved marker ahead of this clock (the clock was stepped back, or the
+	// last run's was fast): the first list's AsOf must still be past it, or
+	// what the board learns before the clock catches up would count as read.
+	if opts.State != nil {
+		if m := opts.State.CatchupMarker(); m.After(b.runStart) {
+			b.lastAsOf = m
+		}
 	}
 	for _, r := range opts.Roots {
 		if r = expandHome(r, b.home); r != "" {
@@ -156,8 +190,17 @@ func New(opts Options) *Board {
 		for f := range b.forgotten {
 			delete(b.umbrellas, f) // a file edited by hand: forgotten wins
 		}
+		if g := opts.State.Grouping(); g != nil {
+			b.settings = g
+		}
+		for f, mode := range b.settings { // the store keeps these apart too
+			delete(b.forgotten, f)
+			if mode == state.GroupingNever {
+				delete(b.umbrellas, f)
+			}
+		}
 	}
-	b.view = view{cards: []contract.Card{}, projects: []contract.Project{}, sources: []contract.SourceStatus{}}
+	b.view = view{cards: []contract.Card{}, projects: []contract.Project{}, sources: []contract.SourceStatus{}, settings: []contract.GroupingSetting{}}
 	return b
 }
 
@@ -193,6 +236,8 @@ func (b *Board) Apply(f model.Fact) {
 		delete(b.selected, f.ID)
 	case model.TerminalSelected:
 		b.selectedLocked(f)
+	case model.BackfillDone:
+		b.backfilled[contract.SourceKind(f.Kind)] = true
 	case model.SourceReady:
 		kind := contract.SourceKind(f.Kind)
 		b.ready[kind] = true
@@ -207,6 +252,12 @@ func (b *Board) Apply(f model.Fact) {
 	b.rebuildLocked()
 }
 
+// maxResolves caps the git lookups running at once in the process. A start
+// can bring hundreds of sessions, ended ones included, each with a folder.
+const maxResolves = 8
+
+var resolveSlots = make(chan struct{}, maxResolves)
+
 // startResolveLocked asks git about folder with no lock held. Only the answer
 // to the latest lookup of a folder is kept. Callers hold b.mu.
 func (b *Board) startResolveLocked(folder string) {
@@ -215,7 +266,9 @@ func (b *Board) startResolveLocked(folder string) {
 	b.resolving.Add(1)
 	go func() {
 		defer b.resolving.Done()
+		resolveSlots <- struct{}{} // at most maxResolves git lookups at once
 		repo, plain := b.resolve(folder)
+		<-resolveSlots
 		defer b.flushSeen()
 		b.mu.Lock()
 		defer b.mu.Unlock()
@@ -363,6 +416,8 @@ func (b *Board) snapshotLocked() contract.Snapshot {
 		Counts:        v.counts,
 		AgtermPresent: v.agterm,
 		Build:         b.build,
+
+		GroupingSettings: v.settings,
 	}
 }
 
@@ -461,15 +516,6 @@ func (b *Board) publishLocked() {
 	}
 }
 
-// Catchup is out of the proof of concept: it reports the marker and no items.
-func (b *Board) Catchup(context.Context) (contract.Catchup, error) {
-	c := contract.Catchup{Items: []contract.CatchupItem{}}
-	if b.opts.State != nil {
-		c.Marker = b.opts.State.CatchupMarker()
-	}
-	return c, nil
-}
-
 // Leftovers is out of the proof of concept: it reports no items.
 func (b *Board) Leftovers(context.Context) (contract.Leftovers, error) {
 	return contract.Leftovers{Items: []contract.Leftover{}}, nil
@@ -497,13 +543,6 @@ func (b *Board) MarkSeen(cardID string) error {
 	}
 	b.rebuildLocked()
 	return nil
-}
-
-func (b *Board) MarkCatchupRead() error {
-	if b.opts.State == nil {
-		return errors.New("core: no state store")
-	}
-	return b.opts.State.SetCatchupMarker(b.now())
 }
 
 // TerminalFor resolves a card on the board to its terminal in the current

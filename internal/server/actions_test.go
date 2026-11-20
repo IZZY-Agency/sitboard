@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/IZZY-Agency/sitboard/internal/contract"
 	"github.com/IZZY-Agency/sitboard/internal/source"
@@ -92,9 +93,26 @@ func TestSeenAndCatchupReadCallBoard(t *testing.T) {
 	wantStatus(t, h.do(req(http.MethodPost, contract.PathSeen, cardBody(cardA))), http.StatusNoContent)
 	wantStatus(t, h.do(req(http.MethodPost, contract.PathSeen, cardBody("claude:nope"))), http.StatusNotFound)
 	wantStatus(t, h.do(req(http.MethodPost, contract.PathSeen, `{}`)), http.StatusBadRequest)
-	wantStatus(t, h.do(req(http.MethodPost, contract.PathCatchupRead, "")), http.StatusNoContent)
+	wantStatus(t, h.do(req(http.MethodPost, contract.PathCatchupRead, `{"upTo":"2026-11-17T09:55:00Z","path":"/etc"}`)), http.StatusNoContent)
 	if len(h.board.seen) != 1 || h.board.catchup != 1 {
 		t.Fatalf("seen %v catchup %d", h.board.seen, h.board.catchup)
+	}
+	if want := time.Date(2026, 11, 17, 9, 55, 0, 0, time.UTC); !h.board.upTo.Equal(want) {
+		t.Fatalf("upTo %v, want %v", h.board.upTo, want)
+	}
+}
+
+// Marking catch-up read needs the time of the newest item the page showed.
+func TestCatchupReadNeedsATime(t *testing.T) {
+	h := newHarness()
+	for _, body := range []string{"", "{}", `{"upTo":""}`, `{"upTo":"yesterday"}`, `{"upTo":"0001-01-01T00:00:00Z"}`, `[1]`} {
+		wantStatus(t, h.do(req(http.MethodPost, contract.PathCatchupRead, body)), http.StatusBadRequest)
+	}
+	r := req(http.MethodPost, contract.PathCatchupRead, `{"upTo":"2026-11-17T09:55:00Z"}`)
+	r.Header.Set("Content-Type", "text/plain")
+	wantStatus(t, h.do(r), http.StatusUnsupportedMediaType)
+	if h.board.catchup != 0 {
+		t.Fatalf("the board was called %d times", h.board.catchup)
 	}
 }
 

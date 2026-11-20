@@ -47,6 +47,11 @@ const defaultPort = 4317
 // opened ahead of time without sending a request.
 const shutdownGrace = time.Second
 
+// boardStopGrace bounds the wait for the board to stop (and save what
+// catch-up learned since its last tick) before the state file closes. A
+// stop takes milliseconds; a board stuck longer loses only that save.
+const boardStopGrace = 2 * time.Second
+
 func main() { os.Exit(mainCode()) }
 
 // printLicenses writes sitboard's licence and the third-party notices.
@@ -78,12 +83,13 @@ func mainCode() int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	env := runEnv{
-		home:    home,
-		out:     os.Stdout,
-		sources: realSources,
-		open:    openBrowser,
-		goos:    runtime.GOOS,
-		getenv:  os.Getenv,
+		home:     home,
+		out:      os.Stdout,
+		sources:  realSources,
+		open:     openBrowser,
+		goos:     runtime.GOOS,
+		getenv:   os.Getenv,
+		lockWait: state.LockWait,
 	}
 	if err := run(ctx, cfg, env); err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, "sitboard:", err)
@@ -99,6 +105,8 @@ type config struct {
 	noGitHub   bool
 	roots      []string
 	staleAfter time.Duration
+	statePath  string // --state; "" is the platform's default file
+	noState    bool   // --no-state: nothing is read from or written to disk
 	version    bool
 	licenses   bool
 }
@@ -113,6 +121,8 @@ func parseArgs(args []string, stderr io.Writer) (config, error) {
 	fs.BoolVar(&cfg.noGitHub, "no-github", false, "never call gh: no pull request lookups, no network traffic")
 	fs.StringVar(&roots, "roots", "", "comma-separated folders; only agents working under them are shown")
 	fs.DurationVar(&cfg.staleAfter, "stale-after", 20*time.Minute, "a busy agent with no activity for this long is flagged stale")
+	fs.StringVar(&cfg.statePath, "state", "", "`file` for seen marks, the catch-up marker and project groupings (default: ~/Library/Application Support/sitboard/state.json on macOS; elsewhere sitboard/state.json under $XDG_STATE_HOME, or ~/.local/state)")
+	fs.BoolVar(&cfg.noState, "no-state", false, "keep seen marks, the catch-up marker and project groupings in memory only: no state file is read or written")
 	fs.BoolVar(&cfg.version, "version", false, "print the version and exit")
 	fs.BoolVar(&cfg.licenses, "licenses", false, "print sitboard's licence and the third-party notices and exit")
 	if err := fs.Parse(args); err != nil {
@@ -122,11 +132,23 @@ func parseArgs(args []string, stderr io.Writer) (config, error) {
 		_, _ = fmt.Fprintf(stderr, "sitboard: unexpected argument %q\n", fs.Arg(0))
 		return cfg, errors.New("unexpected argument")
 	}
+	stateSet := false
 	fs.Visit(func(f *flag.Flag) {
-		if f.Name == "port" {
+		switch f.Name {
+		case "port":
 			cfg.portSet = true
+		case "state":
+			stateSet = true
 		}
 	})
+	if stateSet && strings.TrimSpace(cfg.statePath) == "" {
+		_, _ = fmt.Fprintln(stderr, "sitboard: --state needs a file path")
+		return cfg, errors.New("empty state")
+	}
+	if stateSet && cfg.noState {
+		_, _ = fmt.Fprintln(stderr, "sitboard: use either --state or --no-state, not both")
+		return cfg, errors.New("state and no-state")
+	}
 	if cfg.port < 0 || cfg.port > 65535 {
 		_, _ = fmt.Fprintln(stderr, "sitboard: --port must be between 0 and 65535")
 		return cfg, errors.New("bad port")
@@ -169,14 +191,24 @@ type runEnv struct {
 	open    func(link string) error
 	goos    string
 	getenv  func(string) string
+	// lock takes the state file's lock; nil is state.Lock. lockWait is how
+	// long it waits for another holder (state.LockWait outside tests).
+	// openStore reads the state file; nil is state.Open.
+	lock      func(ctx context.Context, file string, wait time.Duration) (*state.FileLock, error)
+	lockWait  time.Duration
+	openStore func(file string) (state.Store, error)
 }
 
 // run serves the board until ctx ends.
 func run(ctx context.Context, cfg config, env runEnv) error {
-	st, err := state.Open(stateFile(env.home, env.goos, env.getenv))
+	st, stateNotes, unlock, err := openState(ctx, cfg, env)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil // stopped while waiting for the lock: nothing was started
+		}
 		return err
 	}
+	defer unlock()
 	src := env.sources(cfg, env.home)
 
 	board := core.New(core.Options{
@@ -185,6 +217,9 @@ func run(ctx context.Context, cfg config, env runEnv) error {
 		State:      st,
 		StaleAfter: cfg.staleAfter,
 		Roots:      cfg.roots,
+		// With --no-state the catch-up marker is gone at every start; the
+		// page says so.
+		StateInMemory: cfg.noState,
 	})
 	statuses := make([]source.Status, 0, len(src.watchers)+2)
 	for _, w := range src.watchers {
@@ -193,6 +228,11 @@ func run(ctx context.Context, cfg config, env runEnv) error {
 	statuses = append(statuses, src.repos.Probe(ctx), src.prs.Probe(ctx))
 	board.SetSources(statuses)
 
+	// A stop asked for during the start (the lock wait can take seconds)
+	// ends it before anything listens, prints a link or opens a browser.
+	if ctx.Err() != nil {
+		return nil
+	}
 	ln, note, err := listen(cfg.port, cfg.portSet)
 	if err != nil {
 		return err
@@ -200,6 +240,17 @@ func run(ctx context.Context, cfg config, env runEnv) error {
 	addr := ln.Addr().String()
 	token := newToken()
 
+	// The board saves what catch-up learned since its last tick when it
+	// stops; the store closes (deferred unlock) only after that, or after
+	// boardStopGrace, so a stuck board cannot hang the exit.
+	boardDone := make(chan struct{})
+	defer func() {
+		select {
+		case <-boardDone:
+		case <-time.After(boardStopGrace):
+			log.Printf("core: did not stop within %s; what catch-up learned since its last tick may not be saved", boardStopGrace)
+		}
+	}()
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	// A watcher that stops with an error takes its facts with it and shows
@@ -214,6 +265,7 @@ func run(ctx context.Context, cfg config, env runEnv) error {
 		}()
 	}
 	go func() {
+		defer close(boardDone)
 		if err := board.Run(runCtx); err != nil {
 			log.Printf("core: %v", err)
 		}
@@ -230,6 +282,9 @@ func run(ctx context.Context, cfg config, env runEnv) error {
 
 	// The token is per run and dies with the process; this is the only place it is printed.
 	link := "http://" + addr + "/?" + server.TokenParam + "=" + token
+	for _, n := range stateNotes {
+		_, _ = fmt.Fprintln(env.out, "sitboard:", n)
+	}
 	if note != "" {
 		_, _ = fmt.Fprintln(env.out, "sitboard:", note)
 	}
@@ -288,6 +343,92 @@ func listen(port int, explicit bool) (net.Listener, string, error) {
 	}
 	_, got, _ := net.SplitHostPort(ln.Addr().String())
 	return ln, fmt.Sprintf("port %d is taken (another sitboard?), using %s", port, got), nil
+}
+
+// openState opens the state store the flags ask for. Its order is the start
+// order: the path is resolved and probed, then locked, then read; the port is
+// taken only after (in run). It refuses a state file it could not write, so a
+// board never runs while silently saving nothing, and one that another
+// sitboard holds, so two boards never overwrite each other's marks. The notes,
+// for the start lines, say which file is used when --state or --no-state was
+// given (the default file is not named), and warn when the file could not be
+// locked. unlock stops the store's writes and lets go of the lock; it is safe
+// to call when there is none.
+func openState(ctx context.Context, cfg config, env runEnv) (st state.Store, notes []string, unlock func(), err error) {
+	unlock = func() {}
+	if cfg.noState {
+		return state.Memory(), []string{"no state file (--no-state): seen marks, the catch-up marker and groupings last until sitboard stops"}, unlock, nil
+	}
+	file := stateFile(env.home, env.goos, env.getenv)
+	if cfg.statePath != "" {
+		if file, err = statePath(cfg.statePath, env.home); err != nil {
+			return nil, nil, unlock, err
+		}
+	}
+	if file, err = state.Resolve(file); err != nil {
+		return nil, nil, unlock, err
+	}
+	if cfg.statePath != "" {
+		notes = append(notes, "state file "+file) // after links are followed: the file really used
+	}
+	if err := state.CheckWritable(file); err != nil {
+		return nil, nil, unlock, err
+	}
+	lock := env.lock
+	if lock == nil {
+		lock = state.Lock
+	}
+	held, err := lock(ctx, file, env.lockWait)
+	var busy *state.LockedError
+	switch {
+	case errors.As(err, &busy):
+		return nil, nil, unlock, fmt.Errorf("%w; stop it, or give this one its own file with --state <path>, or run it with --no-state", err)
+	case errors.Is(err, state.ErrLockUnsupported):
+		notes = append(notes, "warning: could not lock the state file (its folder does not support locks); another sitboard on the same file would overwrite it")
+	case err != nil:
+		return nil, nil, unlock, err
+	}
+	release := func() { _ = held.Release() } // a nil lock releases nothing
+	open := env.openStore
+	if open == nil {
+		open = state.Open
+	}
+	st, err = open(file)
+	if err != nil {
+		release()
+		return nil, nil, unlock, err
+	}
+	// The store stops writing before the lock goes, so a write that comes
+	// late (a watcher still stopping) never lands once another may hold it.
+	return st, notes, func() { st.Close(); release() }, nil
+}
+
+// statePath makes a --state value absolute and clean; a leading "~/" is the
+// home folder, as in --roots, so "--state=~/x" works without the shell. The
+// value is taken as given, spaces included. "~user/x" is refused rather than
+// read as a folder named "~user". A value spelt as a folder (ending in "/",
+// or in a "." or ".." part) is refused rather than read as the file named like
+// that folder: cleaning would turn "/a/new/." into the file "/a/new".
+func statePath(p, home string) (string, error) {
+	if strings.HasSuffix(p, "/") {
+		return "", fmt.Errorf("--state %s ends in /: give a file path, not a folder", p)
+	}
+	if last := p[strings.LastIndex(p, "/")+1:]; last == "." || last == ".." {
+		return "", fmt.Errorf("--state %s ends in %s: give a file path, not a folder", p, last)
+	}
+	if strings.HasPrefix(p, "~") && p != "~" && !strings.HasPrefix(p, "~/") {
+		return "", fmt.Errorf("--state %s: only ~ and ~/ are understood; give the full path", p)
+	}
+	if p == "~" {
+		p = home
+	} else if rest, ok := strings.CutPrefix(p, "~/"); ok {
+		p = filepath.Join(home, rest)
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return "", fmt.Errorf("--state %s: %w", p, err)
+	}
+	return abs, nil
 }
 
 // stateFile follows each platform's convention: macOS Application Support,

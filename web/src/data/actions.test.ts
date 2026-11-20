@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { createActions } from './actions';
 
-function recorder(code: number | 'down') {
+function recorder(code: number | 'down', body: string | null = null) {
   const calls: Array<{ url: string; init: RequestInit }> = [];
   const fetchFn = ((url: string, init: RequestInit) => {
     calls.push({ url, init });
     if (code === 'down') return Promise.reject(new TypeError('network'));
-    return Promise.resolve(new Response(null, { status: code }));
+    return Promise.resolve(new Response(body, { status: code }));
   }) as unknown as typeof fetch;
   return { calls, actions: createActions(fetchFn) };
 }
@@ -56,5 +56,34 @@ describe('forget grouping', () => {
     expect(await recorder(409).actions.jump('x')).toEqual({ ok: false, kind: 'no_terminal' });
     expect(await recorder(404).actions.seen('x')).toEqual({ ok: false, kind: 'failed', message: 'this card is no longer on the board' });
     expect(await recorder(500).actions.seen('x')).toEqual({ ok: false, kind: 'failed', message: 'sitboard answered 500' });
+  });
+});
+
+describe('grouping setting', () => {
+  it('posts the project id and the mode only', async () => {
+    const r = recorder(204);
+    expect(await r.actions.setGrouping('p_0123456789ab', 'never')).toEqual({ ok: true });
+    expect(r.calls[0].url).toBe('/api/v1/grouping/setting');
+    expect(r.calls[0].init.method).toBe('POST');
+    expect(JSON.parse(r.calls[0].init.body as string)).toEqual({ projectId: 'p_0123456789ab', mode: 'never' });
+  });
+  it('a 409 says which refusal from the server: too many settings, or no longer grouped; both final', async () => {
+    expect(await recorder(409, 'too many folders have a grouping setting\n').actions.setGrouping('x', 'never')).toEqual({
+      ok: false,
+      kind: 'failed',
+      message: 'too many folders have a setting already',
+      final: true,
+    });
+    expect(await recorder(409, 'this project is not a grouping\n').actions.setGrouping('x', 'never')).toEqual({
+      ok: false,
+      kind: 'failed',
+      message: 'it is no longer grouped',
+      final: true,
+    });
+  });
+  it('a 404 is final; a 500 is worth a retry; a 401 is a lost key', async () => {
+    expect(await recorder(404).actions.setGrouping('x', 'auto')).toEqual({ ok: false, kind: 'failed', message: 'it is no longer on the board', final: true });
+    expect(await recorder(500).actions.setGrouping('x', 'auto')).toEqual({ ok: false, kind: 'failed', message: 'sitboard could not save it' });
+    expect(await recorder(401).actions.setGrouping('x', 'auto')).toEqual({ ok: false, kind: 'unauthorized' });
   });
 });
