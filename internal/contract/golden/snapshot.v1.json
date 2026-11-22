@@ -1,5 +1,5 @@
 {
-  "version": 10,
+  "version": 16,
   "seq": 42,
   "generatedAt": "2026-11-17T10:00:00Z",
   "sources": [
@@ -42,6 +42,14 @@
       "detail": "not logged in to github.com",
       "tested": true,
       "ready": true
+    },
+    {
+      "kind": "gitlab",
+      "state": "off",
+      "version": "",
+      "detail": "switched off",
+      "tested": false,
+      "ready": true
     }
   ],
   "projects": [
@@ -50,6 +58,8 @@
       "name": "alpha",
       "path": "~/projects/alpha",
       "repo": "example-org/example-repo",
+      "repoForge": "github",
+      "repoHost": "github.com",
       "parentId": "",
       "area": "projects",
       "counts": {
@@ -63,7 +73,9 @@
       "id": "p_563eb325a545",
       "name": "beta",
       "path": "~/projects/beta",
-      "repo": "",
+      "repo": "example-group/example-project",
+      "repoForge": "gitlab",
+      "repoHost": "gitlab.example.com",
       "parentId": "",
       "area": "projects",
       "counts": {
@@ -91,6 +103,7 @@
         "model": "claude-opus-4-7",
         "effort": "xhigh",
         "effortSource": "recorded",
+        "effortWord": "",
         "status": "finished",
         "statusSince": "2026-11-17T09:55:00Z",
         "startedAt": "2026-11-17T08:00:00Z",
@@ -100,7 +113,8 @@
         "parent": "none",
         "parentCardId": "",
         "terminalId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-        "workspace": "alpha"
+        "workspace": "alpha",
+        "jump": "agterm"
       },
       "pullRequests": [],
       "issues": [],
@@ -114,7 +128,18 @@
           "url": "https://claude.ai/artifact/exampleArtifact0001"
         }
       ],
-      "subagents": 2
+      "subagents": 2,
+      "spend": {
+        "tokens": {
+          "input": 1200,
+          "output": 84000,
+          "cacheRead": 9100000,
+          "cacheWrite": 310000
+        },
+        "usd": 6.25,
+        "priced": true,
+        "recorded": false
+      }
     },
     {
       "id": "claude:22222222-2222-4222-8222-222222222222",
@@ -132,6 +157,7 @@
         "model": "claude-opus-4-7",
         "effort": "high",
         "effortSource": "recorded",
+        "effortWord": "",
         "status": "busy",
         "statusSince": "2026-11-17T09:10:00Z",
         "startedAt": "2026-11-17T09:00:00Z",
@@ -141,12 +167,24 @@
         "parent": "known",
         "parentCardId": "claude:11111111-1111-4111-8111-111111111111",
         "terminalId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-        "workspace": "alpha"
+        "workspace": "alpha",
+        "jump": "agterm"
       },
       "pullRequests": [],
       "issues": [],
       "artifacts": [],
-      "subagents": 0
+      "subagents": 0,
+      "spend": {
+        "tokens": {
+          "input": 300,
+          "output": 21000,
+          "cacheRead": 1500000,
+          "cacheWrite": 90000
+        },
+        "usd": 1.5,
+        "priced": true,
+        "recorded": false
+      }
     },
     {
       "id": "claude:33333333-3333-4333-8333-333333333333",
@@ -162,6 +200,7 @@
         "model": "claude-opus-4-7",
         "effort": "max",
         "effortSource": "recorded",
+        "effortWord": "",
         "status": "finished",
         "statusSince": "2026-11-17T09:50:00Z",
         "startedAt": "2026-11-17T09:00:00Z",
@@ -171,12 +210,24 @@
         "parent": "known",
         "parentCardId": "claude:11111111-1111-4111-8111-111111111111",
         "terminalId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
-        "workspace": "alpha"
+        "workspace": "alpha",
+        "jump": "agterm"
       },
       "pullRequests": [],
       "issues": [],
       "artifacts": [],
-      "subagents": 0
+      "subagents": 0,
+      "spend": {
+        "tokens": {
+          "input": 0,
+          "output": 0,
+          "cacheRead": 0,
+          "cacheWrite": 0
+        },
+        "usd": 0,
+        "priced": false,
+        "recorded": false
+      }
     },
     {
       "id": "claude:44444444-4444-4444-8444-444444444444",
@@ -194,6 +245,7 @@
         "model": "claude-opus-4-7",
         "effort": "medium",
         "effortSource": "recorded",
+        "effortWord": "",
         "status": "finished",
         "statusSince": "2026-11-17T09:40:00Z",
         "startedAt": "2026-11-17T09:00:00Z",
@@ -203,10 +255,13 @@
         "parent": "known",
         "parentCardId": "claude:11111111-1111-4111-8111-111111111111",
         "terminalId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
-        "workspace": "alpha"
+        "workspace": "alpha",
+        "jump": "agterm"
       },
       "pullRequests": [
         {
+          "forge": "github",
+          "host": "github.com",
           "repo": "example-org/example-repo",
           "number": 101,
           "title": "Placeholder pull request title",
@@ -219,13 +274,26 @@
       ],
       "issues": [
         {
+          "forge": "github",
+          "host": "github.com",
           "repo": "example-org/example-repo",
           "number": 7,
           "url": "https://github.com/example-org/example-repo/issues/7"
         }
       ],
       "artifacts": [],
-      "subagents": 0
+      "subagents": 0,
+      "spend": {
+        "tokens": {
+          "input": 0,
+          "output": 0,
+          "cacheRead": 0,
+          "cacheWrite": 0
+        },
+        "usd": 0,
+        "priced": false,
+        "recorded": false
+      }
     },
     {
       "id": "claude:55555555-5555-4555-8555-555555555555",
@@ -241,6 +309,7 @@
         "model": "claude-opus-4-7",
         "effort": "low",
         "effortSource": "recorded",
+        "effortWord": "",
         "status": "ended",
         "statusSince": "2026-11-17T08:30:00Z",
         "startedAt": "2026-11-17T07:00:00Z",
@@ -250,10 +319,13 @@
         "parent": "known",
         "parentCardId": "claude:11111111-1111-4111-8111-111111111111",
         "terminalId": "",
-        "workspace": ""
+        "workspace": "",
+        "jump": "none"
       },
       "pullRequests": [
         {
+          "forge": "github",
+          "host": "github.com",
           "repo": "example-org/example-repo",
           "number": 102,
           "title": "Another placeholder title",
@@ -266,7 +338,18 @@
       ],
       "issues": [],
       "artifacts": [],
-      "subagents": 0
+      "subagents": 0,
+      "spend": {
+        "tokens": {
+          "input": 5000,
+          "output": 160000,
+          "cacheRead": 22000000,
+          "cacheWrite": 700000
+        },
+        "usd": 12.75,
+        "priced": true,
+        "recorded": true
+      }
     },
     {
       "id": "claude:66666666-6666-4666-8666-666666666666",
@@ -284,6 +367,7 @@
         "model": "",
         "effort": "high",
         "effortSource": "launch",
+        "effortWord": "",
         "status": "blocked",
         "statusSince": "2026-11-17T09:58:00Z",
         "startedAt": "2026-11-17T09:30:00Z",
@@ -293,17 +377,50 @@
         "parent": "none",
         "parentCardId": "",
         "terminalId": "",
-        "workspace": ""
+        "workspace": "",
+        "jump": "tmux"
       },
-      "pullRequests": [],
-      "issues": [],
+      "pullRequests": [
+        {
+          "forge": "gitlab",
+          "host": "gitlab.example.com",
+          "repo": "example-group/example-project",
+          "number": 12,
+          "title": "Sample merge request",
+          "url": "https://gitlab.example.com/example-group/example-project/-/merge_requests/12",
+          "state": "open",
+          "checks": "running",
+          "review": "review_required",
+          "draft": false
+        }
+      ],
+      "issues": [
+        {
+          "forge": "gitlab",
+          "host": "gitlab.example.com",
+          "repo": "example-group/example-project",
+          "number": 3,
+          "url": "https://gitlab.example.com/example-group/example-project/-/issues/3"
+        }
+      ],
       "artifacts": [
         {
           "title": "",
           "url": "https://claude.ai/artifact/exampleArtifact0003"
         }
       ],
-      "subagents": 0
+      "subagents": 0,
+      "spend": {
+        "tokens": {
+          "input": 40,
+          "output": 7000,
+          "cacheRead": 200000,
+          "cacheWrite": 10000
+        },
+        "usd": 0,
+        "priced": false,
+        "recorded": false
+      }
     },
     {
       "id": "codex:77777777-7777-4777-8777-777777777777",
@@ -319,6 +436,7 @@
         "model": "",
         "effort": "",
         "effortSource": "none",
+        "effortWord": "",
         "status": "unknown",
         "lastActivity": "2026-11-17T07:45:00Z",
         "live": "unknown",
@@ -326,12 +444,24 @@
         "parent": "unknown",
         "parentCardId": "",
         "terminalId": "",
-        "workspace": ""
+        "workspace": "",
+        "jump": "none"
       },
       "pullRequests": [],
       "issues": [],
       "artifacts": [],
-      "subagents": 0
+      "subagents": 0,
+      "spend": {
+        "tokens": {
+          "input": 4200,
+          "output": 38000,
+          "cacheRead": 2100000,
+          "cacheWrite": 0
+        },
+        "usd": 0,
+        "priced": false,
+        "recorded": false
+      }
     }
   ],
   "plainShells": 3,
@@ -361,5 +491,128 @@
       "path": "~/projects/gamma",
       "mode": "always"
     }
+  ],
+  "leftovers": {
+    "items": 2,
+    "held": 1,
+    "partial": false
+  },
+  "spend": {
+    "days": [
+      {
+        "day": "2026-11-16",
+        "spend": {
+          "tokens": {
+            "input": 0,
+            "output": 150000,
+            "cacheRead": 20000000,
+            "cacheWrite": 0
+          },
+          "usd": 11.5,
+          "priced": true,
+          "recorded": false
+        },
+        "codex": {
+          "input": 0,
+          "output": 0,
+          "cacheRead": 0,
+          "cacheWrite": 0
+        },
+        "projects": [
+          {
+            "projectId": "p_5b0ca1eb8975",
+            "name": "alpha",
+            "path": "~/projects/alpha",
+            "spend": {
+              "tokens": {
+                "input": 0,
+                "output": 150000,
+                "cacheRead": 20000000,
+                "cacheWrite": 0
+              },
+              "usd": 11.5,
+              "priced": true,
+              "recorded": false
+            },
+            "codex": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            }
+          }
+        ]
+      },
+      {
+        "day": "2026-11-17",
+        "spend": {
+          "tokens": {
+            "input": 6540,
+            "output": 122000,
+            "cacheRead": 12800000,
+            "cacheWrite": 1110000
+          },
+          "usd": 8.75,
+          "priced": false,
+          "recorded": false
+        },
+        "codex": {
+          "input": 4200,
+          "output": 38000,
+          "cacheRead": 2100000,
+          "cacheWrite": 0
+        },
+        "projects": [
+          {
+            "projectId": "p_5b0ca1eb8975",
+            "name": "alpha",
+            "path": "~/projects/alpha",
+            "spend": {
+              "tokens": {
+                "input": 6500,
+                "output": 115000,
+                "cacheRead": 12600000,
+                "cacheWrite": 1100000
+              },
+              "usd": 8.75,
+              "priced": true,
+              "recorded": false
+            },
+            "codex": {
+              "input": 4200,
+              "output": 38000,
+              "cacheRead": 2100000,
+              "cacheWrite": 0
+            }
+          },
+          {
+            "projectId": "p_563eb325a545",
+            "name": "beta",
+            "path": "~/projects/beta",
+            "spend": {
+              "tokens": {
+                "input": 40,
+                "output": 7000,
+                "cacheRead": 200000,
+                "cacheWrite": 10000
+              },
+              "usd": 0,
+              "priced": false,
+              "recorded": false
+            },
+            "codex": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            }
+          }
+        ]
+      }
+    ],
+    "pending": false
+  },
+  "gitlabHosts": [
+    "gitlab.example.com"
   ]
 }

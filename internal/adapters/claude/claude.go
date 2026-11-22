@@ -21,7 +21,7 @@
 // the background after the live ones: those whose record file is still there
 // (a crash) and those found only by their transcript (Claude Code removes the
 // record when a session exits; the transcript keeps the session id as its
-// name). Only transcripts changed within turnWindow count, and of a transcript
+// name). Only transcripts changed within sessionKeep count, and of a transcript
 // first opened for a last pass only the last endedReadCap bytes are read. A
 // session found by its transcript counts only when its lines say it was
 // interactive (entrypoint "cli", or none): claude -p and the SDK runs are left
@@ -29,7 +29,7 @@
 // start time and status are lost with the record. A session that ends while
 // sitboard runs gets one last pass too. After that last pass only the derived
 // facts are kept, not the tailers, and they go once the session ended more
-// than turnWindow ago.
+// than sessionKeep ago.
 //
 // All facts are emitted from one goroutine, so a fact and a gone for one
 // session never swap. Nothing from a transcript but derived fields leaves this
@@ -60,6 +60,11 @@ import (
 type Options struct {
 	Home string           // the user's home folder; records are read under <Home>/.claude
 	Now  func() time.Time // clock; nil means time.Now
+	// TmuxOwns asks tmux whether pane (with the tty of the session's
+	// process) is a pane of that server showing that tty. A tmux pane read
+	// from a process's environment is kept only when it says yes, once per
+	// process. Nil: no pane is kept.
+	TmuxOwns func(ctx context.Context, pane model.TmuxPane) bool
 }
 
 type adapter struct {
@@ -68,10 +73,12 @@ type adapter struct {
 	now      func() time.Time
 	starts   startsFunc
 	proc     func(pid int) procFacts // read once per process
+	tty      ttyFunc                 // the process's terminal, asked once per process in tmux
 	tick     time.Duration           // transcript growth (stat only) and re-adding the watch
 	liveTick time.Duration           // full rescan with ps: liveness
 	debounce time.Duration
 	prober   *prober // folder lookups (procProber; tests have their own)
+	prices   *prices // Claude Code's price table
 	// beforeIndex, when set, runs in the indexer before each batch (tests).
 	beforeIndex func()
 }
@@ -84,13 +91,17 @@ func New(opts Options) source.Watcher {
 	}
 	return &adapter{
 		opts: opts, root: filepath.Join(opts.Home, ".claude"), now: now,
-		starts: defaultStarts(), proc: readProcFacts,
+		starts: defaultStarts(), proc: readProcFacts, tty: defaultTTY(),
 		tick: 3 * time.Second, liveTick: 10 * time.Second, debounce: 100 * time.Millisecond,
-		prober: procProber,
+		prober: procProber, prices: newPrices(filepath.Join(opts.Home, ".claude.json")),
 	}
 }
 
 func (a *adapter) Kind() source.Kind { return source.KindClaude }
+
+// Options returns the options the watcher was built with, so the program's
+// wiring can be checked.
+func (a *adapter) Options() Options { return a.opts }
 
 func (a *adapter) sessionsDir() string { return filepath.Join(a.root, "sessions") }
 func (a *adapter) projectsDir() string { return filepath.Join(a.root, "projects") }
@@ -158,12 +169,18 @@ type sess struct {
 	ended      bool
 	endedAt    time.Time
 	termID     string
-	launch     string    // the effort level the process was started with, "" when none
-	termKey    string    // pid and process start the process facts were read for
-	transcript string    // "" until found
-	globAt     time.Time // last search of every project folder for it
-	d          derived
-	subagents  int
+	tmux       model.TmuxPane
+	launch     string // the effort level the process was started with, "" when none
+	termKey    string // pid and process start the process facts were read for
+	transcript string // "" until found
+	// others: the session's transcripts in other project folders, older:
+	// it was resumed in another folder, and goes on in a transcript of the
+	// same name there. Their use is the session's too.
+	others    []string
+	cwdSeen   string    // the record's folder the transcript was last looked up for
+	globAt    time.Time // last search of every project folder for it
+	d         derived
+	subagents int
 	// final: the last indexing pass after the session ended was applied; it
 	// is not indexed again unless it comes back to life.
 	final bool
@@ -175,8 +192,22 @@ type sess struct {
 	// read. It is not sent (one sent while it ran is withdrawn), and nothing
 	// read from it is kept.
 	headless bool
+	// priced is d.spend priced with the table spendTab (by identity): kept so
+	// that a tick that changes nothing does not price it again.
+	priced   model.Spend
+	pricedOf *spendData
+	spendTab uintptr
 	// ends counts the times the session ended: each end has its own last pass.
 	ends int
+}
+
+// pricedSpend is the session's spend priced with tab.
+func (s *sess) pricedSpend(tab priceTable) model.Spend {
+	id := reflect.ValueOf(tab).Pointer()
+	if s.pricedOf != s.d.spend || s.spendTab != id {
+		s.priced, s.pricedOf, s.spendTab = priceSpend(s.d.spend, tab), s.d.spend, id
+	}
+	return s.priced
 }
 
 // Run emits the live sessions at once, then derived facts as the transcripts
@@ -357,7 +388,7 @@ func (r *registry) rescan(ctx context.Context) {
 		if s.live.V && s.live.OK {
 			if key := strconv.Itoa(rec.PID) + "|" + rec.ProcStart; key != s.termKey {
 				p := a.proc(rec.PID)
-				s.termKey, s.termID, s.launch = key, p.TermID, p.LaunchEffort
+				s.termKey, s.termID, s.tmux, s.launch = key, p.TermID, a.ownPane(ctx, rec.PID, starts[rec.PID], p.Tmux), p.LaunchEffort
 			}
 			if first, seen := r.firsts[s.termKey]; !seen {
 				r.firsts[s.termKey] = firstSession{pid: rec.PID, procStart: rec.ProcStart, id: id}
@@ -365,12 +396,23 @@ func (r *registry) rescan(ctx context.Context) {
 				s.launch = ""
 			}
 		} else {
-			s.termKey, s.termID, s.launch = "", "", ""
+			s.termKey, s.termID, s.tmux, s.launch = "", "", model.TmuxPane{}, ""
 		}
 		if s.transcript == "" {
 			s.transcript = a.findTranscript(id, rec.Cwd, now.Sub(s.globAt) >= globEvery)
 			if s.transcript == "" && now.Sub(s.globAt) >= globEvery {
 				s.globAt = now
+			}
+			if s.transcript != "" {
+				s.others, s.cwdSeen = a.otherTranscripts(id, s.transcript), rec.Cwd
+			}
+		} else if rec.Cwd != s.cwdSeen {
+			// Resumed in another folder: the transcript there is the one
+			// that goes on, the older one stays the session's.
+			s.cwdSeen = rec.Cwd
+			if p := a.cwdTranscript(id, rec.Cwd); p != "" && p != s.transcript {
+				s.others = append(slices.DeleteFunc(s.others, func(o string) bool { return o == p }), s.transcript)
+				s.transcript = p
 			}
 		}
 	}
@@ -396,12 +438,12 @@ func (r *registry) rescan(ctx context.Context) {
 			// while its transcript exists; then it is gone.
 			if !s.ended {
 				s.ended, s.endedAt, s.live = true, now, model.Of(false)
-				s.termKey, s.termID, s.launch = "", "", ""
+				s.termKey, s.termID, s.tmux, s.launch = "", "", model.TmuxPane{}, ""
 				s.ends++
 			}
-			// Gone too once it ended more than turnWindow ago: nothing of it
-			// is shown any more, so nothing of it is kept.
-			if s.transcript == "" || !exists(s.transcript) || (s.ended && now.Sub(s.endedAt) > turnWindow) {
+			// Gone too once it ended more than sessionKeep ago: nothing of
+			// it is shown any more, so nothing of it is kept.
+			if s.transcript == "" || !exists(s.transcript) || (s.ended && now.Sub(s.endedAt) > sessionKeep) {
 				_, sent := r.sent[id]
 				delete(r.sessions, id)
 				delete(r.sent, id)
@@ -428,7 +470,7 @@ func (r *registry) checkBackfill() {
 	}
 	now := r.a.now()
 	for _, s := range r.sessions {
-		if s.ended && !s.final && s.transcript != "" && now.Sub(s.endedAt) <= turnWindow {
+		if s.ended && !s.final && s.transcript != "" && now.Sub(s.endedAt) <= sessionKeep {
 			return
 		}
 	}
@@ -471,6 +513,12 @@ func isAlnum(c byte) bool {
 	return 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9'
 }
 
+// sessionKeep is how long an ended session is kept and read: as long as its
+// spend spans are (spendKeep), a day more than the 7 days of turns, so the
+// first local day the spend summary shows is whole even after a fall-back
+// night. Its turns are still cut at turnWindow.
+const sessionKeep = spendKeep
+
 // globEvery is how often a session without a transcript searches every
 // project folder for it; its own folder is checked on every rescan.
 const globEvery = 30 * time.Second
@@ -478,11 +526,8 @@ const globEvery = 30 * time.Second
 // findTranscript returns the transcript of session id, "" when there is none
 // yet. The id was validated, so it holds no path separator or wildcard.
 func (a *adapter) findTranscript(id, cwd string, search bool) string {
-	if cwd != "" {
-		p := filepath.Join(a.projectsDir(), projectDirName(cwd), id+".jsonl")
-		if exists(p) {
-			return p
-		}
+	if p := a.cwdTranscript(id, cwd); p != "" {
+		return p
 	}
 	if !search {
 		return ""
@@ -494,12 +539,41 @@ func (a *adapter) findTranscript(id, cwd string, search bool) string {
 	return ""
 }
 
+// cwdTranscript is session id's transcript in folder cwd's project
+// directory, "" when there is none.
+func (a *adapter) cwdTranscript(id, cwd string) string {
+	if cwd == "" {
+		return ""
+	}
+	p := filepath.Join(a.projectsDir(), projectDirName(cwd), id+".jsonl")
+	if !exists(p) {
+		return ""
+	}
+	return p
+}
+
+// maxOthers caps the other transcripts kept for one session.
+const maxOthers = 16
+
+// otherTranscripts lists session id's transcripts in every project folder
+// but main's, by name. Links are not followed.
+func (a *adapter) otherTranscripts(id, main string) []string {
+	matches, _ := filepath.Glob(filepath.Join(a.projectsDir(), "*", id+".jsonl"))
+	var out []string
+	for _, p := range matches {
+		if fi, err := os.Lstat(p); err == nil && fi.Mode().IsRegular() && p != main && len(out) < maxOthers {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 // discover adds the sessions that had ended before this start and left no
 // record file. Their transcripts are named by session id, in their folder's
-// project directory; those changed within turnWindow are indexed once. Links
+// project directory; those changed within sessionKeep are indexed once. Links
 // are not followed, neither to a folder nor to a file. A transcript in two
-// project directories (a session resumed in another folder) counts once: the
-// one changed last.
+// project directories (a session resumed in another folder) is one session:
+// the one changed last is its transcript, the others are kept beside it.
 func (r *registry) discover() {
 	r.backfilling = true
 	now := r.a.now()
@@ -520,27 +594,42 @@ func (r *registry) discover() {
 				continue // a session with a record: the registry has it
 			}
 			info, err := e.Info()
-			if err != nil || now.Sub(info.ModTime()) > turnWindow || (old != nil && !info.ModTime().After(old.endedAt)) {
+			if err != nil || now.Sub(info.ModTime()) > sessionKeep {
 				continue
 			}
-			r.sessions[id] = &sess{
-				rec: record{SessionID: id}, transcript: filepath.Join(dir, e.Name()),
+			p := filepath.Join(dir, e.Name())
+			if old != nil && !info.ModTime().After(old.endedAt) {
+				if len(old.others) < maxOthers {
+					old.others = append(old.others, p)
+				}
+				continue
+			}
+			s := &sess{
+				rec: record{SessionID: id}, transcript: p,
 				live: model.Of(false), ended: true, endedAt: info.ModTime(), found: true, ends: 1,
 			}
+			if old != nil {
+				s.others = append(slices.Clone(old.others), old.transcript)
+			}
+			r.sessions[id] = s
 		}
 	}
 }
 
 // jobs lists the sessions to index: the live ones, and the ended ones until
-// their last pass is in, if they ended within turnWindow.
+// their last pass is in, if they ended within sessionKeep.
 func (r *registry) jobs() map[string]job {
 	now := r.a.now()
 	jobs := map[string]job{}
 	for id, s := range r.sessions {
-		if s.transcript == "" || s.final || (s.ended && now.Sub(s.endedAt) > turnWindow) {
+		if s.transcript == "" || s.final || (s.ended && now.Sub(s.endedAt) > sessionKeep) {
 			continue
 		}
-		jobs[id] = job{id: id, main: s.transcript, subDir: filepath.Join(filepath.Dir(s.transcript), id, "subagents"), ended: s.ended, gen: s.ends}
+		j := job{id: id, main: s.transcript, ended: s.ended, gen: s.ends, others: slices.Clone(s.others)}
+		for _, p := range append([]string{s.transcript}, s.others...) {
+			j.subDirs = append(j.subDirs, filepath.Join(filepath.Dir(p), id, "subagents"))
+		}
+		jobs[id] = j
 	}
 	return jobs
 }
@@ -596,15 +685,21 @@ func (r *registry) fact(id string, s *sess) model.SessionFact {
 		EndedAt:     s.endedAt,
 		Folder:      s.d.Folder,
 		TerminalID:  s.termID,
+		Tmux:        s.tmux,
 		Subagents:   s.subagents,
 		CreatedPRs:  slices.Clone(s.d.CreatedPRs),
+		PushedPRs:   slices.Clone(s.d.PushedPRs),
 		Artifacts:   slices.Clone(s.d.Artifacts),
+		Spend:       s.pricedSpend(r.a.prices.table(r.a.now())),
 		WorkerHint:  workerHint(s.d),
 		Backfill:    s.found,
 		Headless:    !interactive(s.d.Entrypoint),
 	}
 	if f.Folder == "" {
 		f.Folder, _ = validFolder(rec.Cwd)
+	}
+	if s.live.OK && s.live.V {
+		f.PID = rec.PID // its start time matched the record's
 	}
 	if s.d.Model != "" {
 		f.Model = model.Of(s.d.Model)

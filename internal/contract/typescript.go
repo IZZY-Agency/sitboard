@@ -41,13 +41,17 @@ func enumList() []enumDef {
 		enumOf(ParentStates...),
 		enumOf(Efforts...),
 		enumOf(EffortSources...),
+		enumOf(JumpKinds...),
 		enumOf(PRStates...),
 		enumOf(CheckValues...),
 		enumOf(Reviews...),
 		enumOf(SourceKinds...),
+		enumOf(Forges...),
 		enumOf(SourceStates...),
 		enumOf(CatchupKinds...),
 		enumOf(LeftoverKinds...),
+		enumOf(LeftoversStates...),
+		enumOf(HeldReasons...),
 		enumOf(GroupingModes...),
 	}
 }
@@ -64,10 +68,18 @@ func structList() []reflect.Type {
 		reflect.TypeFor[PullRequest](),
 		reflect.TypeFor[Issue](),
 		reflect.TypeFor[Artifact](),
+		reflect.TypeFor[Tokens](),
+		reflect.TypeFor[Spend](),
+		reflect.TypeFor[SpendSummary](),
+		reflect.TypeFor[SpendDay](),
+		reflect.TypeFor[ProjectSpend](),
 		reflect.TypeFor[Catchup](),
 		reflect.TypeFor[CatchupItem](),
 		reflect.TypeFor[Leftovers](),
+		reflect.TypeFor[LeftoversSummary](),
 		reflect.TypeFor[Leftover](),
+		reflect.TypeFor[LeftoverPart](),
+		reflect.TypeFor[HeldCount](),
 		reflect.TypeFor[CardRequest](),
 		reflect.TypeFor[ProjectRequest](),
 		reflect.TypeFor[GroupingSetting](),
@@ -117,6 +129,10 @@ func TypeScript() string {
 	fmt.Fprintf(&b, "export const PULL_REQUEST_URL_PATTERN = new RegExp(%s);\n\n", strconv.Quote(PullRequestURLPattern))
 	b.WriteString("/** The only form of Issue.url; the page links nothing else. */\n")
 	fmt.Fprintf(&b, "export const ISSUE_URL_PATTERN = new RegExp(%s);\n\n", strconv.Quote(IssueURLPattern))
+	b.WriteString("/** The only form of a GitLab PullRequest.url (host in group 1, which must be in Snapshot.gitlabHosts); the page links nothing else. */\n")
+	fmt.Fprintf(&b, "export const MERGE_REQUEST_URL_PATTERN = new RegExp(%s);\n\n", strconv.Quote(MergeRequestURLPattern))
+	b.WriteString("/** The only form of a GitLab Issue.url (host in group 1, which must be in Snapshot.gitlabHosts); the page links nothing else. */\n")
+	fmt.Fprintf(&b, "export const GITLAB_ISSUE_URL_PATTERN = new RegExp(%s);\n\n", strconv.Quote(GitLabIssueURLPattern))
 
 	b.WriteString("/** RFC 3339 time, UTC. */\nexport type Timestamp = string;\n")
 

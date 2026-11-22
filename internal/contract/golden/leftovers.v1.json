@@ -1,46 +1,12 @@
 {
+  "state": "ready",
+  "asOf": "2026-11-19T10:00:00Z",
   "items": [
     {
-      "kind": "worktree",
       "projectId": "p_5b0ca1eb8975",
-      "path": "~/projects/alpha/.worktrees/worker-d",
-      "branch": "worker-d/feature",
-      "cardId": "",
       "pullRequest": {
-        "repo": "example-org/example-repo",
-        "number": 102,
-        "title": "Another placeholder title",
-        "url": "https://github.com/example-org/example-repo/pull/102",
-        "state": "merged",
-        "checks": "passing",
-        "review": "approved",
-        "draft": false
-      }
-    },
-    {
-      "kind": "branch",
-      "projectId": "p_5b0ca1eb8975",
-      "path": "",
-      "branch": "worker-f/feature",
-      "cardId": "",
-      "pullRequest": {
-        "repo": "example-org/example-repo",
-        "number": 103,
-        "title": "Third placeholder title",
-        "url": "https://github.com/example-org/example-repo/pull/103",
-        "state": "merged",
-        "checks": "passing",
-        "review": "approved",
-        "draft": false
-      }
-    },
-    {
-      "kind": "session",
-      "projectId": "p_5b0ca1eb8975",
-      "path": "",
-      "branch": "",
-      "cardId": "claude:33333333-3333-4333-8333-333333333333",
-      "pullRequest": {
+        "forge": "github",
+        "host": "github.com",
         "repo": "example-org/example-repo",
         "number": 104,
         "title": "Fourth placeholder title",
@@ -50,7 +16,91 @@
         "review": "approved",
         "draft": false
       },
-      "idleSince": "2026-11-17T06:00:00Z"
+      "mergedAt": "2026-11-17T06:00:00Z",
+      "parts": [
+        {
+          "kind": "session",
+          "path": "",
+          "branch": "",
+          "cardId": "claude:33333333-3333-4333-8333-333333333333",
+          "name": "worker-d",
+          "idleSince": "2026-11-17T06:30:00Z",
+          "ignored": 0
+        },
+        {
+          "kind": "worktree",
+          "path": "~/projects/alpha/.worktrees/worker-d",
+          "branch": "",
+          "cardId": "",
+          "name": "",
+          "ignored": 0
+        },
+        {
+          "kind": "branch",
+          "path": "",
+          "branch": "worker-d/feature",
+          "cardId": "",
+          "name": "",
+          "ignored": 0
+        }
+      ],
+      "waiting": true,
+      "ownSession": true
+    },
+    {
+      "projectId": "p_5b0ca1eb8975",
+      "pullRequest": {
+        "forge": "github",
+        "host": "github.com",
+        "repo": "example-org/example-repo",
+        "number": 103,
+        "title": "Third placeholder title",
+        "url": "https://github.com/example-org/example-repo/pull/103",
+        "state": "merged",
+        "checks": "passing",
+        "review": "approved",
+        "draft": false
+      },
+      "mergedAt": "2026-11-15T06:00:00Z",
+      "parts": [
+        {
+          "kind": "worktree",
+          "path": "~/projects/alpha/.worktrees/worker-f",
+          "branch": "",
+          "cardId": "",
+          "name": "",
+          "ignored": 2
+        },
+        {
+          "kind": "branch",
+          "path": "",
+          "branch": "worker-f/feature",
+          "cardId": "",
+          "name": "",
+          "ignored": 0
+        },
+        {
+          "kind": "remoteBranch",
+          "path": "",
+          "branch": "worker-f/feature",
+          "cardId": "",
+          "name": "",
+          "ignored": 0
+        }
+      ],
+      "waiting": false,
+      "ownSession": false
     }
-  ]
+  ],
+  "held": [
+    {
+      "reason": "commits",
+      "count": 1
+    },
+    {
+      "reason": "changes",
+      "count": 2
+    }
+  ],
+  "partial": false
 }

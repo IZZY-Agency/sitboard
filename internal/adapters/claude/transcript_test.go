@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/IZZY-Agency/sitboard/internal/adapters/internal/shellcmd"
 	"github.com/IZZY-Agency/sitboard/internal/model"
 )
 
@@ -212,7 +213,7 @@ func TestCreatedPRsFollowSpikeRule(t *testing.T) {
 	_, _ = tl.update(context.Background(), fixedNow)
 	// 101 came from the session's own `gh pr create`; 102 was merged and 103
 	// viewed, and both appear in pr-link records: they must be dropped.
-	want := []model.PRRef{{Repo: "example-org/example-repo", Number: 101}}
+	want := []model.PRRef{{Repo: model.GitHubRepo("example-org/example-repo"), Number: 101}}
 	if !reflect.DeepEqual(tl.d.CreatedPRs, want) {
 		t.Fatalf("CreatedPRs = %+v", tl.d.CreatedPRs)
 	}
@@ -246,7 +247,7 @@ func TestSpawnNameParsing(t *testing.T) {
 		"agtermctl session new \\\n  --name worker-f \\\n  --cwd /x":                         {"worker-f"},
 	}
 	for cmd, want := range cases {
-		if got := parseCommand(cmd).spawnNames(); !slices.Equal(got, want) {
+		if got := shellcmd.Parse(cmd).SpawnNames(); !slices.Equal(got, want) {
 			t.Errorf("spawnNames(%q) = %q, want %q", cmd, got, want)
 		}
 	}
@@ -267,7 +268,7 @@ func TestTerminalIDsFromSpawnResult(t *testing.T) {
 		`{"id":"` + u2 + `","x":"` + strings.Repeat("y", 5000) + `"}`: nil,      // a large JSON dump
 	}
 	for res, want := range cases {
-		if got := terminalIDs(res); !slices.Equal(got, want) {
+		if got := shellcmd.TerminalIDs(res); !slices.Equal(got, want) {
 			t.Errorf("terminalIDs(%q) = %v, want %v", res, got, want)
 		}
 	}
@@ -289,21 +290,31 @@ func TestNoTranscriptTextInFacts(t *testing.T) {
 
 // toolCall writes an assistant Bash call and its result as two transcript lines.
 func toolCall(b *bytes.Buffer, id, cmd, result string, sidechain bool) {
-	use, _ := json.Marshal(map[string]any{
-		"type": "assistant", "isSidechain": sidechain, "timestamp": "2026-11-17T08:00:00.000Z",
-		"message": map[string]any{"model": "claude-opus-5-5", "content": []any{
-			map[string]any{"type": "tool_use", "id": id, "name": "Bash", "input": map[string]any{"command": cmd}},
-		}},
-	})
+	toolCallAt(b, id, cmd, result, sidechain, "2026-11-17T08:00:00.000Z", "2026-11-17T08:00:01.000Z")
+}
+
+// toolCallAt is toolCall with the call's and the result's timestamps.
+func toolCallAt(b *bytes.Buffer, id, cmd, result string, sidechain bool, callAt, resultAt string) {
+	toolUse(b, id, cmd, sidechain, callAt)
 	res, _ := json.Marshal(map[string]any{
-		"type": "user", "isSidechain": sidechain, "timestamp": "2026-11-17T08:00:01.000Z",
+		"type": "user", "isSidechain": sidechain, "timestamp": resultAt,
 		"message": map[string]any{"content": []any{
 			map[string]any{"type": "tool_result", "tool_use_id": id, "content": result},
 		}},
 	})
-	b.Write(use)
-	b.WriteByte('\n')
 	b.Write(res)
+	b.WriteByte('\n')
+}
+
+// toolUse writes an assistant Bash call alone, its result still to come.
+func toolUse(b *bytes.Buffer, id, cmd string, sidechain bool, at string) {
+	use, _ := json.Marshal(map[string]any{
+		"type": "assistant", "isSidechain": sidechain, "timestamp": at,
+		"message": map[string]any{"model": "claude-opus-5-5", "content": []any{
+			map[string]any{"type": "tool_use", "id": id, "name": "Bash", "input": map[string]any{"command": cmd}},
+		}},
+	})
+	b.Write(use)
 	b.WriteByte('\n')
 }
 
@@ -339,15 +350,17 @@ func TestPRCreateOnlyAtCommandPosition(t *testing.T) {
 	toolCall(&b, "t2", `echo 'gh pr create' && gh pr view 202`, url("202")+"\n", false)
 	toolCall(&b, "t3", `rg 'gh pr create' -l | xargs cat`, url("203"), false)
 	toolCall(&b, "t4", "git push -u origin worker-a && gh pr create --fill", "remote: see "+url("299")+" for details\n"+url("204")+"\n", false)
-	toolCall(&b, "t5", "GH_PROMPT_DISABLED=1 /opt/bin/gh pr create --fill", "a pull request already exists:\n  "+url("205")+"  \n", false)
+	toolCall(&b, "t5", "GH_PROMPT_DISABLED=1 /opt/bin/gh pr create --fill", "a pull request for branch \"worker-a\" into branch \"main\" already exists:\n  "+url("205")+"  \n", false)
 	toolCall(&b, "t6", "cd /home/dev/projects/alpha; gh pr create -f", "Creating pull request\n"+url("206")+" and more text", false)
 	tl := tailOf(t, b.Bytes())
 	var got []int
 	for _, pr := range tl.d.CreatedPRs {
 		got = append(got, pr.Number)
 	}
-	if !slices.Equal(got, []int{204, 205}) {
-		t.Fatalf("created = %v, want [204 205]", got)
+	// 205 is gh's "already exists" answer: the branch's pull request is not
+	// the session's (#116).
+	if !slices.Equal(got, []int{204}) {
+		t.Fatalf("created = %v, want [204]", got)
 	}
 }
 
@@ -484,4 +497,81 @@ func TestDerivesEffortFromFixture(t *testing.T) {
 	if tl.d.Effort != "xhigh" {
 		t.Fatalf("Effort = %q (the <synthetic> line must not clear it)", tl.d.Effort)
 	}
+}
+
+// One call that runs gh pr create and then another gh command: only the
+// address the create announced is the session's, not the other command's.
+func TestPRCreateWithAnotherGHCommandKeepsOnlyItsOwnAddress(t *testing.T) {
+	url := func(n string) string { return "https://github.com/example-org/example-repo/pull/" + n }
+	var b bytes.Buffer
+	toolCall(&b, "t1", "gh pr create --fill && gh pr view 402 --json url -q .url", "\nCreating pull request for worker-a into main in example-org/example-repo\n\n"+url("401")+"\n"+url("402")+"\n", false)
+	toolCall(&b, "t2", "gh pr create --fill; gh pr list --json url -q '.[].url'", "a pull request for branch \"worker-a\" into branch \"main\" already exists:\n"+url("403")+"\n"+url("404")+"\n", false)
+	// Without a terminal gh prints only the addresses: the create's is the first
+	// when it runs first, and unknown when another gh command ran before it.
+	toolCall(&b, "t3", "gh pr create --fill && gh pr checks 406 --json url", url("405")+"\n"+url("406")+"\n", false)
+	toolCall(&b, "t4", "gh pr view 407 --json url -q .url; gh pr create --fill", url("407")+"\n"+url("408")+"\n", false)
+	// A create inside bash -c, a view outside: the order is not known, so all
+	// the addresses stay, as before.
+	toolCall(&b, "t5", "bash -c 'gh pr create --fill' && gh pr view 410 --json url -q .url", url("409")+"\n"+url("410")+"\n", false)
+	tl := tailOf(t, b.Bytes())
+	var got []int
+	for _, pr := range tl.d.CreatedPRs {
+		got = append(got, pr.Number)
+	}
+	// t2: the create was refused ("already exists"), so 403 is not the
+	// session's, and 404 is the list's.
+	if !slices.Equal(got, []int{401, 405, 409, 410}) {
+		t.Fatalf("created = %v, want [401 405 409 410]", got)
+	}
+}
+
+// A pull request that gh says already exists is not one the session created:
+// the call's answer names it, the session made nothing (#116). A create that
+// succeeded in the same output still counts, before or after the refusal.
+func TestPRThatAlreadyExistsIsNotTheSessionsOwn(t *testing.T) {
+	url := func(n string) string { return "https://github.com/example-org/example-repo/pull/" + n }
+	exists := func(n string) string {
+		return "a pull request for branch \"worker-a\" into branch \"main\" already exists:\n" + url(n) + "\n"
+	}
+	for _, c := range []struct {
+		name, cmd, out string
+		want           []int
+	}{
+		{"alone", "gh pr create --fill", exists("501"), nil},
+		{"after a push", "git push -u origin worker-a && gh pr create --fill --base main", "remote: done\n" + exists("501"), nil},
+		{"no terminal, retried after the refusal", "gh pr create --fill; gh pr create --fill", exists("501") + url("502") + "\n", []int{502}},
+		{"announced create, then a refused one", "gh pr create -f; gh pr create -f -B dev", "\nCreating pull request for a into main in example-org/example-repo\n\n" + url("503") + "\n" + exists("501"), []int{503}},
+		{"refused, then a view", "gh pr create --fill; gh pr view --json url -q .url", exists("501") + url("501") + "\n", nil},
+		// The refusal exits nonzero, so the view after || is the one that runs.
+		{"refused, then the view that follows ||", "gh pr create --fill || gh pr view --json url -q .url", exists("501") + url("501") + "\n", nil},
+		{"refused in a script, the view outside", "bash -c 'gh pr create --fill' || gh pr view --json url -q .url", exists("501") + url("501") + "\n", nil},
+		{"refused in a script, another pull request's view outside", "bash -c 'gh pr create --fill' || gh pr view 504 --json url -q .url", exists("501") + url("504") + "\n", nil},
+		{"refused, the view in a script", "gh pr create --fill || bash -c 'gh pr view --json url -q .url'", exists("501") + url("501") + "\n", nil},
+		{"refused, then an announced create", "gh pr create -f; gh pr list --json url -q '.[].url'; gh pr create -f -B dev", exists("501") + url("504") + "\n\nCreating pull request for b into dev in example-org/example-repo\n\n" + url("505") + "\n", []int{505}},
+		// 40 addresses of the list before the announced create do not push it out.
+		{"a long list, then an announced create", "gh pr list --json url -q '.[].url'; gh pr create -f", manyURLs(40) + "\nCreating pull request for a into main in example-org/example-repo\n\n" + url("506") + "\n", []int{506}},
+		// Success without a terminal: a bare address, and an ordinary warning on stderr.
+		{"no terminal, a warning, a bare address", "gh pr create --fill", "Warning: 2 uncommitted changes\n" + url("507") + "\n", []int{507}},
+		{"no terminal, a warning, a bare address, then a view", "gh pr create --fill && gh pr view 508 --json url -q .url", "Warning: 2 uncommitted changes\n" + url("507") + "\n" + url("508") + "\n", []int{507}},
+		{"unrelated text ending in already exists:, then a view", "gh pr create --fill && gh pr view 508 --json body -q .body", url("507") + "\nThis behavior already exists:\nmore\n", []int{507}},
+	} {
+		var b bytes.Buffer
+		toolCall(&b, "t1", c.cmd, c.out, false)
+		var got []int
+		for _, pr := range tailOf(t, b.Bytes()).d.CreatedPRs {
+			got = append(got, pr.Number)
+		}
+		if !slices.Equal(got, c.want) {
+			t.Errorf("%s: created = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// manyURLs is n pull request addresses, one per line, of other pull requests.
+func manyURLs(n int) string {
+	var b strings.Builder
+	for i := 1; i <= n; i++ {
+		fmt.Fprintf(&b, "https://github.com/example-org/example-repo/pull/%d\n", 1000+i)
+	}
+	return b.String()
 }

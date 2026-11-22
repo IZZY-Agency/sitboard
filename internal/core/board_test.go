@@ -44,13 +44,15 @@ func keysOf(v any, path string, out map[string]bool) {
 
 func TestSnapshotMatchesContractGoldenShape(t *testing.T) {
 	e := newEnv(t)
-	e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Slug: exRepo, Branch: model.Of("main")})
-	e.prs.prs = []model.PullRequest{{Repo: exRepo, Number: 101, Title: "t", URL: "https://github.com/example-org/example-repo/pull/101", State: model.PRStateOpen, Checks: model.ChecksFailing, ClosingIssues: []int{7}}}
+	e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Remote: model.GitHubRepo(exRepo), Branch: model.Of("main")})
+	e.prs.prs = []model.PullRequest{{Repo: model.GitHubRepo(exRepo), Number: 101, Title: "t", URL: "https://github.com/example-org/example-repo/pull/101", State: model.PRStateOpen, Checks: model.ChecksFailing, ClosingIssues: []int{7}}}
 	s := session("s1", model.StatusFinished, tNow)
-	s.CreatedPRs = []model.PRRef{{Repo: exRepo, Number: 101}}
+	s.CreatedPRs = []model.PRRef{{Repo: model.GitHubRepo(exRepo), Number: 101}}
 	s.Artifacts = []model.ArtifactRef{{URL: "https://claude.ai/artifact/exampleArtifact0001", Title: "Placeholder", PublishedAt: tNow}}
 	s.TerminalID = termUUID
 	s.Parent = model.Of(claudeKey("c"))
+	s.Spend = model.Spend{Tokens: model.Tokens{Output: 10}, USD: 1, Priced: true,
+		Spans: []model.SpendSpan{{At: tNow.Truncate(model.SpendSpanLength), Tokens: model.Tokens{Output: 10}, USD: 1, Priced: true}}}
 	e.board.applySync(session("c", model.StatusBusy, tNow))
 	e.board.applySync(s)
 	e.board.applySync(model.TerminalFact{ID: termUUID, Workspace: "alpha", HasAgent: true})
@@ -243,9 +245,9 @@ func TestTickRaisesStaleFlag(t *testing.T) {
 
 func TestTickMovesCardOutOfDoneAfter24h(t *testing.T) {
 	e := newEnv(t)
-	e.prs.prs = []model.PullRequest{{Repo: exRepo, Number: 101, State: model.PRStateMerged, ClosedAt: tNow.Add(-time.Hour)}}
+	e.prs.prs = []model.PullRequest{{Repo: model.GitHubRepo(exRepo), Number: 101, State: model.PRStateMerged, ClosedAt: tNow.Add(-time.Hour)}}
 	s := session("s1", model.StatusFinished, tNow.Add(-2*time.Hour))
-	s.CreatedPRs = []model.PRRef{{Repo: exRepo, Number: 101}}
+	s.CreatedPRs = []model.PRRef{{Repo: model.GitHubRepo(exRepo), Number: 101}}
 	e.board.applySync(s)
 	_ = e.board.MarkSeen("claude:s1")
 	e.board.tick()
@@ -262,10 +264,10 @@ func TestTickMovesCardOutOfDoneAfter24h(t *testing.T) {
 func TestTickDropsEndedCardWhenItsWindowCloses(t *testing.T) {
 	withFullEndedRule(t)
 	e := newEnv(t)
-	e.prs.prs = []model.PullRequest{{Repo: exRepo, Number: 101, State: model.PRStateClosed, ClosedAt: tNow.Add(-time.Hour)}}
+	e.prs.prs = []model.PullRequest{{Repo: model.GitHubRepo(exRepo), Number: 101, State: model.PRStateClosed, ClosedAt: tNow.Add(-time.Hour)}}
 	s := session("s1", model.StatusFinished, tNow.Add(-2*time.Hour))
 	s.Ended, s.EndedAt = true, tNow.Add(-time.Hour)
-	s.CreatedPRs = []model.PRRef{{Repo: exRepo, Number: 101}}
+	s.CreatedPRs = []model.PRRef{{Repo: model.GitHubRepo(exRepo), Number: 101}}
 	e.board.applySync(s)
 	e.board.tick()
 	if n := len(e.board.Snapshot().Cards); n != 1 {
@@ -300,10 +302,10 @@ func TestRunRefreshesGitHubOncePerMinutePerLiveRepo(t *testing.T) {
 	e := newEnv(t)
 	const other = "example-org/other-repo"
 	live := session("s1", model.StatusBusy, tNow)
-	live.CreatedPRs = []model.PRRef{{Repo: exRepo, Number: 101}}
+	live.CreatedPRs = []model.PRRef{{Repo: model.GitHubRepo(exRepo), Number: 101}}
 	old := session("s2", model.StatusFinished, tNow.Add(-10*24*time.Hour))
 	old.Ended, old.EndedAt = true, tNow.Add(-10*24*time.Hour)
-	old.CreatedPRs = []model.PRRef{{Repo: other, Number: 5}}
+	old.CreatedPRs = []model.PRRef{{Repo: model.GitHubRepo(other), Number: 5}}
 	e.board.applySync(live)
 	e.board.applySync(old)
 	for i := 0; i <= 12; i++ { // T .. T+2m in 10 s ticks
@@ -328,7 +330,7 @@ func TestGitHubOffNeverLooksUp(t *testing.T) {
 	e := newEnv(t)
 	e.board.SetSources([]source.Status{{Kind: source.KindGitHub, State: source.StateOff}})
 	s := session("s1", model.StatusBusy, tNow)
-	s.CreatedPRs = []model.PRRef{{Repo: exRepo, Number: 101}}
+	s.CreatedPRs = []model.PRRef{{Repo: model.GitHubRepo(exRepo), Number: 101}}
 	e.board.applySync(s)
 	e.board.tick()
 	if n := e.prs.callsFor(exRepo); n != 0 {
@@ -338,13 +340,13 @@ func TestGitHubOffNeverLooksUp(t *testing.T) {
 
 func TestNewPRRefIsLookedUpWithoutWaitingForTheMinute(t *testing.T) {
 	e := newEnv(t)
-	e.prs.prs = []model.PullRequest{{Repo: exRepo, Number: 101, Title: "Fresh", State: model.PRStateOpen}}
+	e.prs.prs = []model.PullRequest{{Repo: model.GitHubRepo(exRepo), Number: 101, Title: "Fresh", State: model.PRStateOpen}}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- e.board.Run(ctx) }()
 	s := session("s1", model.StatusFinished, tNow)
-	s.CreatedPRs = []model.PRRef{{Repo: exRepo, Number: 101}}
+	s.CreatedPRs = []model.PRRef{{Repo: model.GitHubRepo(exRepo), Number: 101}}
 	e.board.Apply(s) // Run is resolving concurrently; the loop below waits
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
@@ -372,23 +374,5 @@ func TestRunStopsWhenContextEnds(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("Run did not stop")
-	}
-}
-
-func TestBranchMovesAreResolvedAgain(t *testing.T) {
-	e := newEnv(t)
-	e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Slug: exRepo, Branch: model.Of("one")})
-	s := session("c1", model.StatusFinished, tNow)
-	s.Key = model.SessionKey{Tool: model.ToolCodex, ID: "c1"}
-	e.board.applySync(s)
-	e.board.tick()
-	e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Slug: exRepo, Branch: model.Of("two")})
-	e.prs.prs = []model.PullRequest{{Repo: exRepo, Number: 9, HeadBranch: "two", State: model.PRStateOpen}}
-	e.clock.Set(tNow.Add(time.Minute))
-	e.board.tick()
-	e.clock.Set(tNow.Add(2 * time.Minute))
-	e.board.tick()
-	if c := onlyCard(t, e.board); len(c.PullRequests) != 1 || c.PullRequests[0].Number != 9 {
-		t.Fatalf("pull requests %+v after the branch moved", c.PullRequests)
 	}
 }

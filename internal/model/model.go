@@ -17,6 +17,7 @@ package model
 
 import (
 	"math"
+	"path"
 	"regexp"
 	"strconv"
 	"time"
@@ -61,10 +62,21 @@ type SessionKey struct {
 	ID   string // the tool's own session id
 }
 
-// PRRef points at a pull request. Repo is "owner/name".
+// PRRef points at a pull request (GitHub) or a merge request (GitLab): the
+// names say "pull request" for both. Comparable, so it keys maps.
 type PRRef struct {
-	Repo   string
-	Number int
+	Repo   ForgeRepo
+	Number int // GitHub's number; GitLab's iid (shown as !12)
+}
+
+// PushedRef is a merge request that a `git push -o merge_request.create`
+// announced. GitLab prints the same answer whether the push created it or one
+// was already open, so the core credits Ref (also in CreatedPRs) only when
+// GitLab says it was created between From and To, widened for clock skew. Kept in
+// memory only.
+type PushedRef struct {
+	Ref      PRRef
+	From, To time.Time // the push call's start and its result
 }
 
 // ArtifactURLPattern is the only form of artifact link a fact may carry: a
@@ -150,10 +162,11 @@ type SessionFact struct {
 	ToolVersion string // "" when unknown
 
 	Model Known[string]
-	// Effort is the reasoning effort level, one of EffortLevels. Claude Code:
-	// the level the session's last reply ran at, as its transcript records it.
-	// Before the first reply, the level the process was launched with
-	// (EffortAtLaunch); it is replaced by the recorded one.
+	// Effort is the reasoning effort level, one of EffortLevels or another
+	// word the tool recorded. Claude Code: the level the session's last reply
+	// ran at, as its transcript records it. Before the first reply, the level
+	// the process was launched with (EffortAtLaunch); it is replaced by the
+	// recorded one. Codex: the effort of the latest turn, as written.
 	Effort         Known[string]
 	EffortAtLaunch bool
 
@@ -172,13 +185,19 @@ type SessionFact struct {
 	EndedAt time.Time // zero when not ended or when the end time is unknown
 
 	Folder string // latest working folder, absolute; "" when unknown
+	// PID is the process running the session while it is live, as the tool
+	// recorded it and its start time confirmed; 0 when unknown or not live.
+	PID int
 
-	// Parent is only for tools that record a parent natively (Codex's
-	// parent_thread_id). Adapters never derive it from spawn commands or
-	// messages; OK=false means no native parent was recorded.
+	// Parent is only for tools that record a parent natively as a separate
+	// session. None does today: Codex's parent_thread_id names the thread
+	// that spawned an in-process subagent, which is counted in Subagents
+	// instead. Adapters never derive it from spawn commands or messages;
+	// OK=false means no native parent was recorded.
 	Parent Known[SessionKey]
 
-	// Who spawned whom, for tools without a native parent (Claude Code). These
+	// Who spawned whom, for tools without a native parent (Claude Code,
+	// Codex). These
 	// list what this session's own session-creating calls (for example
 	// `agtermctl session new`) produced:
 	//   - SpawnedTerminalIDs: the agterm session ids those calls returned.
@@ -215,17 +234,79 @@ type SessionFact struct {
 	// matched children is a sign that this session is someone's worker.
 	PeerSenders []string
 
-	TerminalID string  // agterm session id, "" when none
+	TerminalID string // agterm session id, "" when none
+	// Tmux is the tmux pane the session runs in, zero when none. A session in
+	// tmux inside agterm has both; the jump goes through tmux.
+	Tmux       TmuxPane
 	Subagents  int     // in-process subagents seen
-	CreatedPRs []PRRef // only pull requests this session created
+	CreatedPRs []PRRef // only pull and merge requests this session created
+	// PushedPRs are those of CreatedPRs that a push option announced, with
+	// the push call's times; none until the transcript matchers learn
+	// GitLab's push option.
+	PushedPRs []PushedRef
 	// Artifacts are the claude.ai artifacts this session (or one of its
 	// in-process subagents) published itself, one per URL. A delete is not
 	// followed, and a rename made anywhere else is not seen.
 	Artifacts []ArtifactRef
 	TurnEnds  []time.Time // finished turns, last 7 days, oldest first
+
+	// Spend is the session's token use and its estimated cost, with its
+	// in-process subagents. Its zero value means none was recorded.
+	Spend Spend
 }
 
-// EffortLevels are Claude Code's reasoning effort levels, lowest first.
+// Tokens are token counts as the tool records them for its replies.
+type Tokens struct {
+	Input      int64 // input not read from the cache
+	Output     int64
+	CacheRead  int64
+	CacheWrite int64
+}
+
+// Add returns the sum of t and u.
+func (t Tokens) Add(u Tokens) Tokens {
+	return Tokens{t.Input + u.Input, t.Output + u.Output, t.CacheRead + u.CacheRead, t.CacheWrite + u.CacheWrite}
+}
+
+// IsZero reports whether no token was counted.
+func (t Tokens) IsZero() bool { return t == Tokens{} }
+
+// Spend is token use with its cost estimated at API list price. USD is an
+// estimate, never a bill, and means something only when Priced: a model
+// without a price makes the whole figure unpriced, so no part of a cost is
+// ever guessed.
+type Spend struct {
+	Tokens Tokens
+	USD    float64
+	Priced bool
+	// Recorded: USD is the total the tool itself wrote when the session
+	// ended (Claude Code's cost-state line), which also counts calls that
+	// leave no transcript line. Otherwise it is computed from the counted
+	// tokens and the tool's price table.
+	Recorded bool
+	// Spans split the counted tokens and their computed cost by the quarter
+	// hour they were used in (UTC), oldest first, for the last 7 days only. A
+	// quarter hour never straddles a local midnight, in any time zone. Their
+	// sum can be lower than the whole (older spans, and a
+	// recorded total).
+	Spans []SpendSpan
+}
+
+// SpendSpanLength is the length of a SpendSpan: the largest step that every
+// time zone's midnight (offsets are whole quarter hours) falls on.
+const SpendSpanLength = 15 * time.Minute
+
+// SpendSpan is the spend within one SpendSpanLength.
+type SpendSpan struct {
+	At     time.Time // the start of the span, UTC
+	Tokens Tokens
+	USD    float64
+	Priced bool
+}
+
+// EffortLevels are the reasoning effort levels sitboard ranks, lowest first
+// (Claude Code's). Another word a tool records (Codex's "ultra") is passed on
+// as written, without a place on the ramp.
 var EffortLevels = []string{"low", "medium", "high", "xhigh", "max"}
 
 // KnownEffort returns the EffortLevels constant equal to s, otherwise "".
@@ -255,6 +336,12 @@ type SourceReady struct{ Kind string }
 // still grow with items from earlier sessions.
 type BackfillDone struct{ Kind string }
 
+// Batch is facts taken together, in order: the board applies them all and
+// rebuilds once. A watcher publishes the sessions it read at start this way,
+// in bounded chunks, so that thousands of ended sessions do not cost one
+// rebuild each. A Batch holds no Batch.
+type Batch struct{ Facts []Fact }
+
 // TerminalFact is the agterm adapter's complete current view of one terminal
 // session. It replaces the previous TerminalFact with the same ID.
 type TerminalFact struct {
@@ -283,19 +370,100 @@ func (TerminalGone) isFact()     {}
 func (TerminalSelected) isFact() {}
 func (SourceReady) isFact()      {}
 func (BackfillDone) isFact()     {}
+func (Batch) isFact()            {}
 
 // Repo is what git says about a folder.
 type Repo struct {
 	Root     string        // the repo (or worktree) root; the folder itself when it is not in a repo
 	MainRoot string        // the main repo root a worktree belongs to; == Root for a main checkout or no repo
 	Branch   Known[string] // OK=false on a detached HEAD or outside a repo
-	Slug     string        // "owner/name" of the GitHub remote, "" when none
+	// Remote is the repository on a forge that origin's one fetch address
+	// names; zero when none, several, or on no forge sitboard knows.
+	Remote ForgeRepo
+	// OriginUnclear: origin has more than one fetch address, one of them on
+	// GitHub. Remote is zero: which GitHub repository it is cannot be told.
+	OriginUnclear bool
 }
 
-// Worktree is one git worktree of a repo.
+// Worktree is one git worktree of a repo, as `git worktree list` gives it.
 type Worktree struct {
-	Path   string
-	Branch Known[string]
+	Path     string
+	Branch   Known[string] // OK=false on a detached HEAD
+	Main     bool          // the main checkout (listed first)
+	Locked   bool
+	Prunable bool // its folder is gone
+	Bare     bool
+	// Busy are the branches an operation under way in this worktree holds:
+	// the one a rebase or bisect will return to, and those a rebase
+	// --update-refs queued; none when none.
+	Busy []string
+	// GitDir is the worktree's own git folder (the common one for the main
+	// checkout), absolute.
+	GitDir string
+	// Operation: a merge, cherry-pick, revert, rebase, bisect or sequence is
+	// under way here; removing the worktree would discard it.
+	Operation bool
+}
+
+// Proc is one running process of this user and the folder it works in.
+type Proc struct {
+	PID, PPID int
+	Cwd       string // absolute and cleaned
+}
+
+// Branch is a local branch and the commit it points at.
+type Branch struct {
+	Name string // without refs/heads/
+	Tip  string // full commit id
+	// Symbolic: the ref is a symbolic ref, or another symbolic ref under
+	// refs/heads points at it; deleting it would delete or break another.
+	Symbolic bool
+}
+
+// Stash is one entry of `git stash list`.
+type Stash struct {
+	Base    string // the commit the stash was made on
+	Subject string // "On <branch>: ..." or "WIP on <branch>: ..."; git's own reflog subject
+}
+
+// RepoInventory is what git says about a repo's worktrees, branches and
+// stashes, read in one round of read-only calls.
+type RepoInventory struct {
+	Worktrees []Worktree
+	Branches  []Branch // local branches
+	Remote    []Branch // branches under refs/remotes/origin/, without the prefix; HEAD left out
+	Stashes   []Stash
+	// CommonDir is the repo's shared git folder, absolute.
+	CommonDir string
+	// Origin is origin's one fetch address as a GitHub repository; zero
+	// otherwise (none, several, or elsewhere). Leftovers is GitHub only.
+	Origin ForgeRepo
+}
+
+// TreeStatus is what git says about one worktree: where it found it, what
+// is checked out there, and its files.
+type TreeStatus struct {
+	Clean   bool // nothing modified, staged or untracked
+	Ignored int  // ignored entries (a wholly ignored folder counts once)
+	// Top, GitDir and CommonDir are the worktree's folder, its own git
+	// folder and the repo's shared one, absolute, as git finds them from the
+	// folder: a folder replaced since the inventory shows other ones.
+	Top, GitDir, CommonDir string
+	Head                   string // the checked-out ref, "refs/heads/<b>"; "" when detached
+	Tip                    string // the checked-out commit
+}
+
+// PREvidence is GitHub's fresh answer about head branch names, for
+// Leftovers.
+type PREvidence struct {
+	PRs []PullRequest
+	// Incomplete names the heads whose pull requests may not all be in PRs:
+	// more than one page of them, or an answer with a part missing.
+	Incomplete map[string]bool
+	// Bases names the heads that are the base branch of an open pull
+	// request into the repository (a stacked one): the branch on GitHub is
+	// still in use.
+	Bases map[string]bool
 }
 
 // PRState is the state of a pull request.
@@ -328,12 +496,13 @@ const (
 	ReviewNone             Review = ""
 )
 
-// PullRequest is what GitHub says about one pull request.
+// PullRequest is what GitHub says about one pull request, or GitLab about
+// one merge request.
 type PullRequest struct {
-	Repo          string // "owner/name"
-	Number        int
+	Repo          ForgeRepo
+	Number        int // GitLab: the iid
 	Title         string
-	URL           string // PullRequestURL(Repo, Number): built, never read from gh
+	URL           string // ChangeRequestURL(Repo, Number): built, never read from gh or glab
 	HeadBranch    string
 	State         PRState
 	Draft         bool
@@ -342,4 +511,77 @@ type PullRequest struct {
 	ClosingIssues []int // issues in the same repo this pull request closes
 	OpenedAt      time.Time
 	ClosedAt      time.Time // merged or closed time; zero while open
+	// HeadOID is the commit the pull request's head branch pointed at last
+	// (GitHub keeps it after the branch is deleted); "" when unknown.
+	// A fork's pull request has none: its commits are another repository's.
+	HeadOID    string
+	BaseBranch string // the branch it targets; "" when unknown
+	// BaseIsDefault: the pull request targets the repo's default branch.
+	BaseIsDefault bool
+	// HeadRefOID is the commit the head branch on GitHub points at now; ""
+	// when that branch is gone or unknown.
+	HeadRefOID string
+}
+
+// TmuxPane is a tmux pane on one tmux server, read from the TMUX and TMUX_PANE
+// variables of the session's process. Zero when the session is not in tmux.
+// Those variables are inherited and can be stale (a program started from a
+// tmux pane, a restarted server), so the pane is kept only once tmux confirms
+// it shows TTY, the terminal of the session's own process; a jump confirms it
+// again.
+type TmuxPane struct {
+	Socket string // the server's socket, an absolute path
+	Pane   string // the pane id, "%" and digits
+	TTY    string // the session's process's terminal, "/dev/..."
+	// PID and Start are the session's process and its start time as ps
+	// printed it (lstart) when the pane was confirmed, so a click can confirm
+	// it is still the same process before focusing the pane.
+	PID   int
+	Start string
+}
+
+var (
+	tmuxPaneRe   = regexp.MustCompile(`^%[0-9]{1,9}$`)
+	tmuxSocketRe = regexp.MustCompile(`^/[A-Za-z0-9._@+/-]{1,200}$`)
+	ttyRe        = regexp.MustCompile(`^/dev/[A-Za-z0-9._/-]{1,64}$`)
+)
+
+// ValidPlace says whether p's pane and socket have their shapes: a pane id
+// "%N" and an absolute, clean socket path of plain characters (no space,
+// comma or control character). The tty is not looked at.
+func (p TmuxPane) ValidPlace() bool {
+	return tmuxPaneRe.MatchString(p.Pane) && tmuxSocketRe.MatchString(p.Socket) && path.Clean(p.Socket) == p.Socket
+}
+
+// Valid says whether p has the shape of a tmux pane on a tmux socket showing
+// a terminal: ValidPlace, and a clean tty path under /dev of plain
+// characters. Only a valid pane is kept or passed to tmux.
+func (p TmuxPane) Valid() bool {
+	return p.ValidPlace() && ValidTTY(p.TTY)
+}
+
+// ValidTTY says whether tty has the shape of a terminal's path: /dev/ and
+// plain characters, clean.
+func ValidTTY(tty string) bool {
+	return ttyRe.MatchString(tty) && path.Clean(tty) == tty
+}
+
+// FocusKind names the program that can focus a session.
+type FocusKind string
+
+// The focus kinds.
+const (
+	FocusAgterm FocusKind = "agterm"
+	FocusTmux   FocusKind = "tmux"
+)
+
+// FocusTarget is where a card's jump goes: an agterm session (ID is its
+// session id) or a tmux pane (ID is the pane id, Socket its server's socket).
+type FocusTarget struct {
+	Kind   FocusKind
+	ID     string
+	Socket string
+	TTY    string // tmux: the terminal the pane must show, the session's own
+	PID    int    // tmux: the session's process, which must still run...
+	Start  string // ...with this start time, as ps printed it
 }

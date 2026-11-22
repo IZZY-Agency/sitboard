@@ -78,7 +78,7 @@ func newTestProvider(f *fakeGh, c *clock) *provider {
 func TestLookupByNumberAndByBranchInOneCall(t *testing.T) {
 	f := &fakeGh{reply: func([]string) ([]byte, error) { return fixture(t, "lookup.json"), nil }}
 	p := newTestProvider(f, &clock{t: time.Now()})
-	prs, err := p.Lookup(context.Background(), repo, []int{102, 101, 101}, []string{"worker-c", "worker-d"})
+	prs, err := p.Lookup(context.Background(), model.GitHubRepo(repo), []int{102, 101, 101}, []string{"worker-c", "worker-d"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +127,7 @@ func TestMapsChecks(t *testing.T) {
 		}
 	}
 	f := &fakeGh{reply: func([]string) ([]byte, error) { return fixture(t, "lookup.json"), nil }}
-	prs, _ := newTestProvider(f, &clock{t: time.Now()}).Lookup(context.Background(), repo, []int{101, 102}, []string{"worker-c", "worker-d"})
+	prs, _ := newTestProvider(f, &clock{t: time.Now()}).Lookup(context.Background(), model.GitHubRepo(repo), []int{101, 102}, []string{"worker-c", "worker-d"})
 	got := map[int]model.Checks{}
 	for _, pr := range prs {
 		got[pr.Number] = pr.Checks
@@ -142,7 +142,7 @@ func TestMapsChecks(t *testing.T) {
 
 func TestMapsStateAndClosingIssues(t *testing.T) {
 	f := &fakeGh{reply: func([]string) ([]byte, error) { return fixture(t, "lookup.json"), nil }}
-	prs, err := newTestProvider(f, &clock{t: time.Now()}).Lookup(context.Background(), repo, []int{101, 102}, []string{"worker-c", "worker-d"})
+	prs, err := newTestProvider(f, &clock{t: time.Now()}).Lookup(context.Background(), model.GitHubRepo(repo), []int{101, 102}, []string{"worker-c", "worker-d"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +152,7 @@ func TestMapsStateAndClosingIssues(t *testing.T) {
 	}
 	a := by[101]
 	if a.State != model.PRStateOpen || a.Review != model.ReviewRequired || !slices.Equal(a.ClosingIssues, []int{7}) ||
-		a.Repo != repo || a.HeadBranch != "worker-a" || !a.ClosedAt.IsZero() || a.OpenedAt.IsZero() {
+		a.Repo != model.GitHubRepo(repo) || a.HeadBranch != "worker-a" || !a.ClosedAt.IsZero() || a.OpenedAt.IsZero() {
 		t.Errorf("#101 = %+v", a)
 	}
 	b := by[102]
@@ -170,7 +170,7 @@ func TestPartialNotFoundKeepsTheRest(t *testing.T) {
 		return nil, &runner.ExitError{Code: 1, Stdout: fixture(t, "partial-not-found.json"), Stderr: []byte("gh: Could not resolve to a PullRequest")}
 	}}
 	p := newTestProvider(f, &clock{t: time.Now()})
-	prs, err := p.Lookup(context.Background(), repo, []int{102, 999}, nil)
+	prs, err := p.Lookup(context.Background(), model.GitHubRepo(repo), []int{102, 999}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,11 +187,11 @@ func TestSecondLookupWithin60sIsServedFromCache(t *testing.T) {
 	c := &clock{t: time.Now()}
 	p := newTestProvider(f, c)
 	ctx := context.Background()
-	if _, err := p.Lookup(ctx, repo, []int{101, 102}, []string{"worker-c", "worker-d"}); err != nil {
+	if _, err := p.Lookup(ctx, model.GitHubRepo(repo), []int{101, 102}, []string{"worker-c", "worker-d"}); err != nil {
 		t.Fatal(err)
 	}
 	c.t = c.t.Add(59 * time.Second)
-	prs, err := p.Lookup(ctx, repo, []int{102, 101}, []string{"worker-d", "worker-c"})
+	prs, err := p.Lookup(ctx, model.GitHubRepo(repo), []int{102, 101}, []string{"worker-d", "worker-c"})
 	if err != nil || len(prs) != 4 {
 		t.Fatalf("cached lookup = %d prs, %v", len(prs), err)
 	}
@@ -199,7 +199,7 @@ func TestSecondLookupWithin60sIsServedFromCache(t *testing.T) {
 		t.Fatalf("api calls = %d, want 1", f.apiCalls())
 	}
 	c.t = c.t.Add(2 * time.Second)
-	if _, err := p.Lookup(ctx, repo, []int{101, 102}, []string{"worker-c", "worker-d"}); err != nil {
+	if _, err := p.Lookup(ctx, model.GitHubRepo(repo), []int{101, 102}, []string{"worker-c", "worker-d"}); err != nil {
 		t.Fatal(err)
 	}
 	if f.apiCalls() != 2 {
@@ -214,7 +214,7 @@ func TestOffNeverRunsGh(t *testing.T) {
 	if st := p.Probe(context.Background()); st.State != source.StateOff {
 		t.Fatalf("Probe = %+v", st)
 	}
-	prs, err := p.Lookup(context.Background(), repo, []int{1}, []string{"x"})
+	prs, err := p.Lookup(context.Background(), model.GitHubRepo(repo), []int{1}, []string{"x"})
 	if err != nil || prs != nil {
 		t.Fatalf("Lookup while off = %v, %v", prs, err)
 	}
@@ -225,7 +225,7 @@ func TestGhMissingReportsMissing(t *testing.T) {
 	if st := p.Probe(context.Background()); st.State != source.StateMissing || st.Kind != source.KindGitHub {
 		t.Fatalf("Probe = %+v", st)
 	}
-	if _, err := p.Lookup(context.Background(), repo, []int{1}, nil); err == nil {
+	if _, err := p.Lookup(context.Background(), model.GitHubRepo(repo), []int{1}, nil); err == nil {
 		t.Fatal("Lookup with gh missing must fail")
 	}
 }
@@ -238,7 +238,7 @@ func TestLoggedOutReportsFailing(t *testing.T) {
 	if st.State != source.StateFailing || st.Detail != "not logged in to github.com" || st.Version != "2.104.0" || !st.Tested {
 		t.Fatalf("Probe = %+v", st)
 	}
-	if _, err := p.Lookup(context.Background(), repo, []int{1}, nil); err == nil {
+	if _, err := p.Lookup(context.Background(), model.GitHubRepo(repo), []int{1}, nil); err == nil {
 		t.Fatal("Lookup while logged out must fail")
 	}
 }
@@ -263,7 +263,7 @@ func TestSlowGhTimesOutAt10s(t *testing.T) {
 	p := New(Options{Bin: slow}).(*provider)
 	p.timeout = 50 * time.Millisecond
 	start := time.Now()
-	_, err := p.Lookup(context.Background(), repo, []int{1}, nil)
+	_, err := p.Lookup(context.Background(), model.GitHubRepo(repo), []int{1}, nil)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v, want deadline exceeded", err)
 	}
@@ -286,12 +286,12 @@ func TestRateLimitBacksOffAndKeepsLastResult(t *testing.T) {
 	c := &clock{t: time.Now()}
 	p := newTestProvider(f, c)
 	ctx := context.Background()
-	if _, err := p.Lookup(ctx, repo, []int{101, 102}, []string{"worker-c", "worker-d"}); err != nil {
+	if _, err := p.Lookup(ctx, model.GitHubRepo(repo), []int{101, 102}, []string{"worker-c", "worker-d"}); err != nil {
 		t.Fatal(err)
 	}
 	limited = true
 	c.t = c.t.Add(2 * time.Minute)
-	prs, err := p.Lookup(ctx, repo, []int{101, 102}, []string{"worker-c", "worker-d"})
+	prs, err := p.Lookup(ctx, model.GitHubRepo(repo), []int{101, 102}, []string{"worker-c", "worker-d"})
 	if err != nil || len(prs) != 4 {
 		t.Fatalf("rate-limited lookup = %d prs, %v; want the last result", len(prs), err)
 	}
@@ -300,7 +300,7 @@ func TestRateLimitBacksOffAndKeepsLastResult(t *testing.T) {
 	}
 	calls := f.apiCalls()
 	c.t = c.t.Add(time.Minute) // still inside the back-off
-	if _, err := p.Lookup(ctx, repo, []int{101, 102}, []string{"worker-c", "worker-d"}); err != nil {
+	if _, err := p.Lookup(ctx, model.GitHubRepo(repo), []int{101, 102}, []string{"worker-c", "worker-d"}); err != nil {
 		t.Fatal(err)
 	}
 	if f.apiCalls() != calls {
@@ -308,7 +308,7 @@ func TestRateLimitBacksOffAndKeepsLastResult(t *testing.T) {
 	}
 	limited = false
 	c.t = c.t.Add(rateLimitBackoff)
-	if _, err := p.Lookup(ctx, repo, []int{101, 102}, []string{"worker-c", "worker-d"}); err != nil {
+	if _, err := p.Lookup(ctx, model.GitHubRepo(repo), []int{101, 102}, []string{"worker-c", "worker-d"}); err != nil {
 		t.Fatal(err)
 	}
 	if f.apiCalls() != calls+1 {
@@ -324,7 +324,7 @@ func TestTitleBytesPassThroughUnchanged(t *testing.T) {
 	enc, _ := json.Marshal(hostile)
 	body := strings.Replace(string(fixture(t, "lookup.json")), `"Second thing"`, string(enc), 1)
 	f := &fakeGh{reply: func([]string) ([]byte, error) { return []byte(body), nil }}
-	prs, err := newTestProvider(f, &clock{t: time.Now()}).Lookup(context.Background(), repo, []int{101, 102}, []string{"worker-c", "worker-d"})
+	prs, err := newTestProvider(f, &clock{t: time.Now()}).Lookup(context.Background(), model.GitHubRepo(repo), []int{101, 102}, []string{"worker-c", "worker-d"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -341,13 +341,13 @@ func TestHostileValuesStayData(t *testing.T) {
 	f := &fakeGh{reply: func([]string) ([]byte, error) { return []byte(`{"data":{"repository":{}}}`), nil }}
 	p := newTestProvider(f, &clock{t: time.Now()})
 	hostile := []string{"--hostname=evil.example", "-R", "x", "@/etc/passwd", "{owner}", "--jq=.x"}
-	if _, err := p.Lookup(context.Background(), "-R/x", []int{1}, nil); err == nil {
+	if _, err := p.Lookup(context.Background(), model.GitHubRepo("-R/x"), []int{1}, nil); err == nil {
 		t.Fatal("repo starting with a dash accepted")
 	}
-	if _, err := p.Lookup(context.Background(), "--hostname=x/y", []int{1}, nil); err == nil {
+	if _, err := p.Lookup(context.Background(), model.GitHubRepo("--hostname=x/y"), []int{1}, nil); err == nil {
 		t.Fatal("repo with an option shape accepted")
 	}
-	if _, err := p.Lookup(context.Background(), repo, []int{1}, hostile); err != nil {
+	if _, err := p.Lookup(context.Background(), model.GitHubRepo(repo), []int{1}, hostile); err != nil {
 		t.Fatal(err)
 	}
 	args := f.calls[len(f.calls)-1]
@@ -370,21 +370,35 @@ func TestRejectsBadRepoAndCapsInputs(t *testing.T) {
 	f := &fakeGh{reply: func([]string) ([]byte, error) { return []byte(`{"data":{"repository":{}}}`), nil }}
 	p := newTestProvider(f, &clock{t: time.Now()})
 	for _, bad := range []string{"", "a", "a/b/c", "-x/y", "a/../b", "../a"} {
-		if _, err := p.Lookup(context.Background(), bad, []int{1}, nil); err == nil {
+		if _, err := p.Lookup(context.Background(), model.GitHubRepo(bad), []int{1}, nil); err == nil {
 			t.Errorf("repo %q accepted", bad)
+		}
+	}
+	// A repo on another forge or host is never asked of gh, even with a path
+	// gh would accept.
+	for _, other := range []model.ForgeRepo{
+		model.GitLabRepo("gitlab.com", repo),
+		{Forge: model.ForgeGitHub, Host: "github.example.com", Path: repo},
+		{Path: repo},
+	} {
+		if _, err := p.Lookup(context.Background(), other, []int{1}, nil); err == nil {
+			t.Errorf("Lookup accepted %+v", other)
+		}
+		if _, err := p.Evidence(context.Background(), other, []string{"b"}); err == nil {
+			t.Errorf("Evidence accepted %+v", other)
 		}
 	}
 	if f.apiCalls() != 0 {
 		t.Fatal("gh ran for a bad repo")
 	}
-	if prs, err := p.Lookup(context.Background(), repo, nil, nil); err != nil || prs != nil || f.apiCalls() != 0 {
+	if prs, err := p.Lookup(context.Background(), model.GitHubRepo(repo), nil, nil); err != nil || prs != nil || f.apiCalls() != 0 {
 		t.Fatal("empty lookup must not run gh")
 	}
 	many := make([]string, 500)
 	for i := range many {
 		many[i] = strings.Repeat("b", i+1)
 	}
-	if _, err := p.Lookup(context.Background(), repo, []int{-1, 0, 5}, append(many, "", "x\x00y")); err != nil {
+	if _, err := p.Lookup(context.Background(), model.GitHubRepo(repo), []int{-1, 0, 5}, append(many, "", "x\x00y")); err != nil {
 		t.Fatal(err)
 	}
 	branchVars := 0
@@ -412,7 +426,7 @@ func TestBranchLookupDropsForkPullRequests(t *testing.T) {
 		}
 		return []byte(body), nil
 	}}
-	prs, err := newTestProvider(f, &clock{t: time.Now()}).Lookup(context.Background(), repo, []int{110}, []string{"main"})
+	prs, err := newTestProvider(f, &clock{t: time.Now()}).Lookup(context.Background(), model.GitHubRepo(repo), []int{110}, []string{"main"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -431,7 +445,7 @@ func TestRepoNotFoundDoesNotFailTheSource(t *testing.T) {
 			Stderr: []byte("gh: Could not resolve to a Repository with the name 'example-org/gone'.")}
 	}}
 	p := newTestProvider(f, &clock{t: time.Now()})
-	if _, err := p.Lookup(context.Background(), "example-org/gone", []int{1}, nil); !errors.Is(err, source.ErrRepoNotFound) {
+	if _, err := p.Lookup(context.Background(), model.GitHubRepo("example-org/gone"), []int{1}, nil); !errors.Is(err, source.ErrRepoNotFound) {
 		t.Fatalf("err %v, want source.ErrRepoNotFound", err)
 	}
 	if st := p.Probe(context.Background()); st.State != source.StateOK {
@@ -450,7 +464,7 @@ func TestConcurrentSameLookupsShareOneCall(t *testing.T) {
 	results := make([]int, 5)
 	for i := range results {
 		wg.Go(func() {
-			prs, err := p.Lookup(context.Background(), repo, []int{101, 102}, []string{"worker-c", "worker-d"})
+			prs, err := p.Lookup(context.Background(), model.GitHubRepo(repo), []int{101, 102}, []string{"worker-c", "worker-d"})
 			if err != nil {
 				t.Error(err)
 			}
@@ -477,7 +491,7 @@ func TestBuildsThePullRequestAddress(t *testing.T) {
 		`"n0":{"number":5,"title":"t","url":"javascript:alert(1)","headRefName":"x","state":"OPEN","createdAt":"2026-11-16T09:00:00Z"},` +
 		`"n1":{"number":6,"title":"t","url":"https://evil.example/example-org/example-repo/pull/6","headRefName":"y","state":"MERGED","createdAt":"2026-11-16T09:00:00Z"}}}}`
 	f := &fakeGh{reply: func([]string) ([]byte, error) { return []byte(answer), nil }}
-	prs, err := newTestProvider(f, &clock{t: time.Now()}).Lookup(context.Background(), repo, []int{5, 6}, nil)
+	prs, err := newTestProvider(f, &clock{t: time.Now()}).Lookup(context.Background(), model.GitHubRepo(repo), []int{5, 6}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

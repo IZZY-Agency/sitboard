@@ -1,10 +1,17 @@
-package claude
+// Package shellcmd splits a shell command line from an agent's record into
+// words, to find the commands it ran (`gh pr create`, `agtermctl session new`),
+// and reads those commands' output for what they created. The text is
+// untrusted: it is never evaluated or run.
+package shellcmd
 
 import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
+
+	"github.com/IZZY-Agency/sitboard/internal/model"
 )
 
 // A Bash command from a transcript is untrusted text. It is split into words
@@ -18,16 +25,21 @@ const (
 
 // command is a command line split into words, roughly the way a POSIX shell
 // does it, closely enough to find agtermctl and gh and read their flags.
-type command struct {
+type Command struct {
 	words []string
 	sep   []bool // words[i] stands for a separator (; & | newline parentheses); its text is ""
 	at    []bool // words[i] is the program of a command (see positions)
+	// scripts holds where the words of each shell -c and env -S script
+	// begin: they are appended after the words of the call, not at the
+	// position of the wrapper, so the order of commands across those points
+	// is not known.
+	scripts []int
 }
 
 // shells are the shells whose -c script is read.
 var shells = []string{"bash", "sh", "zsh"}
 
-// parseCommand splits a command line into words and marks where commands
+// Parse splits a command line into words and marks where commands
 // start. The commands inside $(...) and backticks are read as commands of
 // their own, after the command they appear in. The script of a `bash -c`,
 // `sh -c` or `zsh -c`, and the string of an `env -S`, that runs at a command
@@ -35,8 +47,8 @@ var shells = []string{"bash", "sh", "zsh"}
 // inside such a script is not opened again, so deeper nesting is not
 // supported. At most maxShellScripts scripts are read, and a script longer
 // than maxShellScript is skipped.
-func parseCommand(s string) command {
-	var c command
+func Parse(s string) Command {
+	var c Command
 	c.lex(s)
 	c.positions(0)
 	top := len(c.words)
@@ -56,6 +68,7 @@ func parseCommand(s string) command {
 			continue
 		}
 		from := len(c.words)
+		c.scripts = append(c.scripts, from)
 		c.lex(script)
 		c.positions(from)
 		n++
@@ -63,11 +76,11 @@ func parseCommand(s string) command {
 	return c
 }
 
-// runs returns the positions where prog runs with args as its first
+// Runs returns the positions where prog runs with args as its first
 // arguments: at a word that starts a command (see positions). An argument of
 // another command, text inside quotes (a command substitution in it is read
 // as a command of its own), a heredoc body and a comment never count.
-func (c command) runs(prog string, args ...string) []int {
+func (c Command) Runs(prog string, args ...string) []int {
 	var out []int
 	for i, w := range c.words {
 		if !c.at[i] || i+len(args) >= len(c.words) || filepath.Base(w) != prog {
@@ -87,13 +100,13 @@ func (c command) runs(prog string, args ...string) []int {
 	return out
 }
 
-// spawnNames returns the --name values of every `agtermctl session new` in
+// SpawnNames returns the --name values of every `agtermctl session new` in
 // the command. Values that depend on the shell (a variable or a substitution)
 // are not resolved and are skipped: an unknown name is better than a guessed
 // one.
-func (c command) spawnNames() []string {
+func (c Command) SpawnNames() []string {
 	var names []string
-	for _, i := range c.runs("agtermctl", "session", "new") {
+	for _, i := range c.Runs("agtermctl", "session", "new") {
 		for j := i + 3; j < len(c.words) && !c.sep[j]; j++ {
 			var v string
 			switch w := c.words[j]; {
@@ -140,7 +153,7 @@ var wrappers = map[string]wrapper{
 // command: the first word after a separator, after VAR=value assignments, a
 // keyword, or a wrapper with its options (and timeout's duration). It is one
 // pass over the words.
-func (c *command) positions(from int) {
+func (c *Command) positions(from int) {
 	c.at = append(c.at, make([]bool, len(c.words)-len(c.at))...)
 	expect, wrap, needArg, gotDuration := true, "", false, false
 	for i := from; i < len(c.words); i++ {
@@ -193,7 +206,7 @@ func (c *command) positions(from int) {
 // option or an option's argument. An option cluster with o or O (-o NAME,
 // -euo NAME), --rcfile and --init-file take the next word. It never reads
 // past a separator.
-func (c command) shellScript(from int) (string, bool) {
+func (c Command) shellScript(from int) (string, bool) {
 	hasC := false
 	for j := from; j < len(c.words) && !c.sep[j]; j++ {
 		switch a := c.words[j]; {
@@ -224,7 +237,7 @@ func (c command) shellScript(from int) (string, bool) {
 // envScript returns the string of an `env -S STRING` (also -SSTRING and
 // --split-string[=]STRING) whose arguments start at words[from]: env splits
 // it into the command it runs. It never reads past a separator.
-func (c command) envScript(from int) (string, bool) {
+func (c Command) envScript(from int) (string, bool) {
 	for j := from; j < len(c.words) && !c.sep[j]; j++ {
 		switch a := c.words[j]; {
 		case a == "-S" || a == "--split-string":
@@ -261,12 +274,12 @@ type lexer struct {
 	s    string
 	left int       // words still allowed under maxWords
 	docs []heredoc // heredocs waiting for the end of their line
-	subs []*command
+	subs []*Command
 }
 
 // lex appends the words of s to c, then the commands of its substitutions,
 // each after a separator.
-func (c *command) lex(s string) {
+func (c *Command) lex(s string) {
 	l := lexer{s: s, left: maxWords - len(c.words)}
 	l.add(c, "", true)
 	l.run(c, 0, 0, 0)
@@ -284,7 +297,7 @@ func (c *command) lex(s string) {
 	}
 }
 
-func (l *lexer) add(c *command, w string, sep bool) {
+func (l *lexer) add(c *Command, w string, sep bool) {
 	if l.left <= 0 {
 		return
 	}
@@ -303,7 +316,7 @@ func (l *lexer) add(c *command, w string, sep bool) {
 // of its line. A here-document's body (after << or <<-, up to its delimiter
 // line) is data and is skipped. A redirection and its target are dropped.
 // Every byte is read once; depth bounds the nesting.
-func (l *lexer) run(c *command, i int, stop byte, depth int) int {
+func (l *lexer) run(c *Command, i int, stop byte, depth int) int {
 	s := l.s
 	var cur strings.Builder
 	inWord := false
@@ -425,7 +438,7 @@ func (l *lexer) subst(i int, stop byte, depth int) int {
 	if l.left--; l.left < 0 {
 		return len(l.s)
 	}
-	sub := &command{}
+	sub := &Command{}
 	l.subs = append(l.subs, sub)
 	return l.run(sub, i, stop, depth+1)
 }
@@ -459,7 +472,7 @@ func (l *lexer) backtick(i int, depth int, inDQ bool) int {
 			b.WriteByte(s[i])
 		}
 	}
-	sub := &command{}
+	sub := &Command{}
 	l.subs = append(l.subs, sub)
 	inner := lexer{s: b.String(), left: l.left}
 	inner.run(sub, 0, 0, depth+1)
@@ -635,11 +648,101 @@ const maxIDLineWords = 4
 // of one `agtermctl session new --json` is small; a tree dump is not.
 const maxJSONResult = 4 << 10
 
-// terminalIDs returns the agterm session ids an `agtermctl session new`
+// maxIDsCall caps the ids and the pull requests taken from one output.
+const maxIDsCall = 32
+
+// prURLRe matches a pull request URL standing alone on a line, as
+// `gh pr create` prints it (also after "already exists:", where prAddresses
+// tells it apart).
+var prURLRe = regexp.MustCompile(`(?m)^[ \t]*https://github\.com/([A-Za-z0-9][A-Za-z0-9-]{0,38})/([A-Za-z0-9._-]{1,100})/pull/([0-9]{1,9})[ \t]*\r?$`)
+
+// prRefusalRe matches gh's refusal to create a pull request for a branch that
+// has an open one: the error "a pull request for branch %q into branch %q
+// already exists:" whose next line is that pull request's address
+// (cli/cli pkg/cmd/pr/create/create.go, createRun; the same wording is in
+// command/pr_create.go of 0.9.0 and in every release since, to 2.105.0).
+// It may follow a wrapper's prefix ("Error: "). Text that merely ends in
+// "already exists:" is not it.
+var prRefusalRe = regexp.MustCompile(`(?:^|[^A-Za-z])a pull request for branch .+ into branch .+ already exists:$`)
+
+// prAnnounced says what a line announces for the address on the line after
+// it, if anything. gh on a terminal prints "Creating pull request for ..."
+// (or "Creating draft pull request for ...") before the address (create.go,
+// createRun); without one it prints just the address.
+func prAnnounced(line string) (created, refusal bool) {
+	if strings.HasPrefix(line, "Creating pull request for ") || strings.HasPrefix(line, "Creating draft pull request for ") {
+		return true, false
+	}
+	return false, prRefusalRe.MatchString(line)
+}
+
+// prScan is what an output holds of pull request addresses, each once and
+// each list capped at maxIDsCall after filtering, so that a long run of
+// another command's addresses cannot push out a create's.
+type prScan struct {
+	created   []model.PRRef // announced by "Creating pull request for ..."
+	counted   []model.PRRef // announced or bare, in order: all but a refusal's
+	firstBare *model.PRRef  // the first address that nothing announced
+	refused   bool          // the output holds a refusal, paired with an address or not
+}
+
+// scanPRs walks the output line by line. An announcement covers the next
+// address only, blank lines between aside; any other line cancels it.
+func scanPRs(out string) prScan {
+	var sc prScan
+	var created, refusal bool
+	add := func(list *[]model.PRRef, ref model.PRRef) {
+		if len(*list) < maxIDsCall && !slices.Contains(*list, ref) {
+			*list = append(*list, ref)
+		}
+	}
+	for line := range strings.SplitSeq(out, "\n") {
+		t := strings.TrimSpace(line)
+		if t == "" {
+			continue
+		}
+		if c, r := prAnnounced(t); c || r {
+			created, refusal = c, r
+			sc.refused = sc.refused || r
+			continue
+		}
+		if m := prURLRe.FindStringSubmatch(t); m != nil {
+			if n, err := strconv.Atoi(m[3]); err == nil && n > 0 {
+				ref := model.PRRef{Repo: model.GitHubRepo(m[1] + "/" + m[2]), Number: n}
+				switch {
+				case refusal:
+				case created:
+					add(&sc.created, ref)
+					add(&sc.counted, ref)
+				default:
+					if sc.firstBare == nil {
+						sc.firstBare = &ref
+					}
+					add(&sc.counted, ref)
+				}
+			}
+		}
+		created, refusal = false, false
+	}
+	return sc
+}
+
+// PullRequests returns the pull requests the `gh pr create` commands of a
+// call printed, each once: a github.com pull request URL alone on a line. At
+// most maxIDsCall are read. The call runs no other gh command, so every
+// address is a create's, except the one gh prints when it refuses to create
+// because the branch's pull request already exists: that one is not the
+// session's, and is left out (#116). A create that worked in the same output,
+// before or after the refusal, still counts.
+func PullRequests(out string) []model.PRRef {
+	return scanPRs(out).counted
+}
+
+// TerminalIDs returns the agterm session ids an `agtermctl session new`
 // printed: the last word of a short line, or an "id" in a small JSON answer.
 // Ids inside longer lines, quoted ids in dumps, and agterm's human tree output
 // (which shows only short id prefixes) are ignored.
-func terminalIDs(out string) []string {
+func TerminalIDs(out string) []string {
 	var ids []string
 	add := func(id string) {
 		id = strings.ToUpper(id)
@@ -659,4 +762,86 @@ func terminalIDs(out string) []string {
 		}
 	}
 	return ids
+}
+
+// CreatesAmongOtherGH: the command runs gh pr create and also some other gh
+// command (gh pr view, gh pr list ...), so its output can hold pull request
+// addresses that the create did not print. False when the gh commands do not
+// all stand in one place (the call itself, or one script): where a script's
+// commands run among the call's own is not known, and nothing may be left
+// out on a guess.
+func (c Command) CreatesAmongOtherGH() bool {
+	runs := c.Runs("gh")
+	n := len(c.Runs("gh", "pr", "create"))
+	if n == 0 || len(runs) <= n {
+		return false
+	}
+	region := func(i int) int { // 0 is the call itself, k the k-th script
+		k := 0
+		for _, from := range c.scripts {
+			if i >= from {
+				k++
+			}
+		}
+		return k
+	}
+	for _, i := range runs {
+		if region(i) != region(runs[0]) {
+			return false
+		}
+	}
+	return true
+}
+
+// CreateIsFirstGH: the first gh command of the call is a gh pr create, so
+// whatever gh printed first is its output.
+func (c Command) CreateIsFirstGH() bool {
+	all, create := c.Runs("gh"), c.Runs("gh", "pr", "create")
+	return len(create) > 0 && all[0] == create[0]
+}
+
+// OwnPullRequests returns, from the output of a command that also ran other gh
+// commands, the pull requests that gh pr create printed.
+//
+// gh announces them only when it is attached to a terminal ("Creating pull
+// request for ..." before the address, cli/cli pkg/cmd/pr/create); without one
+// (an agent's shell) it prints just the address. So: an address alone on the
+// line right after such an announcement, blank lines between aside, is the
+// create's. For a branch that has a pull request already, gh refuses and
+// prints "a pull request for branch ... already exists:" and its address:
+// that one is not the session's (#116), and is never counted. With no
+// announcement in the output, the first address is the create's when the
+// create is the call's first gh command (createFirst: its output comes
+// first); otherwise nothing is known and none is taken. Once the output holds
+// a refusal that does not hold: the create's output may be the refusal, and
+// the address after it any command's, so nothing is taken but what an
+// announcement names.
+func OwnPullRequests(out string, createFirst bool) []model.PRRef {
+	sc := scanPRs(out)
+	if len(sc.created) == 0 && createFirst && !sc.refused && sc.firstBare != nil {
+		return []model.PRRef{*sc.firstBare}
+	}
+	return sc.created
+}
+
+// RunsOtherGH says whether the call runs a gh pr create and also another gh
+// command, wherever the two stand: CreatesAmongOtherGH is the part of it
+// where their order is known.
+func (c Command) RunsOtherGH() bool {
+	n := len(c.Runs("gh", "pr", "create"))
+	return n > 0 && len(c.Runs("gh")) > n
+}
+
+// UnorderedPullRequests returns the pull requests of a call that runs a
+// create and other gh commands whose order is not known (one in a shell -c
+// script, one outside, so CreatesAmongOtherGH is false). Without a refusal in
+// the output, every address stays, as it always did. With one, the view that
+// follows a refused create (`gh pr create || gh pr view`) prints that same
+// address, so only what a "Creating pull request for ..." line announced is
+// the create's (#116).
+func UnorderedPullRequests(out string) []model.PRRef {
+	if sc := scanPRs(out); sc.refused {
+		return sc.created
+	}
+	return PullRequests(out)
 }

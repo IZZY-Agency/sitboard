@@ -104,11 +104,11 @@ func TestSelectionBeforeFinishDoesNot(t *testing.T) {
 
 func TestCountsPerProjectAndTotal(t *testing.T) {
 	e := newEnv(t)
-	e.prs.prs = []model.PullRequest{{Repo: exRepo, Number: 101, State: model.PRStateOpen}}
+	e.prs.prs = []model.PullRequest{{Repo: model.GitHubRepo(exRepo), Number: 101, State: model.PRStateOpen}}
 	working := busySession("a1", tNow)
 	stale := busySession("a2", tNow.Add(-30*time.Minute))
 	review := session("a3", model.StatusFinished, tNow)
-	review.CreatedPRs = []model.PRRef{{Repo: exRepo, Number: 101}}
+	review.CreatedPRs = []model.PRRef{{Repo: model.GitHubRepo(exRepo), Number: 101}}
 	needs := session("b1", model.StatusBlocked, tNow)
 	needs.Folder = beta
 	unseen := session("b2", model.StatusFinished, tNow)
@@ -154,25 +154,112 @@ func TestParentCardIDFormsTree(t *testing.T) {
 	}
 }
 
-func TestTerminalForReturnsOnlyKnownTerminals(t *testing.T) {
+func TestJumpTargetReturnsOnlyKnownTerminals(t *testing.T) {
 	b := newTestBoard(t)
 	s := busySession("s1", tNow)
 	s.TerminalID = termUUID
 	b.applySync(s)
-	if _, ok := b.TerminalFor("claude:s1"); ok {
+	if _, ok := b.JumpTarget("claude:s1"); ok {
 		t.Fatal("terminal returned before it is in the tree")
 	}
-	b.applySync(model.TerminalFact{ID: termUUID, HasAgent: true})
-	if id, ok := b.TerminalFor("claude:s1"); !ok || id != termUUID {
-		t.Fatalf("got %q %v", id, ok)
+	if j := jumpOf(t, b, "claude:s1"); j != contract.JumpNone {
+		t.Fatalf("card jump %q before the terminal is in the tree", j)
 	}
-	if _, ok := b.TerminalFor("claude:unknown"); ok {
+	b.applySync(model.TerminalFact{ID: termUUID, HasAgent: true})
+	want := model.FocusTarget{Kind: model.FocusAgterm, ID: termUUID}
+	if got, ok := b.JumpTarget("claude:s1"); !ok || got != want {
+		t.Fatalf("got %+v %v", got, ok)
+	}
+	if j := jumpOf(t, b, "claude:s1"); j != contract.JumpAgterm {
+		t.Fatalf("card jump %q, want agterm", j)
+	}
+	if _, ok := b.JumpTarget("claude:unknown"); ok {
 		t.Fatal("unknown card resolved")
 	}
 	b.applySync(model.TerminalGone{ID: termUUID})
-	if _, ok := b.TerminalFor("claude:s1"); ok {
+	if _, ok := b.JumpTarget("claude:s1"); ok {
 		t.Fatal("terminal returned after it closed")
 	}
+}
+
+// A Codex session has no tmux pane (the adapter reads no pane for it), so
+// its card jumps through agterm when its terminal is in the tree and does not
+// jump otherwise.
+func TestCodexCardJumpsThroughAgtermOnly(t *testing.T) {
+	b := newTestBoard(t)
+	s := busySession("c1", tNow)
+	s.Key = model.SessionKey{Tool: model.ToolCodex, ID: "c1"}
+	s.TerminalID = termUUID
+	b.applySync(s)
+	if j := jumpOf(t, b, "codex:c1"); j != contract.JumpNone {
+		t.Fatalf("card jump %q before the terminal is in the tree", j)
+	}
+	b.applySync(model.TerminalFact{ID: termUUID, HasAgent: true})
+	if j := jumpOf(t, b, "codex:c1"); j != contract.JumpAgterm {
+		t.Fatalf("card jump %q, want agterm", j)
+	}
+	want := model.FocusTarget{Kind: model.FocusAgterm, ID: termUUID}
+	if got, ok := b.JumpTarget("codex:c1"); !ok || got != want {
+		t.Fatalf("got %+v %v", got, ok)
+	}
+}
+
+func TestJumpTargetPrefersTheTmuxPane(t *testing.T) {
+	b := newTestBoard(t)
+	s := busySession("s1", tNow)
+	s.TerminalID = termUUID // tmux started inside agterm: both are known
+	s.Tmux = model.TmuxPane{Socket: "/tmp/tmux-501/default", Pane: "%3", TTY: "/dev/ttys003", PID: 4242, Start: "Tue Nov 17 08:00:00 2026"}
+	b.applySync(s)
+	b.applySync(model.TerminalFact{ID: termUUID, HasAgent: true})
+	want := model.FocusTarget{Kind: model.FocusTmux, ID: "%3", Socket: "/tmp/tmux-501/default", TTY: "/dev/ttys003", PID: 4242, Start: "Tue Nov 17 08:00:00 2026"}
+	if got, ok := b.JumpTarget("claude:s1"); !ok || got != want {
+		t.Fatalf("got %+v %v, want %+v", got, ok, want)
+	}
+	if j := jumpOf(t, b, "claude:s1"); j != contract.JumpTmux {
+		t.Fatalf("card jump %q, want tmux", j)
+	}
+	// No agterm at all: the tmux pane alone is enough.
+	b2 := newTestBoard(t)
+	s.TerminalID = ""
+	b2.applySync(s)
+	if got, ok := b2.JumpTarget("claude:s1"); !ok || got != want {
+		t.Fatalf("without agterm: got %+v %v", got, ok)
+	}
+	// A pane of the wrong shape is never a target.
+	b3 := newTestBoard(t)
+	s.Tmux.Socket = "relative/sock"
+	b3.applySync(s)
+	if _, ok := b3.JumpTarget("claude:s1"); ok {
+		t.Fatal("a malformed tmux pane resolved")
+	}
+	if j := jumpOf(t, b3, "claude:s1"); j != contract.JumpNone {
+		t.Fatalf("card jump %q for a malformed pane", j)
+	}
+	// A pane without the process's tty was never confirmed: the jump falls
+	// back to the agterm session.
+	b4 := newTestBoard(t)
+	s.Tmux = model.TmuxPane{Socket: "/tmp/tmux-501/default", Pane: "%3"}
+	s.TerminalID = termUUID
+	b4.applySync(s)
+	b4.applySync(model.TerminalFact{ID: termUUID, HasAgent: true})
+	if got, ok := b4.JumpTarget("claude:s1"); !ok || got.Kind != model.FocusAgterm {
+		t.Fatalf("pane without a tty: got %+v %v, want the agterm session", got, ok)
+	}
+	if j := jumpOf(t, b4, "claude:s1"); j != contract.JumpAgterm {
+		t.Fatalf("card jump %q for a pane without a tty, want agterm", j)
+	}
+}
+
+// jumpOf is the Jump field of the card id on b's snapshot.
+func jumpOf(t *testing.T, b *Board, id string) contract.JumpKind {
+	t.Helper()
+	for _, c := range b.Snapshot().Cards {
+		if c.ID == id {
+			return c.Agent.Jump
+		}
+	}
+	t.Fatalf("no card %s", id)
+	return ""
 }
 
 func TestSourceStatusesAppear(t *testing.T) {

@@ -34,6 +34,8 @@
       "agentName": "worker-c",
       "title": "Placeholder pull request title",
       "pullRequest": {
+        "forge": "github",
+        "host": "github.com",
         "repo": "example-org/example-repo",
         "number": 101,
         "title": "Placeholder pull request title",
@@ -53,6 +55,8 @@
       "agentName": "worker-f",
       "title": "Another placeholder title",
       "pullRequest": {
+        "forge": "github",
+        "host": "github.com",
         "repo": "example-org/example-repo",
         "number": 102,
         "title": "Another placeholder title",

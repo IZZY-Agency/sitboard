@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -102,8 +103,8 @@ func TestGoldenHasEveryColumnAndAttention(t *testing.T) {
 	if !ready[true] || !ready[false] {
 		t.Error("golden needs one source that is ready and one that is still on its first pass")
 	}
-	if len(s.Sources) != 5 {
-		t.Errorf("golden has %d sources, want one per kind (5)", len(s.Sources))
+	if len(s.Sources) != len(SourceKinds) {
+		t.Errorf("golden has %d sources, want one per kind (%d)", len(s.Sources), len(SourceKinds))
 	}
 }
 
@@ -119,8 +120,18 @@ func TestGoldenUsesOnlyPlaceholders(t *testing.T) {
 			}
 		}
 		for _, m := range regexp.MustCompile(`"repo": "([^"]*)"`).FindAllStringSubmatch(data, -1) {
-			if m[1] != "" && m[1] != "example-org/example-repo" {
+			if m[1] != "" && m[1] != "example-org/example-repo" && m[1] != "example-group/example-project" {
 				t.Errorf("%s: repo %q is not a placeholder", f, m[1])
+			}
+		}
+		for _, m := range regexp.MustCompile(`"(?:host|repoHost)": "([^"]*)"|"gitlabHosts": \[\s*"([^"]*)"`).FindAllStringSubmatch(data, -1) {
+			if h := m[1] + m[2]; h != "" && h != "github.com" && h != "gitlab.example.com" {
+				t.Errorf("%s: host %q is not a placeholder", f, h)
+			}
+		}
+		for _, m := range regexp.MustCompile(`"url": "https://([^/"]*)/`).FindAllStringSubmatch(data, -1) {
+			if m[1] != "github.com" && m[1] != "gitlab.example.com" && m[1] != "claude.ai" {
+				t.Errorf("%s: link host %q is not a placeholder", f, m[1])
 			}
 		}
 		for _, m := range regexp.MustCompile(`"(?:path|folder)": "([^"]*)"`).FindAllStringSubmatch(data, -1) {
@@ -327,5 +338,45 @@ func TestPullRequestAndIssueURLPatternsMatchTheModel(t *testing.T) {
 	}
 	if IssueURLPattern != model.IssueURLPattern {
 		t.Fatalf("contract.IssueURLPattern %q != model.IssueURLPattern %q", IssueURLPattern, model.IssueURLPattern)
+	}
+	if MergeRequestURLPattern != model.MergeRequestURLPattern {
+		t.Fatalf("contract.MergeRequestURLPattern %q != model.MergeRequestURLPattern %q", MergeRequestURLPattern, model.MergeRequestURLPattern)
+	}
+	if GitLabIssueURLPattern != model.GitLabIssueURLPattern {
+		t.Fatalf("contract.GitLabIssueURLPattern %q != model.GitLabIssueURLPattern %q", GitLabIssueURLPattern, model.GitLabIssueURLPattern)
+	}
+	if string(ForgeGitHub) != string(model.ForgeGitHub) || string(ForgeGitLab) != string(model.ForgeGitLab) {
+		t.Fatal("contract forges differ from the model's")
+	}
+}
+
+// The golden snapshot carries a GitLab merge request so the page's dev
+// harness and tests meet the shape; every link in it is the one the model
+// builds from forge, host, repo and number, and every GitLab host is listed.
+func TestGoldenLinksAreTheBuiltOnes(t *testing.T) {
+	var s Snapshot
+	decodeStrict(t, readGolden(t, "snapshot.v1.json"), &s)
+	repoOf := func(f Forge, host, path string) model.ForgeRepo {
+		return model.ForgeRepo{Forge: model.Forge(f), Host: host, Path: path}
+	}
+	forges := map[Forge]bool{}
+	for _, c := range s.Cards {
+		for _, pr := range c.PullRequests {
+			forges[pr.Forge] = true
+			if pr.URL != "" && pr.URL != model.ChangeRequestURL(repoOf(pr.Forge, pr.Host, pr.Repo), pr.Number) {
+				t.Errorf("card %s: pull request link %q is not the built one", c.ID, pr.URL)
+			}
+			if pr.Forge == ForgeGitLab && !slices.Contains(s.GitLabHosts, pr.Host) {
+				t.Errorf("card %s: GitLab host %q not in gitlabHosts", c.ID, pr.Host)
+			}
+		}
+		for _, is := range c.Issues {
+			if is.URL != "" && is.URL != model.ForgeIssueURL(repoOf(is.Forge, is.Host, is.Repo), is.Number) {
+				t.Errorf("card %s: issue link %q is not the built one", c.ID, is.URL)
+			}
+		}
+	}
+	if !forges[ForgeGitHub] || !forges[ForgeGitLab] {
+		t.Errorf("golden needs a pull request on each forge, has %v", forges)
 	}
 }

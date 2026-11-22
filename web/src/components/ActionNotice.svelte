@@ -33,7 +33,7 @@
   transition:fly={{ y: 6, duration: ms(MOVE_MS), easing: cubicOut }}
 >
   {#if notice.kind === 'copy'}
-    <h2 class="label">{notice.why === 'no_agterm' ? 'agterm not found' : 'Not in agterm'}</h2>
+    <h2 class="label">{notice.why === 'no_agterm' ? 'Not in tmux, agterm not found' : 'Not in agterm or tmux'}</h2>
     <p>Open it yourself: the folder and the session name, to copy.</p>
     <dl>
       <dt>Folder</dt>

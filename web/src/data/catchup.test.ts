@@ -32,7 +32,7 @@ const pr = (at: string, kind: 'pr_opened' | 'pr_merged', n: number, project = 'p
   agentName: 'worker-c',
   title: `Placeholder ${n}`,
   pullRequest: {
-    repo: 'example-org/example-repo',
+    forge: 'github' as const, host: 'github.com', repo: 'example-org/example-repo',
     number: n,
     title: `Placeholder ${n}`,
     url: `https://github.com/example-org/example-repo/pull/${n}`,

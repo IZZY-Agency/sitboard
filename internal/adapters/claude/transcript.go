@@ -9,13 +9,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"github.com/IZZY-Agency/sitboard/internal/adapters/internal/shellcmd"
 	"github.com/IZZY-Agency/sitboard/internal/model"
 )
 
@@ -25,6 +24,11 @@ const maxLine = 4 << 20
 
 // turnWindow is how far back finished turns are kept.
 const turnWindow = 7 * 24 * time.Hour
+
+// spendKeep is how far back spans are kept: a day more than the 7 days the
+// board shows, so the first day shown is complete whatever the length of the
+// days in between (a 25-hour day); the board cuts at its local midnight.
+const spendKeep = 8 * 24 * time.Hour
 
 // Caps on what one transcript may contribute, so a hostile or runaway
 // transcript cannot grow memory without bound.
@@ -39,7 +43,6 @@ const (
 	maxSpawns        = 500
 	maxPeers         = 200
 	maxPending       = 1000
-	maxIDsCall       = 32
 )
 
 // derived holds the facts read from one transcript. It never holds transcript
@@ -64,7 +67,9 @@ type derived struct {
 	Folder             string
 	LastActivity       time.Time
 	TurnEnds           []time.Time
+	spend              *spendData // with the subagents', counted, not priced; set by the indexer
 	CreatedPRs         []model.PRRef
+	PushedPRs          []model.PushedRef   // those of CreatedPRs a creating push announced, with the call's window
 	Artifacts          []model.ArtifactRef // one per address, in the order first seen
 	SpawnedNames       []string
 	SpawnedTerminalIDs []string
@@ -72,30 +77,59 @@ type derived struct {
 }
 
 // pendingKind says what a tool result tells; one command can do both.
-type pendingKind uint8
+type pendingKind uint16
 
 const (
 	pendingPR pendingKind = 1 << iota
 	pendingSpawn
 	pendingPublish // an Artifact publish
+	pendingPRMixed // with pendingPR: the call ran other gh commands too (see shellcmd.OwnPullRequests)
+	pendingPRFirst // with pendingPRMixed: the create was the call's first gh command
+	pendingPRLoose // with pendingPR: other gh commands too, but their order against the create is not known (see shellcmd.UnorderedPullRequests)
+	pendingMRGlab  // `glab mr create`: its result may hold a bare merge request address
+	pendingMRPush  // `git push -o merge_request.create`: its result may hold a "remote:" address; the call's time is the start of its window
+	pendingMRMixed // with pendingMRGlab: the call ran other commands too (see shellcmd.MRCreation.Mixed)
+	pendingMRFirst // with pendingMRMixed: a `glab mr create` was the call's first command that may print an address
 )
+
+// pendingCall is a call whose result is still to come: what the result tells,
+// and when the call was made (the start of a creating push's window). One
+// entry, so the two are evicted together.
+type pendingCall struct {
+	kind pendingKind
+	at   time.Time
+}
 
 // tailer reads one transcript incrementally from a remembered offset. Only
 // whole lines are consumed; a shrunk or replaced file is read again from zero.
 type tailer struct {
-	path    string
-	off     int64
-	info    os.FileInfo
-	partial bool // the last update stopped before the end of the file
-	d       derived
-	pending map[string]pendingKind // tool-use id → what its result tells
-	read    int64                  // bytes read by the last update (tests)
+	path     string
+	off      int64
+	info     os.FileInfo
+	partial  bool // the last update stopped before the end of the file
+	d        derived
+	pending  map[string]pendingCall // tool-use id → what its result tells
+	read     int64                  // bytes read by the last update (tests)
+	headRead int64                  // bytes read for spend alone, from the start (tests)
 	// readCap, when set, makes the first read of a larger file start that
 	// many bytes before its end, at the first whole line (skipFirst).
 	readCap   int64
 	skipFirst bool
-	id        string // the session id its file is named by
-	parsed    int    // lines read as JSON, from the start
+	// headPos and headEnd: the part before the capped read, still to be read
+	// for spend alone, from headPos.
+	headPos, headEnd int64
+	id               string // the session id its file is named by
+	// usageOwner is the session whose lines count for spend: its own id, or
+	// for a subagent's transcript the session it runs in.
+	usageOwner string
+	spend      spendLog
+	// claims makes a reply count once across the session's transcripts:
+	// owner is this transcript's number in it.
+	claims *replyClaims
+	owner  uint32
+	// tab is the price table of this pass, for the tier of each reply counted.
+	tab    priceTable
+	parsed int // lines read as JSON, from the start
 
 	// The session's folder (see folder.go).
 	home         string                 // the home folder, cleaned
@@ -115,12 +149,15 @@ func newTailer(path string, pr *prober) *tailer {
 	if home != "" {
 		home = filepath.Clean(home)
 	}
-	return &tailer{path: path, id: strings.TrimSuffix(filepath.Base(path), ".jsonl"), pending: map[string]pendingKind{}, home: home, prober: pr}
+	id := strings.TrimSuffix(filepath.Base(path), ".jsonl")
+	return &tailer{path: path, id: id, usageOwner: id, claims: newReplyClaims(), pending: map[string]pendingCall{}, home: home, prober: pr}
 }
 
 func (t *tailer) reset() {
-	t.off, t.skipFirst, t.parsed = 0, false, 0
+	t.release()
+	t.off, t.skipFirst, t.parsed, t.headPos, t.headEnd = 0, false, 0, 0, 0
 	t.d = derived{}
+	t.spend.reset()
 	clear(t.pending)
 	t.window, t.wpos, t.seq, t.probing = nil, 0, 0, nil
 	clear(t.held)
@@ -129,6 +166,14 @@ func (t *tailer) reset() {
 // update reads what was appended since the last call. It reports whether the
 // derived facts may have changed. A file whose size and modification time are
 // unchanged is not opened. It stops early, at a line boundary, when ctx ends.
+// release gives up what this transcript counted, for the other transcripts
+// of the session to count.
+func (t *tailer) release() {
+	if t.claims != nil {
+		t.claims.release(t.owner)
+	}
+}
+
 func (t *tailer) update(ctx context.Context, now time.Time) (changed bool, err error) {
 	t.read = 0
 	defer func() {
@@ -153,6 +198,7 @@ func (t *tailer) update(ctx context.Context, now time.Time) (changed bool, err e
 	}
 	if t.info == nil && t.off == 0 && t.readCap > 0 && fi.Size() > t.readCap {
 		t.off, t.skipFirst = fi.Size()-t.readCap, true
+		t.headPos, t.headEnd = 0, t.off+1 // the line that holds t.off is the head's
 	}
 	t.info, t.partial = fi, false
 	if fi.Size() == t.off {
@@ -165,6 +211,13 @@ func (t *tailer) update(ctx context.Context, now time.Time) (changed bool, err e
 	defer func() { _ = f.Close() }()
 	if ofi, err := f.Stat(); err != nil || !ofi.Mode().IsRegular() || !os.SameFile(ofi, fi) {
 		return changed, errNotRegular // swapped since it was looked at
+	}
+	t.spend.cut = now.Add(-spendKeep).Truncate(model.SpendSpanLength)
+	if t.headPos < t.headEnd {
+		if err := t.scanHead(ctx, f, now); err != nil {
+			return changed, err
+		}
+		changed = true
 	}
 	if _, err := f.Seek(t.off, io.SeekStart); err != nil {
 		return changed, err
@@ -228,12 +281,13 @@ const ctxCheckLines = 512
 
 func (t *tailer) pruneTurns(now time.Time) bool {
 	cut := now.Add(-turnWindow)
+	pruned := t.spend.prune(now.Add(-spendKeep).Truncate(model.SpendSpanLength))
 	i := 0
 	for i < len(t.d.TurnEnds) && t.d.TurnEnds[i].Before(cut) {
 		i++
 	}
 	if i == 0 {
-		return false
+		return pruned
 	}
 	t.d.TurnEnds = slices.Delete(t.d.TurnEnds, 0, i)
 	return true
@@ -251,8 +305,14 @@ type lineHead struct {
 	Entry     string `json:"entrypoint"`
 	SessionID string `json:"sessionId"`
 	AgentName string `json:"agentName"` // on an agent-name line
-	Message   struct {
-		Model string `json:"model"`
+	// ForkedFrom marks a line copied from a parent conversation into a fork's
+	// transcript (as read from Claude Code's code, not yet seen in a real
+	// fork: see forked).
+	ForkedFrom json.RawMessage `json:"forkedFrom"`
+	Message    struct {
+		ID    string     `json:"id"`
+		Model string     `json:"model"`
+		Usage *usageJSON `json:"usage"` // on an assistant line: the reply's token counts
 	} `json:"message"`
 	Origin *struct {
 		Kind string `json:"kind"`
@@ -301,6 +361,116 @@ func decode(line []byte, v any) bool {
 	return err == nil || errors.As(err, &te)
 }
 
+// forked reports whether the line is a copy of a parent conversation's line.
+// Its usage is counted in the parent's transcript, so it is never counted for
+// the fork. NEEDS CONFIRMING AGAINST A REAL FORK: the shape (a forkedFrom key
+// with an object, and the fork's own session id on the copied line) comes from
+// reading Claude Code 2.1.330, no transcript on this machine has one.
+func (h *lineHead) forked() bool {
+	f := bytes.TrimSpace(h.ForkedFrom)
+	return len(f) > 0 && !bytes.Equal(f, []byte("null"))
+}
+
+// spendReply counts an assistant line's usage.
+func (t *tailer) spendReply(h *lineHead, at, now time.Time) {
+	if m := h.Message.Model; h.Message.Usage != nil && m != "" && m != "<synthetic>" && len(m) <= 128 && len(h.Message.ID) <= 256 &&
+		(h.SessionID == "" || h.SessionID == t.usageOwner) && !h.forked() {
+		id := h.Message.ID
+		if id == "" {
+			t.spend.reply(m, h.Message.Usage, at, t.tab)
+			return
+		}
+		c, fresh := t.claims.take(id, t.owner)
+		if !fresh { // counted already, here or in another transcript of the session
+			c.grow(h.Message.Usage.usage(m))
+			return
+		}
+		c.counted = t.spend.reply(m, h.Message.Usage, at, t.tab)
+	}
+}
+
+// spendCost keeps a cost-state line.
+func (t *tailer) spendCost(h *lineHead, line []byte, own bool) {
+	var c costStateLine
+	if own && !t.spend.sub && !h.forked() && decode(line, &c) {
+		t.spend.costState(&c)
+	}
+}
+
+// consumeSpend reads one line for spend alone: the part of a large
+// transcript that is not read in full (see endedReadCap).
+func (t *tailer) consumeSpend(line []byte, now time.Time) {
+	isReply := bytes.Contains(line, []byte(`"usage"`))
+	if len(line) == 0 || line[0] != '{' || (!isReply && !bytes.Contains(line, []byte(`"cost-state"`))) {
+		return
+	}
+	var h lineHead
+	if !decode(line, &h) {
+		return
+	}
+	switch h.Type {
+	case "assistant":
+		t.spendReply(&h, parseTS(h.Timestamp, now), now)
+	case "cost-state":
+		t.spendCost(&h, line, h.SessionID == "" || h.SessionID == t.id)
+	}
+}
+
+// scanHead reads the part of the file before the last readCap bytes for spend
+// alone, so a huge transcript's days and total are whole. It runs before the
+// rest is read (the cost-state line and the replies after it come later in the
+// file) and can be stopped by ctx and go on from headPos.
+func (t *tailer) scanHead(ctx context.Context, f *os.File, now time.Time) error {
+	if _, err := f.Seek(t.headPos, io.SeekStart); err != nil {
+		return err
+	}
+	r := bufio.NewReaderSize(f, 256<<10)
+	var long []byte
+	skipping := false
+	lineLen := int64(0)
+	lines := 0
+	for t.headPos < t.headEnd {
+		if lines++; lines%ctxCheckLines == 0 && ctx.Err() != nil {
+			t.partial = true
+			return ctx.Err()
+		}
+		chunk, err := r.ReadSlice('\n')
+		t.headRead += int64(len(chunk))
+		lineLen += int64(len(chunk))
+		switch {
+		case errors.Is(err, bufio.ErrBufferFull):
+			if !skipping {
+				if len(long)+len(chunk) > maxLine {
+					skipping, long = true, nil
+				} else {
+					long = append(long, chunk...)
+				}
+			}
+			continue
+		case err != nil: // the file got shorter: nothing more to read there
+			t.headPos = t.headEnd
+			return nil
+		}
+		if !skipping {
+			line := chunk
+			if long != nil {
+				if len(long)+len(chunk) <= maxLine {
+					long = append(long, chunk...)
+					line = long
+				} else {
+					line = nil
+				}
+			}
+			if line != nil {
+				t.consumeSpend(bytes.TrimSpace(line), now)
+			}
+		}
+		t.headPos += lineLen
+		lineLen, long, skipping = 0, nil, false
+	}
+	return nil
+}
+
 func (t *tailer) consume(line []byte, now time.Time) {
 	if len(line) == 0 || line[0] != '{' {
 		return
@@ -339,10 +509,11 @@ func (t *tailer) consume(line []byte, now time.Time) {
 			t.d.Model = m
 			t.d.Effort = model.KnownEffort(h.Effort)
 		}
+		t.spendReply(&h, at, now)
 		if bytes.Contains(line, []byte(`"tool_use"`)) &&
 			(bytes.Contains(line, []byte("create")) || bytes.Contains(line, []byte("agtermctl")) ||
 				bytes.Contains(line, []byte(`"Artifact"`))) {
-			t.toolUses(line)
+			t.toolUses(line, at)
 		}
 	case "user":
 		if !h.Sidechain && h.Origin != nil && h.Origin.Kind == "peer" && h.Origin.Name != "" && len(h.Origin.Name) <= 256 {
@@ -351,6 +522,8 @@ func (t *tailer) consume(line []byte, now time.Time) {
 		if len(t.pending) > 0 && bytes.Contains(line, []byte(`"tool_result"`)) {
 			t.toolResults(line, at)
 		}
+	case "cost-state":
+		t.spendCost(&h, line, own)
 	case "system":
 		if own && !h.Sidechain && h.Subtype == "turn_duration" && !at.IsZero() && !at.Before(now.Add(-turnWindow)) {
 			i, _ := slices.BinarySearchFunc(t.d.TurnEnds, at, time.Time.Compare)
@@ -362,14 +535,10 @@ func (t *tailer) consume(line []byte, now time.Time) {
 	}
 }
 
-// prURLRe matches a pull request URL standing alone on a line, as
-// `gh pr create` prints it (also after "already exists:").
-var prURLRe = regexp.MustCompile(`(?m)^[ \t]*https://github\.com/([A-Za-z0-9][A-Za-z0-9-]{0,38})/([A-Za-z0-9._-]{1,100})/pull/([0-9]{1,9})[ \t]*\r?$`)
-
 // toolUses records the calls whose results carry a fact: the session's own
 // `gh pr create`, its `agtermctl session new` spawns, and its Artifact
 // publishes.
-func (t *tailer) toolUses(line []byte) {
+func (t *tailer) toolUses(line []byte, at time.Time) {
 	var c lineContent
 	if !decode(line, &c) {
 		return
@@ -381,7 +550,7 @@ func (t *tailer) toolUses(line []byte) {
 		}
 		if b.Name == "Artifact" {
 			if isPublish(b.Input) {
-				t.addPending(b.ID, pendingPublish)
+				t.addPending(b.ID, pendingPublish, at)
 			}
 			continue
 		}
@@ -394,29 +563,51 @@ func (t *tailer) toolUses(line []byte) {
 		if !decode(b.Input, &in) {
 			continue
 		}
-		cmd := parseCommand(in.Command)
+		cmd := shellcmd.Parse(in.Command)
 		var kind pendingKind
-		if len(cmd.runs("gh", "pr", "create")) > 0 {
+		if len(cmd.Runs("gh", "pr", "create")) > 0 {
 			kind |= pendingPR
+			if cmd.CreatesAmongOtherGH() {
+				kind |= pendingPRMixed
+				if cmd.CreateIsFirstGH() {
+					kind |= pendingPRFirst
+				}
+			} else if cmd.RunsOtherGH() {
+				kind |= pendingPRLoose
+			}
 		}
-		if len(cmd.runs("agtermctl", "session", "new")) > 0 {
+		if k := cmd.MRCreation(); k.Any() {
+			if k.Glab {
+				kind |= pendingMRGlab
+			}
+			if k.Push {
+				kind |= pendingMRPush
+			}
+			if k.Mixed {
+				kind |= pendingMRMixed
+			}
+			if k.First {
+				kind |= pendingMRFirst
+			}
+		}
+		if len(cmd.Runs("agtermctl", "session", "new")) > 0 {
 			kind |= pendingSpawn
-			for _, n := range cmd.spawnNames() {
+			for _, n := range cmd.SpawnNames() {
 				t.d.SpawnedNames = addCapped(t.d.SpawnedNames, n, maxSpawns)
 			}
 		}
 		if kind == 0 {
 			continue
 		}
-		t.addPending(b.ID, kind)
+		t.addPending(b.ID, kind, at)
 	}
 }
 
-func (t *tailer) addPending(id string, kind pendingKind) {
+func (t *tailer) addPending(id string, kind pendingKind, at time.Time) {
 	if len(t.pending) >= maxPending {
 		clear(t.pending)
 	}
-	t.pending[id] = kind
+	t.pending[id] = pendingCall{kind, at}
 }
 
 // isPublish says whether an Artifact call publishes: the action "publish" or
@@ -448,7 +639,8 @@ func (t *tailer) toolResults(line []byte, at time.Time) {
 		if !decode(raw, &b) || b.Type != "tool_result" {
 			continue
 		}
-		kind, ok := t.pending[b.ToolUseID]
+		call, ok := t.pending[b.ToolUseID]
+		kind, from := call.kind, call.at
 		if !ok {
 			continue
 		}
@@ -463,19 +655,25 @@ func (t *tailer) toolResults(line []byte, at time.Time) {
 		}
 		text := resultText(b.Content)
 		if kind&pendingPR != 0 {
-			for _, m := range prURLRe.FindAllStringSubmatch(text, maxIDsCall) {
-				n, err := strconv.Atoi(m[3])
-				if err != nil || n <= 0 {
-					continue
-				}
-				ref := model.PRRef{Repo: m[1] + "/" + m[2], Number: n}
-				if !slices.Contains(t.d.CreatedPRs, ref) && len(t.d.CreatedPRs) < maxPRs {
+			refs := shellcmd.PullRequests(text)
+			switch {
+			case kind&pendingPRMixed != 0:
+				refs = shellcmd.OwnPullRequests(text, kind&pendingPRFirst != 0)
+			case kind&pendingPRLoose != 0:
+				refs = shellcmd.UnorderedPullRequests(text)
+			}
+			for _, ref := range refs {
+				if !slices.Contains(t.d.CreatedPRs, ref) && shellcmd.Room(t.d.CreatedPRs, ref, maxPRs) {
 					t.d.CreatedPRs = append(t.d.CreatedPRs, ref)
 				}
 			}
 		}
+		if kind&(pendingMRGlab|pendingMRPush) != 0 {
+			k := shellcmd.MRCreation{Glab: kind&pendingMRGlab != 0, Push: kind&pendingMRPush != 0, Mixed: kind&pendingMRMixed != 0, First: kind&pendingMRFirst != 0}
+			t.d.CreatedPRs, t.d.PushedPRs = shellcmd.AddMergeRequests(t.d.CreatedPRs, t.d.PushedPRs, shellcmd.MergeRequests(text, k), from, at, maxPRs)
+		}
 		if kind&pendingSpawn != 0 {
-			for _, id := range terminalIDs(text) {
+			for _, id := range shellcmd.TerminalIDs(text) {
 				t.d.SpawnedTerminalIDs = addCapped(t.d.SpawnedTerminalIDs, id, maxSpawns)
 			}
 		}

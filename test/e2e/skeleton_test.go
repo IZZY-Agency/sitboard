@@ -22,6 +22,29 @@ import (
 
 // startBinary builds bin/sitboard into a temp folder, runs it with an empty
 // HOME, and returns the link it printed.
+// isolatedEnv is the environment of a binary that must see only the temporary
+// home: the current one with HOME, the state folder and the folders of the
+// tools sitboard reads (Codex's CODEX_HOME, Claude Code's CLAUDE_CONFIG_DIR)
+// pointing into it, whatever the developer's own shell sets.
+func isolatedEnv(home string) []string {
+	own := map[string]string{
+		"HOME":              home,
+		"XDG_STATE_HOME":    filepath.Join(home, ".local", "state"),
+		"CODEX_HOME":        filepath.Join(home, ".codex"),
+		"CLAUDE_CONFIG_DIR": filepath.Join(home, ".claude"),
+	}
+	var env []string
+	for _, kv := range os.Environ() {
+		if k, _, _ := strings.Cut(kv, "="); own[k] == "" {
+			env = append(env, kv)
+		}
+	}
+	for _, k := range []string{"HOME", "XDG_STATE_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR"} {
+		env = append(env, k+"="+own[k])
+	}
+	return env
+}
+
 func startBinary(t *testing.T) string {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -40,8 +63,10 @@ func startBinary(t *testing.T) string {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(ctx, bin, "--no-open", "--port", "0")
-	cmd.Env = append(os.Environ(), "HOME="+home, "XDG_STATE_HOME="+filepath.Join(home, ".local", "state"))
+	// --no-gitlab: glab finds its login by the account, not HOME, so the
+	// isolated home would not keep it from a real GitLab host.
+	cmd := exec.CommandContext(ctx, bin, "--no-open", "--port", "0", "--no-gitlab")
+	cmd.Env = isolatedEnv(home)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -130,13 +155,20 @@ func TestSkeletonServesEmptySnapshot(t *testing.T) {
 	for _, s := range snap.Sources {
 		seen[s.Kind]++
 	}
+	// Every source is reported once (GitLab since step 2 of #66).
+	notWired := map[contract.SourceKind]bool{}
 	for _, k := range contract.SourceKinds {
-		if seen[k] != 1 {
-			t.Errorf("source %q appears %d times, want 1", k, seen[k])
+		if want := map[bool]int{false: 1, true: 0}[notWired[k]]; seen[k] != want {
+			t.Errorf("source %q appears %d times, want %d", k, seen[k], want)
 		}
 	}
-	if len(snap.Sources) != len(contract.SourceKinds) {
-		t.Errorf("%d sources, want %d", len(snap.Sources), len(contract.SourceKinds))
+	if len(snap.Sources) != len(contract.SourceKinds)-len(notWired) {
+		t.Errorf("%d sources, want %d", len(snap.Sources), len(contract.SourceKinds)-len(notWired))
+	}
+	for _, s := range snap.Sources {
+		if s.Kind == contract.SourceGitLab && (s.State != contract.SourceOff || s.Detail != "switched off") {
+			t.Errorf("GitLab with --no-gitlab: %+v", s)
+		}
 	}
 }
 

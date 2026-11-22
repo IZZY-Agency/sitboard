@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/IZZY-Agency/sitboard/internal/contract"
 	"github.com/IZZY-Agency/sitboard/internal/model"
@@ -90,6 +91,14 @@ func (b *Board) deriveLocked(now time.Time) (view, map[string]model.SessionKey) 
 	}
 
 	v.settings = b.settingsLocked()
+	if b.leftovers.State == contract.LeftoversReady {
+		v.leftovers = contract.LeftoversSummary{Items: len(b.leftovers.Items), Partial: b.leftovers.Partial}
+		for _, h := range b.leftovers.Held {
+			v.leftovers.Held += h.Count
+		}
+	}
+	v.spend = b.spendLocked(now)
+	v.gitlabHosts = b.gitlabHostsLocked()
 	v.umbrellas, v.groupings = b.groupLocked(projects, mainRoots, plainLive, b.qualifiedLocked(shown, parents, plainLive), now)
 
 	for _, c := range v.cards {
@@ -155,7 +164,7 @@ func (b *Board) cardLocked(s model.SessionFact, parent model.Known[model.Session
 	}
 	status := mergeStatus(s.Status, termStatus)
 	repo := b.repoLocked(s.Folder)
-	prs := b.linkedPRsLocked(s, repo)
+	prs := b.linkedPRsLocked(s)
 	id, err := contract.CardID(string(s.Key.Tool), s.Key.ID)
 	if err != nil {
 		return contract.Card{}, contract.Project{}, false
@@ -190,7 +199,14 @@ func (b *Board) cardLocked(s model.SessionFact, parent model.Known[model.Session
 		ID:   contract.ProjectID(mainRoot),
 		Name: projectName(mainRoot),
 		Path: b.homeRel(mainRoot),
-		Repo: clean(repo.Slug),
+	}
+	// A path too long for the page is left out with its forge and host: a
+	// project names its repository whole or not at all.
+	if remote := b.shownRemoteLocked(repo.Remote); remote.Valid() && pagePath(remote.Path) != "" {
+		path := pagePath(remote.Path)
+		project.Repo = path
+		project.RepoForge = contract.Forge(repo.Remote.Forge)
+		project.RepoHost = repo.Remote.Host
 	}
 
 	card := contract.Card{
@@ -203,6 +219,7 @@ func (b *Board) cardLocked(s model.SessionFact, parent model.Known[model.Session
 		Issues:       []contract.Issue{},
 		Artifacts:    cardArtifacts(s.Artifacts),
 		Subagents:    max(s.Subagents, 0),
+		Spend:        cardSpend(s.Spend),
 		Agent: contract.Agent{
 			Tool:         contract.Tool(s.Key.Tool),
 			Name:         clean(s.Name),
@@ -220,6 +237,8 @@ func (b *Board) cardLocked(s model.SessionFact, parent model.Known[model.Session
 		card.Agent.Model = ""
 	}
 	card.Agent.Effort, card.Agent.EffortSource = agentEffort(s)
+	card.Agent.EffortWord = effortWord(s)
+	card.Agent.Jump = jumpKind(s, hasTerm)
 	if hasTerm {
 		card.Agent.TerminalID = s.TerminalID
 		card.Agent.Workspace = clean(term.Workspace)
@@ -227,18 +246,19 @@ func (b *Board) cardLocked(s model.SessionFact, parent model.Known[model.Session
 			card.Agent.Name = clean(term.Name)
 		}
 	}
-	issues := map[contract.Issue]bool{}
+	issues := map[string]bool{} // by the full identity, so two paths too long to show are still two issues
 	for _, pr := range prs {
 		card.PullRequests = append(card.PullRequests, pagePR(pr))
 		if pr.State != model.PRStateOpen {
 			continue // a closed one never will close them; a merged one already did
 		}
 		for _, n := range pr.ClosingIssues {
-			is := contract.Issue{Repo: clean(pr.Repo), Number: n, URL: model.IssueURL(pr.Repo, n)}
-			if !issues[is] {
-				issues[is] = true
-				card.Issues = append(card.Issues, is)
+			id := model.PRRef{Repo: pr.Repo, Number: n}.Key()
+			if issues[id] {
+				continue
 			}
+			issues[id] = true
+			card.Issues = append(card.Issues, pageIssue(pr.Repo, n))
 		}
 	}
 	card.Title, card.TitleSource = title(prs, s, term, hasTerm)
@@ -350,7 +370,7 @@ func prOrder(a, c model.PullRequest) int {
 			return r
 		}
 	}
-	return cmp.Compare(a.Repo, c.Repo)
+	return cmp.Compare(a.Repo.Key(), c.Repo.Key())
 }
 
 // cardArtifacts are the session's artifacts for the page: only addresses that
@@ -393,10 +413,12 @@ func (b *Board) repoLocked(folder string) model.Repo {
 	return model.Repo{Root: folder, MainRoot: folder}
 }
 
-// linkedPRsLocked returns the pull requests GitHub answered for: those the
-// session created, and for Codex those whose head branch is the session's
-// branch. Refs GitHub has not answered for are left out, never guessed.
-func (b *Board) linkedPRsLocked(s model.SessionFact, repo model.Repo) []model.PullRequest {
+// linkedPRsLocked returns the pull requests GitHub answered for that the
+// session created (Claude and Codex alike: Codex's come from gh pr create).
+// A branch alone links nothing: a reviewer working in the author's worktree
+// is on the author's branch. Refs GitHub has not answered for are left out,
+// never guessed.
+func (b *Board) linkedPRsLocked(s model.SessionFact) []model.PullRequest {
 	seen := map[model.PRRef]bool{}
 	var out []model.PullRequest
 	add := func(pr model.PullRequest) {
@@ -408,11 +430,6 @@ func (b *Board) linkedPRsLocked(s model.SessionFact, repo model.Repo) []model.Pu
 	}
 	for _, ref := range s.CreatedPRs {
 		if pr, ok := b.prs[ref]; ok {
-			add(pr)
-		}
-	}
-	if s.Key.Tool == model.ToolCodex && repo.Slug != "" && repo.Branch.OK {
-		for _, pr := range b.branchPRs[repo.Slug][repo.Branch.V] {
 			add(pr)
 		}
 	}
@@ -529,9 +546,31 @@ func isBidiControl(r rune) bool {
 
 // pagePR is a pull request as the page receives it, on a card or in
 // catch-up: cleaned text, and an address built for its own repo and number.
+// pagePath is a repository path as the page gets it: whole, or "" when it is
+// longer than the page's bound. A path cut at the bound could name another
+// repository, so it is never cut, and its links go with it (prURL, pageIssue).
+func pagePath(p string) string {
+	if utf8.RuneCountInString(p) > maxText {
+		return ""
+	}
+	return clean(p)
+}
+
+// pageIssue is issue n of r for the page: the forge and host, the path whole
+// (or none), and the address built for it (none when the path is none).
+func pageIssue(r model.ForgeRepo, n int) contract.Issue {
+	is := contract.Issue{Forge: contract.Forge(r.Forge), Host: clean(r.Host), Repo: pagePath(r.Path), Number: n}
+	if is.Repo != "" {
+		is.URL = model.ForgeIssueURL(r, n)
+	}
+	return is
+}
+
 func pagePR(pr model.PullRequest) contract.PullRequest {
 	return contract.PullRequest{
-		Repo:   clean(pr.Repo),
+		Forge:  contract.Forge(pr.Repo.Forge),
+		Host:   clean(pr.Repo.Host),
+		Repo:   pagePath(pr.Repo.Path),
 		Number: pr.Number,
 		Title:  clean(pr.Title),
 		URL:    prURL(pr),
@@ -543,13 +582,34 @@ func pagePR(pr model.PullRequest) contract.PullRequest {
 }
 
 // prURL passes a pull request's address to the page only when it is the one
-// model.PullRequestURL builds for that pull request's own repo and number: the
-// pattern holds, and the link cannot point at another pull request.
+// model.ChangeRequestURL builds for that pull request's own forge, host, repo
+// and number: the pattern holds, and the link cannot point at another pull
+// request.
 func prURL(pr model.PullRequest) string {
-	if u := model.PullRequestURL(pr.Repo, pr.Number); u != "" && u == pr.URL {
+	if u := model.ChangeRequestURL(pr.Repo, pr.Number); u != "" && u == pr.URL && pagePath(pr.Repo.Path) != "" {
 		return u
 	}
 	return ""
+}
+
+// showEffortWords: effort words that are not on the ramp (Codex's "ultra")
+// are shown as written. The owner has not yet ruled whether they show at all
+// (#93); false hides them, and the card says effort unknown.
+const showEffortWords = true
+
+// effortWord is the effort word the session recorded when it is not one of
+// the levels: lowercase letters only, at most 16; "" otherwise.
+func effortWord(s model.SessionFact) string {
+	w := s.Effort.V
+	if !showEffortWords || !s.Effort.OK || model.KnownEffort(w) != "" || w == "" || len(w) > 16 {
+		return ""
+	}
+	for _, c := range []byte(w) {
+		if c < 'a' || c > 'z' {
+			return ""
+		}
+	}
+	return w
 }
 
 // agentEffort is the card's effort level and where it came from. Only the
@@ -563,4 +623,31 @@ func agentEffort(s model.SessionFact) (contract.Effort, contract.EffortSource) {
 		return contract.Effort(e), contract.EffortSourceLaunch
 	}
 	return contract.Effort(e), contract.EffortSourceRecorded
+}
+
+// jumpKind is where a jump to s goes: its tmux pane when it runs in tmux
+// (even inside agterm: tmux knows the pane, and raises the agterm session
+// showing it), else its agterm session when that is in the current tree.
+func jumpKind(s model.SessionFact, hasTerm bool) contract.JumpKind {
+	switch {
+	case s.Tmux.Valid():
+		return contract.JumpTmux
+	case hasTerm:
+		return contract.JumpAgterm
+	}
+	return contract.JumpNone
+}
+
+// gitlabHostsLocked lists the hosts of every GitLab merge request the board
+// knows (on a card or not, so a catch-up item's link passes too), sorted;
+// never nil. The page links a GitLab address only on one of these hosts.
+func (b *Board) gitlabHostsLocked() []string {
+	hosts := []string{}
+	for ref := range b.prs {
+		if ref.Repo.Forge == model.ForgeGitLab && ref.Repo.Valid() && !slices.Contains(hosts, ref.Repo.Host) {
+			hosts = append(hosts, ref.Repo.Host)
+		}
+	}
+	slices.Sort(hosts)
+	return hosts
 }

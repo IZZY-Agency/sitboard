@@ -37,8 +37,8 @@ func TestPullRequestAddressIsTheOneBuiltForIt(t *testing.T) {
 		{"a longer path", own + "/files", ""},
 		{"a query", own + "?x=1", ""},
 	} {
-		prs, _ := cardPRs(t, []model.PRRef{{Repo: exRepo, Number: 101}},
-			[]model.PullRequest{{Repo: exRepo, Number: 101, URL: c.url, State: model.PRStateOpen}})
+		prs, _ := cardPRs(t, []model.PRRef{{Repo: model.GitHubRepo(exRepo), Number: 101}},
+			[]model.PullRequest{{Repo: model.GitHubRepo(exRepo), Number: 101, URL: c.url, State: model.PRStateOpen}})
 		if len(prs) != 1 || prs[0].URL != c.want {
 			t.Errorf("%s: pull requests %+v, want url %q", c.name, prs, c.want)
 		}
@@ -48,8 +48,8 @@ func TestPullRequestAddressIsTheOneBuiltForIt(t *testing.T) {
 // Issue addresses follow the same rule, from the pull request's repo and the
 // issue number; a repo or a number that cannot make one gives none.
 func TestIssueAddressIsBuiltOrNone(t *testing.T) {
-	_, issues := cardPRs(t, []model.PRRef{{Repo: exRepo, Number: 101}},
-		[]model.PullRequest{{Repo: exRepo, Number: 101, State: model.PRStateOpen, ClosingIssues: []int{7, 0, -2}}})
+	_, issues := cardPRs(t, []model.PRRef{{Repo: model.GitHubRepo(exRepo), Number: 101}},
+		[]model.PullRequest{{Repo: model.GitHubRepo(exRepo), Number: 101, State: model.PRStateOpen, ClosingIssues: []int{7, 0, -2}}})
 	want := map[int]string{7: "https://github.com/example-org/example-repo/issues/7", 0: "", -2: ""}
 	if len(issues) != 3 {
 		t.Fatalf("issues %+v", issues)
@@ -61,8 +61,8 @@ func TestIssueAddressIsBuiltOrNone(t *testing.T) {
 	}
 
 	for _, bad := range []string{"example-org/..", "../example-repo", "example-org/example-repo/pull/9", "-x/example-repo", "example.org/example-repo", "example-org/.", "example-org/example repo", "example-org/x?y", "example-org/x#y", "example-org/x\"onmouseover=1"} {
-		prs, issues := cardPRs(t, []model.PRRef{{Repo: bad, Number: 5}},
-			[]model.PullRequest{{Repo: bad, Number: 5, URL: "https://github.com/" + bad + "/pull/5", State: model.PRStateOpen, ClosingIssues: []int{3}}})
+		prs, issues := cardPRs(t, []model.PRRef{{Repo: model.GitHubRepo(bad), Number: 5}},
+			[]model.PullRequest{{Repo: model.GitHubRepo(bad), Number: 5, URL: "https://github.com/" + bad + "/pull/5", State: model.PRStateOpen, ClosingIssues: []int{3}}})
 		// Most of these never reach a card; the two that do must carry no link.
 		if (bad == "-x/example-repo" || bad == "example.org/example-repo") && (len(prs) != 1 || len(issues) != 1) {
 			t.Fatalf("repo %q: expected a pull request and an issue on the card: %+v %+v", bad, prs, issues)

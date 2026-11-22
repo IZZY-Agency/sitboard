@@ -75,6 +75,7 @@ describe('shell', () => {
       'agterm found',
       'git found',
       'github failing · not logged in to github.com',
+      'gitlab off · switched off', // a sample: the server reports GitLab once it is wired in (#66 step 2)
       '3 plain shells hidden',
     ]);
   });
@@ -256,6 +257,7 @@ describe('actions', () => {
     (q(`[data-card="${s.cards[1].id}"] .main`) as HTMLButtonElement).click();
     await settle();
     const n = text(q('.notice'));
+    expect(text(q('.notice h2'))).toBe('Not in agterm or tmux');
     expect(n).toContain('~/projects/alpha/.worktrees/worker-a');
     expect(n).toContain(s.cards[1].agent.name);
     expect(qa('.notice button').map(text)).toContain('Copy');
@@ -264,13 +266,24 @@ describe('actions', () => {
   it('when agterm is absent a card shows folder and name to copy instead of jump', async () => {
     const s = golden();
     s.agtermPresent = false;
+    for (const c of s.cards) if (c.agent.jump === 'agterm') c.agent.jump = 'none'; // the server sends no agterm jump without agterm
     const h = app(s);
     const btn = q(`[data-card="${s.cards[1].id}"] .main`) as HTMLButtonElement;
     expect(text(btn.querySelector('.visually-hidden'))).toBe('Show where it runs:');
     btn.click();
     await settle();
     expect(h.calls).toEqual([]);
-    expect(text(q('.notice'))).toContain('agterm not found');
+    // Not "agterm not found" alone: for a tmux user, agterm is not the fix.
+    expect(text(q('.notice h2'))).toBe('Not in tmux, agterm not found');
+    expect(text(q('[role="status"][aria-live="polite"]'))).toContain('Not in tmux, agterm not found. Folder');
+  });
+
+  it('a card with nowhere to jump says it is in neither agterm nor tmux', () => {
+    const s = golden();
+    s.agtermPresent = true;
+    s.cards[1].agent.jump = 'none';
+    app(s);
+    expect(text(q(`[data-card="${s.cards[1].id}"]`))).toContain('not in agterm or tmux');
   });
 
   it('the action result is announced in a live region that is always there, and Escape closes it', async () => {
@@ -282,11 +295,36 @@ describe('actions', () => {
     (q(`[data-card="${s.cards[1].id}"] .main`) as HTMLButtonElement).click();
     await settle();
     expect(q('[role="status"][aria-live="polite"]')).toBe(region);
-    expect(text(region)).toContain('Not in agterm. Folder ~/projects/alpha/.worktrees/worker-a.');
+    expect(text(region)).toContain('Not in agterm or tmux. Folder ~/projects/alpha/.worktrees/worker-a.');
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
     await settle();
     expect(q('.notice')).toBeNull();
     expect(text(region)).toBe('');
+  });
+
+  it('a card in tmux jumps through the server even without agterm, and says so', async () => {
+    const s = golden();
+    s.agtermPresent = false;
+    const c = s.cards[1];
+    c.agent.jump = 'tmux';
+    c.agent.terminalId = '';
+    const h = app(s);
+    const btn = q(`[data-card="${c.id}"] .main`) as HTMLButtonElement;
+    expect(text(btn.querySelector('.visually-hidden'))).toBe('Jump to tmux:');
+    expect(text(q(`[data-card="${c.id}"]`))).toContain('in tmux');
+    btn.click();
+    await settle();
+    expect(h.calls).toEqual([['jump', c.id]]);
+    expect(q('.notice')).toBeNull();
+  });
+
+  it('a failed tmux jump shows the reason the server gave', async () => {
+    const s = golden();
+    s.cards[1].agent.jump = 'tmux';
+    app(s, 'live', { jump: { ok: false, kind: 'failed', message: 'no tmux client is attached' } });
+    (q(`[data-card="${s.cards[1].id}"] .main`) as HTMLButtonElement).click();
+    await settle();
+    expect(text(q('.notice'))).toContain('no tmux client is attached');
   });
 
   it('a card keeps its text for screen readers: no aria-label, an action prefix inside', () => {
@@ -299,7 +337,7 @@ describe('actions', () => {
   });
 
   it('two identical pull requests on one card do not break the page', () => {
-    const pr = { repo: 'o/r', number: 4, title: 't', url: 'https://github.com/o/r/pull/4', state: 'open' as const, checks: 'passing' as const, review: '' as const, draft: false };
+    const pr = { forge: 'github' as const, host: 'github.com', repo: 'o/r', number: 4, title: 't', url: 'https://github.com/o/r/pull/4', state: 'open' as const, checks: 'passing' as const, review: '' as const, draft: false };
     const c = card({ pullRequests: [pr, pr] });
     app(snapshot([c], [project(c.projectId, 'one')]));
     expect(qa(`[data-card="${c.id}"] .pr`)).toHaveLength(2);

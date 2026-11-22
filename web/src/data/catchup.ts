@@ -3,6 +3,8 @@
 // artifacts it learned since the marker, newest first; the page loads the
 // list, groups it, and marks it read only when asked, up to the list's asOf.
 
+import { prHref, prKey, prNumber } from './derive';
+import { openedWord } from './words';
 import { CatchupKindValues, Paths, type Artifact, type Catchup, type CatchupItem, type CatchupKind, type PullRequest } from '../contract.gen';
 
 export type CatchupLoad =
@@ -126,7 +128,7 @@ export function groupCatchup(items: readonly CatchupItem[]): CatchupGroup[] {
     }
     g.total++;
     const who = it.cardId || `name:${it.agentName}`;
-    const what = it.pullRequest ? `${it.pullRequest.repo}#${it.pullRequest.number}` : it.artifact ? it.artifact.url : `${who}|${it.at}`;
+    const what = it.pullRequest ? prKey(it.pullRequest) : it.artifact ? it.artifact.url : `${who}|${it.at}`;
     const key = it.kind === 'turn_finished' ? `turn|${who}` : `${it.kind}|${what}`;
     const row = g.rows.get(key);
     if (!row) {
@@ -162,13 +164,27 @@ export function groupCatchup(items: readonly CatchupItem[]): CatchupGroup[] {
     .sort((a, b) => newest(b.rows) - newest(a.rows) || a.projectId.localeCompare(b.projectId));
 }
 
+/**
+ * The items the page may show for the GitLab hosts it knows now
+ * (Snapshot.gitlabHosts): a merge request item of a host that is not in the
+ * list (glab was logged out of it, or never was) is left out whole, row and
+ * title, since the title of a merge request is the host's data. GitHub items
+ * and items without a pull request are untouched. Applied to the list on
+ * every render, so a snapshot that drops a host takes its rows away at once,
+ * also while the next catch-up poll is still to come or has failed.
+ */
+export function visibleCatchupItems(items: readonly CatchupItem[], gitlabHosts: readonly string[] = []): readonly CatchupItem[] {
+  const keep = (it: CatchupItem) => it.pullRequest?.forge !== 'gitlab' || gitlabHosts.includes(it.pullRequest.host);
+  return items.every(keep) ? items : items.filter(keep);
+}
+
 /** The word for a row's kind, never colour alone: "Turn done", "3 turns", "PR opened", "Merged", "Artifact". */
 export function rowWord(row: CatchupRow): string {
   switch (row.kind) {
     case 'turn_finished':
       return row.count > 1 ? `${row.count} turns` : 'Turn done';
     case 'pr_opened':
-      return 'PR opened';
+      return openedWord(row.pullRequest?.forge ?? 'github');
     case 'pr_merged':
       return 'Merged';
     default:
@@ -181,9 +197,20 @@ export type RowLink = { kind: 'url'; href: string; text: string } | { kind: 'car
 
 const SAFE_HREF = /^https:\/\/[^\s/]+\//;
 
-export function rowLink(row: CatchupRow, onBoard: ReadonlySet<string>): RowLink {
-  if (row.pullRequest && SAFE_HREF.test(row.pullRequest.url)) return { kind: 'url', href: row.pullRequest.url, text: `#${row.pullRequest.number}` };
-  if (row.artifact && SAFE_HREF.test(row.artifact.url)) return { kind: 'url', href: row.artifact.url, text: 'Open' };
+/**
+ * A pull request row links only the address built for its own forge, host,
+ * path and number (prHref, the rule a card uses): a GitHub one on github.com, a
+ * GitLab one on one of gitlabHosts (Snapshot.gitlabHosts; none given, none
+ * passes). A row of a forge this page does not know has no link.
+ * Only an artifact row links an artifact.
+ */
+export function rowLink(row: CatchupRow, onBoard: ReadonlySet<string>, gitlabHosts: readonly string[] = []): RowLink {
+  const pr = row.pullRequest;
+  const href = pr ? prHref(pr, gitlabHosts) : null;
+  if (pr && href !== null) return { kind: 'url', href, text: prNumber(pr) };
+  // Only an artifact row links its artifact: a pull request row whose own
+  // address does not pass never falls back to another address.
+  if (row.kind === 'artifact_published' && row.artifact && SAFE_HREF.test(row.artifact.url)) return { kind: 'url', href: row.artifact.url, text: 'Open' };
   if (row.cardId && onBoard.has(row.cardId)) return { kind: 'card', cardId: row.cardId };
   return { kind: 'none' };
 }

@@ -1,71 +1,89 @@
 package claude
 
 import (
-	"bufio"
-	"bytes"
 	"context"
-	"errors"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/IZZY-Agency/sitboard/internal/adapters/internal/proc"
 	"github.com/IZZY-Agency/sitboard/internal/adapters/internal/runner"
+	"github.com/IZZY-Agency/sitboard/internal/model"
 )
 
-// startsFunc returns the start time, as `ps -o lstart=` prints it, of each pid
-// in pids that is running. ok is false when it could not tell at all.
-type startsFunc func(ctx context.Context, pids []int) (starts map[int]string, ok bool)
+// Liveness is shared with the other agent adapters (internal/adapters/internal/proc).
+type startsFunc = proc.StartsFunc
 
-// psStarts asks ps once for all pids. Claude Code records the same value for
-// its own process in procStart (with LC_ALL=C and TZ=UTC), so comparing the
-// two tells a live session from a reused pid: a pid that a new process took
-// over after the session ended has a different start time.
-func psStarts(run runner.Func) startsFunc {
-	return func(ctx context.Context, pids []int) (map[int]string, bool) {
-		if len(pids) == 0 {
-			return map[int]string{}, true
-		}
-		list := make([]string, len(pids))
-		for i, p := range pids {
-			list[i] = strconv.Itoa(p)
-		}
-		out, err := run(ctx, "ps", "-o", "pid=,lstart=", "-p", strings.Join(list, ","))
+var (
+	psStarts      = proc.PSStarts
+	defaultStarts = proc.DefaultStarts
+	parsePS       = proc.ParsePS
+	sameStart     = proc.SameStart
+)
+
+// ttyFunc returns the terminal of process pid as a path ("/dev/ttys004",
+// "/dev/pts/3"), "" when it has none or ps cannot tell.
+type ttyFunc func(ctx context.Context, pid int) string
+
+// psTTY asks ps for the terminal of one process. ps prints its name below
+// /dev ("ttys004" on macOS, "pts/3" on Linux), and "??" or "?" for none.
+func psTTY(run runner.Func) ttyFunc {
+	return func(ctx context.Context, pid int) string {
+		out, err := run(ctx, "ps", "-o", "tty=", "-p", strconv.Itoa(pid))
 		if err != nil {
-			// ps exits 1, silently, when some pid is not running; what it
-			// printed still counts. Any other failure, or an exit 1 with an
-			// error message, says nothing about the sessions: unknown.
-			var ee *runner.ExitError
-			if !errors.As(err, &ee) || ee.Code != 1 || len(bytes.TrimSpace(ee.Stderr)) > 0 {
-				return nil, false
-			}
-			out = ee.Stdout
+			return ""
 		}
-		return parsePS(out), true
+		tty := "/dev/" + strings.TrimSpace(string(out))
+		if !model.ValidTTY(tty) {
+			return ""
+		}
+		return tty
 	}
 }
 
-func defaultStarts() startsFunc {
-	return psStarts(runner.Exec(2*time.Second, "LC_ALL=C", "TZ=UTC"))
+func defaultTTY() ttyFunc {
+	return psTTY(runner.Exec(2*time.Second, "LC_ALL=C"))
 }
 
-func parsePS(out []byte) map[int]string {
-	starts := map[int]string{}
-	sc := bufio.NewScanner(bytes.NewReader(out))
-	for sc.Scan() {
-		f := strings.Fields(sc.Text())
-		if len(f) < 2 {
-			continue
-		}
-		pid, err := strconv.Atoi(f[0])
-		if err != nil || pid <= 0 {
-			continue
-		}
-		starts[pid] = strings.Join(f[1:], " ")
+// ownPane keeps the tmux pane read from process pid's environment only when
+// tmux confirms that the pane shows the process's own terminal. TMUX and
+// TMUX_PANE are inherited: a program started from a tmux pane (an editor
+// whose terminal then starts claude) carries them too, and after a tmux
+// server restart the same pane id can name another pane. A process holds its
+// terminal open, so no other pane can show that terminal while it runs.
+//
+// The process and the start time ps printed for it (start) go with the
+// pane: a click confirms that process still runs before focusing
+// (ProcessAlive), since a new pane can take both the pane id and the terminal
+// once it ended. Without a start time there is no pane.
+func (a *adapter) ownPane(ctx context.Context, pid int, start string, pane model.TmuxPane) model.TmuxPane {
+	if !pane.ValidPlace() || a.opts.TmuxOwns == nil || strings.TrimSpace(start) == "" {
+		return model.TmuxPane{}
 	}
-	return starts
+	pane.TTY = a.tty(ctx, pid)
+	if !pane.Valid() || !a.opts.TmuxOwns(ctx, pane) {
+		return model.TmuxPane{}
+	}
+	pane.PID, pane.Start = pid, start
+	return pane
 }
 
-// sameStart compares two lstart strings, ignoring how spaces pad them.
-func sameStart(a, b string) bool {
-	return strings.Join(strings.Fields(a), " ") == strings.Join(strings.Fields(b), " ")
+// ProcessAlive says whether process pid runs and started at start (ps
+// lstart): the same liveness check the watcher makes. False when ps cannot
+// tell, and for an empty start, which matches nothing. The tmux jump asks it
+// at click time.
+func ProcessAlive(ctx context.Context, pid int, start string) bool {
+	return processAlive(ctx, defaultStarts(), pid, start)
+}
+
+func processAlive(ctx context.Context, starts startsFunc, pid int, start string) bool {
+	if pid <= 0 || strings.TrimSpace(start) == "" {
+		return false
+	}
+	got, ok := starts(ctx, []int{pid})
+	if !ok {
+		return false
+	}
+	s, running := got[pid]
+	return running && sameStart(s, start)
 }

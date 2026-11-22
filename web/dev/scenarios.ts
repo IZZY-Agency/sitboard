@@ -1,17 +1,23 @@
 // Dev harness only: placeholder data from the contract's golden snapshot and
 // generated placeholders. Never part of the build (scripts/check-dist.mjs).
 import goldenJson from '../../internal/contract/golden/snapshot.v1.json';
-import type { Card, Snapshot } from '../src/contract.gen';
+import type { Card, Snapshot, Spend } from '../src/contract.gen';
+import { addSpend, addTokens, localDay, noTokens } from '../src/data/spend';
 
 export const SCENARIOS = [
   'golden',
+  'spend',
+  'spend-unpriced',
+  'spend-pending',
   'settled',
   'crowd',
   'effort',
+  'codex',
   'projects',
   'forty',
   'one',
   'site',
+  'gitlab',
   'grouping',
   'settings200',
   'hostile',
@@ -32,6 +38,9 @@ const clone = <T>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
 function fresh(s: Snapshot): Snapshot {
   const delta = Date.now() - Date.parse(s.generatedAt);
   const shift = (t?: string) => (t ? new Date(Date.parse(t) + delta).toISOString() : t);
+  // Spend days move with it: the golden's last day becomes today.
+  const days = Math.round((Date.parse(`${localDay(Date.now())}T12:00:00`) - Date.parse(`${s.generatedAt.slice(0, 10)}T12:00:00`)) / 86_400_000);
+  for (const d of s.spend.days) d.day = localDay(Date.parse(`${d.day}T12:00:00`) + days * 86_400_000);
   s.generatedAt = new Date().toISOString();
   for (const c of s.cards) {
     c.agent.statusSince = shift(c.agent.statusSince);
@@ -48,7 +57,7 @@ function group(s: Snapshot, id: string, area: string, parentId = ''): void {
   if (p) Object.assign(p, { area, parentId });
 }
 function addProject(s: Snapshot, id: string, name: string, area = '', parentId = ''): void {
-  s.projects.push({ id, name, path: `~/projects/${name}`, repo: '', counts: { working: 0, needsYou: 0, inReview: 0, stale: 0 }, area, parentId });
+  s.projects.push({ id, name, path: `~/projects/${name}`, repo: '', repoForge: '', repoHost: '', counts: { working: 0, needsYou: 0, inReview: 0, stale: 0 }, area, parentId });
 }
 
 export function golden(): Snapshot {
@@ -59,6 +68,57 @@ export function golden(): Snapshot {
   if (b) group(s, b.id, 'area-one');
   addProject(s, 'p_0000000000a1', 'alpha-web', '', a.id);
   for (const c of s.cards.filter((x) => x.projectId === a.id).slice(1, 3)) c.projectId = 'p_0000000000a1';
+  return s;
+}
+
+/**
+ * Seven days of spend for the panel's pictures: three projects, one day with
+ * use that has no price next to use that has ("mixed"), or none priced at all
+ * ("unpriced"); "pending" is the mixed week while older sessions are read.
+ */
+function spendWeek(kind: 'mixed' | 'unpriced' | 'pending'): Snapshot {
+  const s = golden();
+  const ids = [s.projects[0], s.projects[1], s.projects.find((p) => p.id === 'p_0000000000a1')!];
+  const one = (out: number, usd: number, priced: boolean): Spend => ({
+    tokens: { input: Math.round(out / 20), output: out, cacheRead: out * 90, cacheWrite: out * 8 },
+    usd: priced ? usd : kind === 'unpriced' ? 0 : usd,
+    priced,
+    recorded: false,
+  });
+  const zero = (): Spend => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, usd: 0, priced: true, recorded: false });
+  s.spend.days = [];
+  for (let back = 6; back >= 0; back--) {
+    const day = localDay(Date.now() - back * 86_400_000);
+    const per = ids.map((p, i) => {
+      if (back > 3 && i === 1) return null; // no use that day
+      const out = 40_000 + ((back * 37 + i * 91) % 9) * 17_000;
+      const unpriced = kind === 'unpriced' || (i === 1 && back % 2 === 0) || (i === 0 && back === 0);
+      const partsPriced = kind !== 'unpriced' && i === 0 && back === 0; // some of it priced: a "+ unpriced" total
+      // Codex use (tokens only) in the first project on the last three days.
+      const cx = i === 0 && back <= 2 ? 12_000 + back * 9_000 : 0;
+      const codex = { input: Math.round(cx / 10), output: cx, cacheRead: cx * 60, cacheWrite: 0 };
+      return {
+        projectId: p.id,
+        name: p.name,
+        path: p.path,
+        spend: unpriced ? (partsPriced ? one(out, 8.75, false) : one(out, 0, false)) : one(out, out / 11_000, true),
+        codex,
+      };
+    });
+    const projects = per.filter((x) => x !== null);
+    s.spend.days.push({
+      day,
+      spend: projects.reduce((t, x) => addSpend(t, x.spend), zero()),
+      codex: projects.reduce((t, x) => addTokens(t, x.codex), noTokens()),
+      projects,
+    });
+  }
+  s.spend.pending = kind === 'pending';
+  // The cards agree with the panel: some use unpriced everywhere, or in one card only.
+  for (const [i, c] of s.cards.entries()) {
+    if (kind === 'unpriced') c.spend = { ...c.spend, usd: 0, priced: false };
+    else if (i === 0) c.spend = { ...c.spend, priced: false };
+  }
   return s;
 }
 
@@ -74,6 +134,8 @@ function crowd(): Snapshot {
     name,
     path: `~/projects/${name}`,
     repo: '',
+    repoForge: '' as const,
+    repoHost: '',
     parentId: '',
     area: 'projects',
     counts: { working: 0, needsYou: 0, inReview: 0, stale: 0 },
@@ -103,11 +165,13 @@ function crowd(): Snapshot {
     const claude = c.agent.model === '' || c.agent.model.startsWith('claude-');
     c.agent.effort = claude ? effort : '';
     c.agent.effortSource = !claude || effort === '' ? 'none' : c.agent.model === '' ? 'launch' : 'recorded';
+    // A Codex model with an effort word that has no place on the ramp.
+    c.agent.effortWord = claude ? '' : 'ultra';
     c.pullRequests =
       c.column === 'in_review' || c.column === 'done' || i % 4 === 1
         ? [
             {
-              repo: 'placeholder/repo',
+              forge: 'github' as const, host: 'github.com', repo: 'placeholder/repo',
               number: 200 + i,
               title: 'Placeholder',
               url: `https://github.com/placeholder/repo/pull/${200 + i}`,
@@ -124,7 +188,7 @@ function crowd(): Snapshot {
   // the card is an unseen turn (rule 5), which an open pull request would
   // have sent to In review (rule 4) instead.
   s.cards[0].pullRequests = Array.from({ length: 26 }, (_, i) => ({
-    repo: 'placeholder/repo',
+    forge: 'github' as const, host: 'github.com', repo: 'placeholder/repo',
     number: 400 - i,
     title: 'Placeholder',
     url: `https://github.com/placeholder/repo/pull/${400 - i}`,
@@ -199,6 +263,10 @@ function site(): Snapshot {
   const s = golden();
   const base = s.cards[1];
   s.groupingSettings = []; // the website's pictures show no grouping settings
+  // GitHub only, as the server sends it: no merge request, so no GitLab host,
+  // and no GitLab source line (the server does not report one yet).
+  s.gitlabHosts = [];
+  s.sources = s.sources.filter((x) => x.kind !== 'gitlab');
   s.projects = [];
   addProject(s, 'p_site00000001', 'harbor', 'studio');
   addProject(s, 'p_site00000002', 'harbor-web', '', 'p_site00000001');
@@ -207,7 +275,7 @@ function site(): Snapshot {
   addProject(s, 'p_site00000005', 'pixel-kit', '');
   const repo = 'example-org/harbor';
   const pr = (number: number, state: 'open' | 'merged', checks: 'passing' | 'running' | 'failing' | 'none' = 'passing') => ({
-    repo,
+    forge: 'github' as const, host: 'github.com', repo,
     number,
     title: 'Placeholder',
     url: `https://github.com/${repo}/pull/${number}`,
@@ -257,7 +325,7 @@ function site(): Snapshot {
     c.subagents = x.id === lead ? 3 : 0;
     c.pullRequests = x.prs ?? [];
     c.artifacts = (x.arts ?? []).map(art);
-    c.issues = (x.issues ?? []).map((n) => ({ repo, number: n, url: `https://github.com/${repo}/issues/${n}` }));
+    c.issues = (x.issues ?? []).map((n) => ({ forge: 'github' as const, host: 'github.com', repo, number: n, url: `https://github.com/${repo}/issues/${n}` }));
     c.agent.name = x.name;
     c.agent.model = x.model ?? 'claude-opus-5-5';
     c.agent.effort = x.effort ?? '';
@@ -288,6 +356,49 @@ function site(): Snapshot {
     inReview: s.cards.filter((c) => c.column === 'in_review').length,
     stale: 0,
   };
+  return s;
+}
+
+/** The sample GitLab host and group of the "gitlab" scenario (invented). */
+export const SAMPLE_GITLAB_HOST = 'gitlab.example';
+export const SAMPLE_GITLAB_PATH = 'example-group/harbor-api';
+/** Its merge requests' titles, shared with the "gitlab" catch-up list. */
+export const SAMPLE_MR_TITLES: Record<number, string> = {
+  27: 'Refresh tokens without a second login',
+  29: 'Session refresh for long-lived tokens',
+  31: 'Retry failed card payments once',
+};
+
+/**
+ * The "site" board with its API part on a GitLab host: merge requests beside
+ * pull requests, one waiting for an approval, one merged, an issue it closes,
+ * and the GitLab source read through glab. Invented names only.
+ */
+function gitlabScenario(): Snapshot {
+  const s = site();
+  const host = SAMPLE_GITLAB_HOST;
+  const path = SAMPLE_GITLAB_PATH;
+  const api = s.projects.find((p) => p.id === 'p_site00000003')!;
+  Object.assign(api, { repo: path, repoForge: 'gitlab', repoHost: host });
+  const mr = (number: number, state: 'open' | 'merged', review: Card['pullRequests'][number]['review'], checks: Card['pullRequests'][number]['checks'] = 'passing') => ({
+    forge: 'gitlab' as const, host, repo: path,
+    number,
+    title: SAMPLE_MR_TITLES[number] ?? 'Placeholder',
+    url: `https://${host}/${path}/-/merge_requests/${number}`,
+    state,
+    checks,
+    review,
+    draft: false,
+  });
+  const byId = (id: string) => s.cards.find((c) => c.id === id)!;
+  const payments = byId('claude:site-w4');
+  payments.pullRequests = [mr(31, 'open', 'review_required')];
+  payments.issues = [{ forge: 'gitlab', host, repo: path, number: 12, url: `https://${host}/${path}/-/issues/12` }];
+  const auth = byId('claude:site-w2');
+  auth.pullRequests = [mr(29, 'open', 'approved', 'running'), mr(27, 'merged', 'approved')];
+  auth.titleSource = 'pr';
+  s.gitlabHosts = [host];
+  s.sources = [...s.sources, { kind: 'gitlab', state: 'ok', version: '1.46.0', detail: '', tested: true, ready: true }];
   return s;
 }
 
@@ -359,6 +470,112 @@ function effort(): Snapshot {
 }
 
 /**
+ * Codex sessions among Claude Code ones, sample names only: a terminal
+ * session at work with an effort word off the ramp ("ultra"), one that
+ * finished with a title the model wrote, one blocked (known through agterm),
+ * one with no title (the card takes the folder's name), a `codex exec` run
+ * with a pull request, and a known level. The Codex source line says what the
+ * adapter says.
+ */
+function codexScenario(): Snapshot {
+  const s = golden();
+  const claude = s.cards[1];
+  s.sources = s.sources.map((x) => (x.kind === 'codex' ? { ...x, version: '0.171.0', detail: 'approval waits show only through agterm', ready: true } : { ...x, ready: true }));
+  const project = s.projects[0].id;
+  type Spec = {
+    id: string;
+    name: string;
+    title: string;
+    titleSource: Card['titleSource'];
+    column: Card['column'];
+    status: Card['agent']['status'];
+    since: number;
+    effort: string;
+    folder: string;
+    terminal?: string;
+    attention?: Card['attention'];
+    seen?: boolean;
+    headless?: boolean;
+    prs?: Card['pullRequests'];
+    subagents?: number;
+  };
+  const specs: Spec[] = [
+    { id: 'codex:aaaaaaaa-0000-4000-8000-000000000001', name: 'sample-refactor', title: 'sample-refactor', titleSource: 'session', column: 'working', status: 'busy', since: 6, effort: 'ultra', folder: '~/projects/alpha', terminal: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', subagents: 2 },
+    { id: 'codex:aaaaaaaa-0000-4000-8000-000000000002', name: 'Sample title the model wrote for this thread', title: 'Sample title the model wrote for this thread', titleSource: 'session', column: 'needs_you', status: 'finished', since: 14, effort: 'high', folder: '~/projects/alpha', terminal: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', attention: ['unseen'], seen: false },
+    { id: 'codex:aaaaaaaa-0000-4000-8000-000000000003', name: 'sample-approval', title: 'sample-approval', titleSource: 'session', column: 'needs_you', status: 'blocked', since: 3, effort: 'minimal', folder: '~/projects/alpha', terminal: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', attention: ['blocked'] },
+    { id: 'codex:aaaaaaaa-0000-4000-8000-000000000004', name: '', title: 'beta', titleSource: 'folder', column: 'idle', status: 'finished', since: 95, effort: 'ultra', folder: '~/projects/beta', terminal: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', seen: true },
+    {
+      id: 'codex:aaaaaaaa-0000-4000-8000-000000000005',
+      name: 'sample-exec-run',
+      title: 'Placeholder pull request title',
+      titleSource: 'pr',
+      column: 'in_review',
+      status: 'finished',
+      since: 40,
+      effort: 'medium',
+      folder: '~/projects/alpha',
+      headless: true,
+      seen: true,
+      prs: [{ forge: 'github' as const, host: 'github.com', repo: 'placeholder/repo', number: 301, title: 'Placeholder pull request title', url: 'https://github.com/placeholder/repo/pull/301', state: 'open', checks: 'passing', review: '', draft: false }],
+    },
+  ];
+  const codex = specs.map((x, i) => {
+    const c = clone(claude);
+    // Sample token counts; Codex keeps no price, so never an amount.
+    const out = [84_000, 21_000, 9_500, 3_200, 46_000][i % 5];
+    c.spend = { tokens: { input: Math.round(out / 10), output: out, cacheRead: out * 60, cacheWrite: 0 }, usd: 0, priced: false, recorded: false };
+    c.id = x.id;
+    c.projectId = project;
+    c.title = x.title;
+    c.titleSource = x.titleSource;
+    c.column = x.column;
+    c.attention = x.attention ?? [];
+    c.seen = x.seen ?? true;
+    c.subagents = x.subagents ?? 0;
+    c.pullRequests = x.prs ?? [];
+    c.issues = [];
+    c.artifacts = [];
+    c.agent.tool = 'codex';
+    c.agent.name = x.name;
+    c.agent.model = 'gpt-5.4-codex';
+    const onRamp = (['low', 'medium', 'high', 'xhigh', 'max'] as string[]).includes(x.effort);
+    c.agent.effort = (onRamp ? x.effort : '') as Card['agent']['effort'];
+    c.agent.effortSource = onRamp ? 'recorded' : 'none';
+    c.agent.effortWord = onRamp ? '' : x.effort;
+    c.agent.status = x.status;
+    c.agent.statusSince = ago(x.since);
+    c.agent.startedAt = ago(x.since + 90);
+    c.agent.lastActivity = ago(Math.max(1, x.since - 1));
+    c.agent.live = 'yes';
+    c.agent.parent = 'none';
+    c.agent.parentCardId = '';
+    c.agent.folder = x.folder;
+    c.agent.terminalId = x.terminal ?? '';
+    c.agent.workspace = x.terminal ? 'sample' : '';
+    return c;
+  });
+  // Claude Code sessions beside them: the lead and one worker.
+  s.cards = [...s.cards.slice(0, 2), ...codex];
+  s.cards[1].projectId = project;
+  for (const p of s.projects) {
+    const mine = s.cards.filter((c) => c.projectId === p.id);
+    p.counts = {
+      working: mine.filter((c) => c.column === 'working').length,
+      needsYou: mine.filter((c) => c.column === 'needs_you').length,
+      inReview: mine.filter((c) => c.column === 'in_review').length,
+      stale: 0,
+    };
+  }
+  s.counts = {
+    working: s.cards.filter((c) => c.column === 'working').length,
+    needsYou: s.cards.filter((c) => c.column === 'needs_you').length,
+    inReview: s.cards.filter((c) => c.column === 'in_review').length,
+    stale: 0,
+  };
+  return s;
+}
+
+/**
  * Grouping settings, on the website's sample board: the umbrella project is
  * set to always, and two sample folders are set to never.
  */
@@ -407,10 +624,18 @@ export function initial(sc: Scenario): Snapshot | null {
     case 'golden':
     case 'reconnecting':
       return golden();
+    case 'spend':
+      return spendWeek('mixed');
+    case 'spend-unpriced':
+      return spendWeek('unpriced');
+    case 'spend-pending':
+      return spendWeek('pending');
     case 'crowd':
       return crowd();
     case 'effort':
       return effort();
+    case 'codex':
+      return codexScenario();
     case 'projects':
       return manyProjects();
     case 'forty':
@@ -419,6 +644,8 @@ export function initial(sc: Scenario): Snapshot | null {
       return one();
     case 'site':
       return site();
+    case 'gitlab':
+      return gitlabScenario();
     case 'grouping':
       return groupingScenario();
     case 'settings200':
@@ -449,7 +676,10 @@ export function initial(sc: Scenario): Snapshot | null {
       const s = golden();
       s.agtermPresent = false;
       s.sources = s.sources.map((x) => (x.kind === 'agterm' ? { ...x, state: 'missing', version: '', detail: '' } : x));
-      for (const c of s.cards) c.agent.terminalId = '';
+      for (const c of s.cards) {
+        c.agent.terminalId = '';
+        if (c.agent.jump === 'agterm') c.agent.jump = 'none'; // a tmux card still jumps
+      }
       return s;
     }
     default:

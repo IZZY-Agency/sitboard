@@ -145,6 +145,14 @@ func (p *provider) probeNow(ctx context.Context) source.Status {
 
 var repoRe = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
 
+// githubSlug is fr's "owner/name" when fr is on GitHub.
+func githubSlug(fr model.ForgeRepo) (string, bool) {
+	if fr.Forge != model.ForgeGitHub || fr.Host != model.GitHubHost {
+		return "", false
+	}
+	return fr.Path, true
+}
+
 func validRepo(repo string) (owner, name string, ok bool) {
 	if !repoRe.MatchString(repo) {
 		return "", "", false
@@ -159,9 +167,13 @@ func validRepo(repo string) (owner, name string, ok bool) {
 
 // Lookup returns the pull requests of repo with the given numbers, plus the
 // newest ones whose head branch is one of branches, in one gh call.
-func (p *provider) Lookup(ctx context.Context, repo string, numbers []int, branches []string) ([]model.PullRequest, error) {
+func (p *provider) Lookup(ctx context.Context, fr model.ForgeRepo, numbers []int, branches []string) ([]model.PullRequest, error) {
 	if p.off {
 		return nil, nil
+	}
+	repo, ok := githubSlug(fr)
+	if !ok {
+		return nil, fmt.Errorf("github: not a GitHub repo")
 	}
 	owner, name, ok := validRepo(repo)
 	if !ok {
@@ -373,7 +385,7 @@ func cacheKey(repo string, nums []int, brs []string) string {
 // only the first 50.
 // A pull request's address is not asked for: it is built from the repo and the
 // number (model.PullRequestURL).
-const prFields = `number title headRefName isCrossRepository state isDraft createdAt closedAt mergedAt reviewDecision ` +
+const prFields = `number title headRefName headRefOid headRef{target{oid}} baseRefName isCrossRepository state isDraft createdAt closedAt mergedAt reviewDecision ` +
 	`closingIssuesReferences(first:50){nodes{number repository{nameWithOwner}}} ` +
 	`commits(last:1){nodes{commit{statusCheckRollup{state}}}}`
 
@@ -392,14 +404,21 @@ func buildQuery(nums []int, nBranches int) string {
 	for i := range nBranches {
 		fmt.Fprintf(&q, "b%d:pullRequests(headRefName:$b%d,first:%d,orderBy:{field:CREATED_AT,direction:DESC}){nodes{...F}} ", i, i, perBranch)
 	}
-	q.WriteString("}} fragment F on PullRequest{" + prFields + "}")
+	q.WriteString("defaultBranchRef{name}}} fragment F on PullRequest{" + prFields + "}")
 	return q.String()
 }
 
 type ghPR struct {
-	Number         int     `json:"number"`
-	Title          string  `json:"title"`
-	HeadRefName    string  `json:"headRefName"`
+	Number      int    `json:"number"`
+	Title       string `json:"title"`
+	HeadRefName string `json:"headRefName"`
+	HeadRefOid  string `json:"headRefOid"`
+	HeadRef     *struct {
+		Target *struct {
+			Oid string `json:"oid"`
+		} `json:"target"`
+	} `json:"headRef"`
+	BaseRefName    string  `json:"baseRefName"`
 	CrossRepo      bool    `json:"isCrossRepository"`
 	State          string  `json:"state"`
 	IsDraft        bool    `json:"isDraft"`
@@ -435,13 +454,19 @@ func parse(out []byte, repo string) ([]model.PullRequest, error) {
 	if err := json.Unmarshal(out, &r); err != nil {
 		return nil, errors.New("github: unexpected answer from gh")
 	}
+	var def struct {
+		Name string `json:"name"`
+	}
+	if raw, ok := r.Data.Repository["defaultBranchRef"]; ok {
+		_ = json.Unmarshal(raw, &def) // null or odd: no default branch known
+	}
 	seen := map[int]bool{}
 	var prs []model.PullRequest
 	add := func(g *ghPR) {
 		if g == nil || g.Number <= 0 || seen[g.Number] {
 			return
 		}
-		pr, ok := toModel(g, repo)
+		pr, ok := toModel(g, repo, def.Name)
 		if !ok {
 			return
 		}
@@ -466,6 +491,7 @@ func parse(out []byte, repo string) ([]model.PullRequest, error) {
 	for _, alias := range aliases {
 		raw := r.Data.Repository[alias]
 		switch {
+		case alias == "defaultBranchRef":
 		case strings.HasPrefix(alias, "n"):
 			var g *ghPR
 			if json.Unmarshal(raw, &g) == nil {
@@ -490,10 +516,33 @@ func parse(out []byte, repo string) ([]model.PullRequest, error) {
 	return prs, nil
 }
 
-func toModel(g *ghPR, repo string) (model.PullRequest, bool) {
+// oidRe is a full commit id as GitHub gives it: SHA-1 or SHA-256.
+var oidRe = regexp.MustCompile(`^(?:[0-9a-f]{40}|[0-9a-f]{64})$`)
+
+func oid(s string) string {
+	if oidRe.MatchString(s) {
+		return s
+	}
+	return ""
+}
+
+// toModel turns one answer into a pull request; defaultBranch is the repo's
+// default branch, "" when GitHub did not say.
+func toModel(g *ghPR, repo, defaultBranch string) (model.PullRequest, bool) {
 	pr := model.PullRequest{
-		Repo: repo, Number: g.Number, Title: g.Title, URL: model.PullRequestURL(repo, g.Number), HeadBranch: g.HeadRefName,
+		Repo: model.GitHubRepo(repo), Number: g.Number, Title: g.Title, URL: model.PullRequestURL(repo, g.Number), HeadBranch: g.HeadRefName,
 		Draft: g.IsDraft, OpenedAt: parseTime(g.CreatedAt),
+		BaseBranch:    g.BaseRefName,
+		BaseIsDefault: defaultBranch != "" && g.BaseRefName == defaultBranch,
+	}
+	// A fork's head commit and branch live in another repository: they say
+	// nothing about a branch of the same name here, so a fork's pull request
+	// carries neither (and so never makes a leftover).
+	if !g.CrossRepo {
+		pr.HeadOID = oid(g.HeadRefOid)
+		if g.HeadRef != nil && g.HeadRef.Target != nil {
+			pr.HeadRefOID = oid(g.HeadRef.Target.Oid)
+		}
 	}
 	switch g.State {
 	case "OPEN":

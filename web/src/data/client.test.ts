@@ -11,10 +11,13 @@ function snap(seq: number, version = CONTRACT_VERSION): Snapshot {
     projects: [],
     cards: [],
     groupingSettings: [],
+    leftovers: { items: 0, held: 0, partial: false },
     plainShells: 0,
     counts: { working: 0, needsYou: 0, inReview: 0, stale: 0 },
     agtermPresent: false,
     build: { version: 'dev', commit: 'unknown', os: 'darwin', arch: 'arm64' },
+    spend: { days: [], pending: false },
+    gitlabHosts: [],
   };
 }
 
@@ -160,6 +163,25 @@ describe('feed', () => {
     await tick();
     expect(last(h.states).conn).toBe('outdated');
     expect(FakeES.all).toHaveLength(0);
+  });
+
+  it('a snapshot of an older contract (before forges) shows "reload the page" too', async () => {
+    const old = { ...snap(1, CONTRACT_VERSION - 1) } as Partial<Snapshot>;
+    delete old.gitlabHosts;
+    const h = harness([ok(old as Snapshot)]);
+    await tick();
+    expect(last(h.states).conn).toBe('outdated');
+    expect(FakeES.all).toHaveLength(0);
+  });
+
+  it('a gitlabHosts that is not an array of strings reaches the page as none', async () => {
+    const h = harness([ok({ ...snap(1), gitlabHosts: 'gitlab.example.com' } as unknown as Snapshot)]);
+    await tick();
+    expect(last(h.states).snapshot?.gitlabHosts).toEqual([]);
+    FakeES.all[0].send({ ...snap(2), gitlabHosts: [7, 'gitlab.example.com'] } as unknown as Snapshot);
+    expect(last(h.states).snapshot?.gitlabHosts).toEqual(['gitlab.example.com']);
+    FakeES.all[0].send({ ...snap(3), gitlabHosts: { a: 1 } } as unknown as Snapshot);
+    expect(last(h.states).snapshot?.gitlabHosts).toEqual([]);
   });
 
   it('a newer Version arriving over the stream also stops it', async () => {

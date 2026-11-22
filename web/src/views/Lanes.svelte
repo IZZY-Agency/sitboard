@@ -5,7 +5,7 @@
   import type { Card as CardT, Snapshot } from '../contract.gen';
   import {
     agentName,
-    canJump,
+    jumpLabel,
     COLUMN_META,
     columnTone,
     inbox,
@@ -21,6 +21,7 @@
   import Critter from '../components/Critter.svelte';
   import { critterState } from '../data/critter';
   import InboxItem from '../components/InboxItem.svelte';
+  import RowLinks from '../components/RowLinks.svelte';
 
   let {
     snapshot,
@@ -51,6 +52,12 @@
     { n: snapshot.counts.stale, word: 'stale' },
   ]);
   const [send, receive] = makeMove();
+
+  // A click that reached the item itself, not the jump button or a link: a
+  // raised part (.tip). The button and the links handle their own clicks.
+  function rowClick(e: MouseEvent, card: CardT) {
+    if (!(e.target instanceof Element) || !e.target.closest('a, button')) onjump(card);
+  }
 </script>
 
 <div class="lanes">
@@ -65,7 +72,7 @@
       <div class="items">
         {#each strip as card (card.id)}
           <div class="strip-slot" animate:flip={flipOpts()} in:receive={{ key: 's' + card.id }} out:send={{ key: 's' + card.id }}>
-            <InboxItem {card} {ix} {now} agtermPresent={snapshot.agtermPresent} flashToken={arrivals.get(card.id) ?? 0} {onjump} {onseen} />
+            <InboxItem {card} {ix} {now} flashToken={arrivals.get(card.id) ?? 0} {onjump} {onseen} />
           </div>
         {/each}
       </div>
@@ -110,29 +117,35 @@
               {#each row.cells[col] as card (card.id)}
                 {@const note = laneNote(card, ix)}
                 {@const name = agentName(card)}
-                <button
-                  type="button"
+                <!-- The name is the jump button; its hit area covers the whole
+                     item, and the links in the note sit above it (RowLinks). -->
+                <!-- A pointer-only click for the parts raised above the jump area
+                     (.tip, for their tooltips): they still jump. Keyboards and
+                     screen readers use the button. -->
+                <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+                <div
                   class="it"
                   data-card={card.id}
+                  onclick={(e) => rowClick(e, card)}
                   animate:flip={flipOpts()}
                   in:receive={{ key: card.id }}
                   out:send={{ key: card.id }}
-                  onclick={() => onjump(card)}
                 >
-                  <span class="visually-hidden">{canJump(card, snapshot.agtermPresent) ? 'Jump to agterm:' : 'Show where it runs:'}</span>
                   <span class="it-top">
-                    <Critter id={card.id} mood={critterState(card)} size={20} />
-                    <span class="agent u">{name}</span>
+                    <button type="button" class="jump" onclick={() => onjump(card)}
+                      ><span class="visually-hidden">{jumpLabel(card)}</span
+                      ><Critter id={card.id} mood={critterState(card)} size={20} /><span class="agent u">{name}</span></button
+                    >
                     <span class="since">{timeInState(card, now)}</span>
                   </span>
                   <span class="note tone-{note.tone} u"
                     >{#if note.head}{note.head}{' · '}{/if}<span class="model {note.hue ? `model-${note.hue}` : ''}">{note.model}</span
                     >{#if note.effort}<span class="visually-hidden">, effort</span>{' '}<span
-                        class="eff effort-{note.effort.level}"
+                        class="eff tip effort-{note.effort.level}"
                         class:launch={note.effort.launch}
-                        title={note.effort.title}>{note.effort.level}{#if note.effort.launch}<span class="at">{' at launch'}</span>{/if}</span
-                      >{/if}{#if note.tail}{' · '}{note.tail}{/if}{#if note.closes}{' · '}<span class="closes u">{note.closes}</span>{/if}</span>
-                </button>
+                        title={note.effort.title}>{note.effort.text}{#if note.effort.launch}<span class="at">{' at launch'}</span>{/if}</span
+                      >{/if}{#if note.tail}{' · '}{note.tail}{/if}{#if note.prs.length}{' · '}<RowLinks parts={note.prs} />{/if}</span>
+                </div>
               {/each}
             </div>
           {/each}
@@ -280,6 +293,7 @@
   .it {
     /* The critter's eyes are holes in the page ground. */
     --hole: var(--bg);
+    position: relative;
     display: flex;
     flex-direction: column;
     justify-content: center;
@@ -289,10 +303,10 @@
     padding: 4px 0;
     transition: transform var(--press) ease-out;
   }
-  .it:active {
+  .it:has(.jump:active, .tip:active) {
     transform: translateY(1px);
   }
-  .it:hover .agent {
+  .it:has(.jump:hover, .tip:hover) .agent {
     color: var(--amber-hover);
   }
   .it-top {
@@ -301,6 +315,32 @@
     gap: 7px;
     min-width: 0;
     font-size: var(--text-m);
+  }
+  .jump {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    min-width: 0;
+  }
+  /* The button's hit area, stretched over the whole item; its focus ring too. */
+  .jump::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+  }
+  .jump:focus-visible {
+    outline: none;
+  }
+  .jump:focus-visible::after {
+    outline: 2px solid var(--amber);
+    outline-offset: 0;
+  }
+  /* A part with a tooltip sits above the jump area, so the pointer reaches its
+     title; a click on it still jumps (rowClick). */
+  .tip {
+    position: relative;
+    z-index: 1;
+    cursor: pointer;
   }
   .agent {
     color: var(--fg);
@@ -321,9 +361,6 @@
     line-height: 1.45;
     color: var(--tone);
     overflow-wrap: anywhere;
-  }
-  .closes {
-    color: var(--muted);
   }
   .model {
     color: var(--model, inherit);

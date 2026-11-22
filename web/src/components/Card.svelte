@@ -5,7 +5,7 @@
     artifactTitle,
     attentionLines,
     cardArtifacts,
-    canJump,
+    jumpLabel,
     cardPrs,
     cardClosesParts,
     cardTitle,
@@ -14,6 +14,7 @@
     modelLabel,
     modelUnknown,
     prHref,
+    prKey,
     prLineParts,
     projectLabel,
     roleLine,
@@ -25,7 +26,9 @@
   import { critterState } from '../data/critter';
   import Critter from './Critter.svelte';
   import PrIcon from './PrIcon.svelte';
+  import { hasGitLab, requestLinkHint, requestsHeading } from '../data/words';
   import ArtifactIcon from './ArtifactIcon.svelte';
+  import SpendFigure from './SpendFigure.svelte';
 
   let {
     card,
@@ -56,7 +59,8 @@
     const out = attentionLines(card, now);
     if (card.agent.status === 'unknown') out.push({ text: 'status unknown', tone: 'muted' });
     if (card.agent.status === 'ended') out.push({ text: 'session ended', tone: 'muted' });
-    else if (agtermPresent && !card.agent.terminalId) out.push({ text: 'not in agterm', tone: 'muted' });
+    else if (card.agent.jump === 'tmux') out.push({ text: 'in tmux', tone: 'muted' });
+    else if (agtermPresent && card.agent.jump === 'none') out.push({ text: 'not in agterm or tmux', tone: 'muted' });
     if (card.subagents > 0) out.push({ text: `${card.subagents} subagent${card.subagents === 1 ? '' : 's'}`, tone: 'muted' });
     return out;
   });
@@ -84,7 +88,7 @@
     type="button"
     onclick={() => onjump(card)}
   >
-    <span class="visually-hidden">{canJump(card, agtermPresent) ? 'Jump to agterm:' : 'Show where it runs:'}</span>
+    <span class="visually-hidden">{jumpLabel(card)}</span>
     <span class="top">
       <Critter id={card.id} mood={critterState(card)} size={24} />
       <span class="agent u">{name}</span>
@@ -98,10 +102,11 @@
         >{#if effort}<span class="visually-hidden">{', effort '}</span><span
             class="eff effort-{effort.level} {family ? `model-${family}` : ''}"
             class:unknown={modelUnknown(card.agent.model)}
-            class:launch={effort.launch}>{effort.level}{#if effort.launch}<span class="at">{' at launch'}</span>{/if}</span
+            class:launch={effort.launch}>{effort.text}{#if effort.launch}<span class="at">{' at launch'}</span>{/if}</span
           >{/if}</span
       >
       {#if role}<span class="u">{role}</span>{/if}
+      <SpendFigure spend={card.spend} codex={card.agent.tool === 'codex'} />
     </span>
     {#if flags.length}
       <span class="flags">
@@ -113,13 +118,13 @@
        get their own rows under it. A pull request whose address does not have
        the one allowed form stays plain text. -->
   {#if prs.shown.length}
-    <ul class="links prs" aria-label="Pull requests">
-      {#each prs.shown as pr, i (`${pr.repo}#${pr.number}#${i}`)}
+    <ul class="links prs" aria-label={requestsHeading(hasGitLab(ix.gitlabHosts))}>
+      {#each prs.shown as pr, i (`${prKey(pr)}#${i}`)}
         {@const l = prLineParts(pr)}
-        {@const href = prHref(pr)}
+        {@const href = prHref(pr, ix.gitlabHosts)}
         <li class="pr tone-{l.tone}">
           {#if href}<a class="link" {href} target="_blank" rel="noopener noreferrer"
-              ><PrIcon /><span class="name"><span class="num ext">{l.num}</span>{' '}{l.rest}</span><span class="visually-hidden">{' (pull request, opens in a new tab)'}</span></a
+              ><PrIcon /><span class="name"><span class="num ext">{l.num}</span>{' '}{l.rest}</span><span class="visually-hidden">{requestLinkHint(pr.forge)}</span></a
             >{:else}<PrIcon /><span>{l.num} {l.rest}</span>{/if}
         </li>
       {/each}

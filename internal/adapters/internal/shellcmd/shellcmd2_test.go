@@ -1,4 +1,4 @@
-package claude
+package shellcmd
 
 import (
 	"runtime"
@@ -14,8 +14,8 @@ func commitForm(line string) string {
 
 func noRuns(t *testing.T, cmd string) {
 	t.Helper()
-	c := parseCommand(cmd)
-	if n := c.spawnNames(); n != nil || len(c.runs("agtermctl", "session", "new")) > 0 || len(c.runs("gh", "pr", "create")) > 0 {
+	c := Parse(cmd)
+	if n := c.SpawnNames(); n != nil || len(c.Runs("agtermctl", "session", "new")) > 0 || len(c.Runs("gh", "pr", "create")) > 0 {
 		t.Errorf("%q: false detection (names %q)", cmd, n)
 	}
 }
@@ -35,7 +35,7 @@ func TestCommandSubstitution(t *testing.T) {
 		noRuns(t, cmd)
 	}
 	pr := commitForm(`Use "it's" form`) + " && git push && gh pr create --fill"
-	if len(parseCommand(pr).runs("gh", "pr", "create")) != 1 {
+	if len(Parse(pr).Runs("gh", "pr", "create")) != 1 {
 		t.Errorf("missed the pull request after a commit message: %q", pr)
 	}
 	checkNames(t, map[string][]string{
@@ -133,9 +133,9 @@ func TestSubstitutionMemoryIsBounded(t *testing.T) {
 		runtime.GC()
 		var before, after runtime.MemStats
 		runtime.ReadMemStats(&before)
-		c := parseCommand(in)
+		c := Parse(in)
 		runtime.ReadMemStats(&after)
-		_ = c.spawnNames()
+		_ = c.SpawnNames()
 		alloc := after.TotalAlloc - before.TotalAlloc
 		t.Logf("%s: %d MB allocated for %d MB of input", name, alloc>>20, len(in)>>20)
 		if alloc > 64<<20 {

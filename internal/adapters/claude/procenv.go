@@ -2,25 +2,30 @@ package claude
 
 import (
 	"bytes"
-	"encoding/binary"
 	"regexp"
 	"strings"
 
+	"github.com/IZZY-Agency/sitboard/internal/adapters/internal/proc"
 	"github.com/IZZY-Agency/sitboard/internal/model"
 )
 
 // procFacts is everything kept from a live session's process: its agterm
-// session id and the effort level it was launched with. Nothing else from the
-// arguments or the environment is kept, logged or returned: they can hold
-// prompts and secrets.
+// session id, its tmux pane and the effort level it was launched with.
+// Nothing else from the arguments or the environment is kept, logged or
+// returned: they can hold prompts and secrets.
 type procFacts struct {
-	TermID       string // agterm session id, "" when none
-	LaunchEffort string // one of model.EffortLevels, "" when none was given
+	TermID       string         // agterm session id, "" when none
+	Tmux         model.TmuxPane // zero when none
+	LaunchEffort string         // one of model.EffortLevels, "" when none was given
 }
 
 // The environment variables read from a live session's process.
 const (
 	agtermVar = "AGTERM_SESSION_ID"
+	// tmuxVar is "<socket>,<server pid>,<session index>"; tmuxPaneVar the
+	// pane id, "%N" (tmux(1), "COMMANDS").
+	tmuxVar     = "TMUX"
+	tmuxPaneVar = "TMUX_PANE"
 	// effortVar overrides the --effort flag and every later pick in the
 	// session (Claude Code's documented order).
 	effortVar = "CLAUDE_CODE_EFFORT_LEVEL"
@@ -31,7 +36,43 @@ var terminalIDRe = regexp.MustCompile(`^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f
 // pickProcFacts reads the facts from a process's arguments (the first is the
 // program) and its KEY=VALUE environment entries.
 func pickProcFacts(args, env [][]byte) procFacts {
-	return procFacts{TermID: pickAgtermID(env), LaunchEffort: launchEffort(args, env)}
+	return procFacts{TermID: pickAgtermID(env), Tmux: pickTmux(env), LaunchEffort: launchEffort(args, env)}
+}
+
+// pickTmux returns the tmux pane from a list of KEY=VALUE entries, or zero
+// when either variable is absent or not of the expected shape. Only the
+// socket path is taken from TMUX; the server pid and session index are not
+// kept.
+func pickTmux(env [][]byte) model.TmuxPane {
+	pane, ok := envValue(env, tmuxPaneVar)
+	if !ok {
+		return model.TmuxPane{}
+	}
+	v, ok := envValue(env, tmuxVar)
+	if !ok {
+		return model.TmuxPane{}
+	}
+	parts := bytes.Split(v, []byte(","))
+	if len(parts) != 3 || !digits(parts[1]) || !digits(parts[2]) {
+		return model.TmuxPane{}
+	}
+	p := model.TmuxPane{Socket: string(parts[0]), Pane: string(pane)}
+	if !p.ValidPlace() {
+		return model.TmuxPane{}
+	}
+	return p
+}
+
+func digits(b []byte) bool {
+	if len(b) == 0 || len(b) > 10 {
+		return false
+	}
+	for _, c := range b {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // pickAgtermID returns the agterm session id from a list of KEY=VALUE
@@ -174,54 +215,43 @@ func numeric(v []byte) bool {
 	return len(v) > 0 && '0' <= v[0] && v[0] <= '9'
 }
 
-// splitNul splits NUL-terminated strings; a trailing NUL ends the last one.
-func splitNul(buf []byte) [][]byte {
-	buf = bytes.TrimSuffix(buf, []byte{0})
-	if len(buf) == 0 {
-		return nil
-	}
-	return bytes.Split(buf, []byte{0})
+// readProcFacts reads a live process's arguments and environment once and
+// keeps only procFacts. Only works for the user's own processes.
+func readProcFacts(pid int) procFacts {
+	var f procFacts
+	proc.ReadArgsEnv(pid, func(args, env [][]byte) { f = pickProcFacts(args, env) })
+	return f
 }
 
 // procFactsFromLinux reads Linux's /proc/<pid>/cmdline and /proc/<pid>/environ.
 func procFactsFromLinux(cmdline, environ []byte) procFacts {
-	return pickProcFacts(splitNul(cmdline), splitNul(environ))
+	return pickProcFacts(proc.SplitNul(cmdline), proc.SplitNul(environ))
 }
 
-// procFactsFromProcArgs2 reads macOS's KERN_PROCARGS2 format: argc (int32),
-// the executable path, NUL padding, argc arguments, then the environment,
-// each NUL-terminated.
+// procFactsFromProcArgs2 reads macOS's KERN_PROCARGS2 format.
 func procFactsFromProcArgs2(buf []byte) procFacts {
-	if len(buf) < 4 {
+	args, env, ok := proc.ParseProcArgs2(buf)
+	if !ok {
 		return procFacts{}
-	}
-	argc := int(binary.LittleEndian.Uint32(buf[:4]))
-	rest := buf[4:]
-	i := bytes.IndexByte(rest, 0) // end of the executable path
-	if i < 0 {
-		return procFacts{}
-	}
-	rest = rest[i:]
-	for len(rest) > 0 && rest[0] == 0 {
-		rest = rest[1:]
-	}
-	var args [][]byte
-	for ; argc > 0; argc-- {
-		i := bytes.IndexByte(rest, 0)
-		if i < 0 {
-			return procFacts{}
-		}
-		args = append(args, rest[:i])
-		rest = rest[i+1:]
-	}
-	var env [][]byte
-	for len(rest) > 0 {
-		i := bytes.IndexByte(rest, 0)
-		if i <= 0 { // an empty string ends the environment
-			break
-		}
-		env = append(env, rest[:i])
-		rest = rest[i+1:]
 	}
 	return pickProcFacts(args, env)
+}
+
+// AgtermIDOf returns the agterm session id in the environment of the user's
+// own process pid, or "" when it has none or cannot be read. The tmux jump
+// asks it for the tmux client it is about to move, to raise that client's
+// agterm session. Like for a session's process, only the id is kept.
+//
+// A client that itself runs in tmux (nested tmux) has an inherited id: it
+// comes from the outer tmux server's environment, captured where that server
+// was started, not from the agterm session showing it now. Then it is "".
+func AgtermIDOf(pid int) string {
+	if pid <= 0 {
+		return ""
+	}
+	f := readProcFacts(pid)
+	if f.Tmux.ValidPlace() {
+		return ""
+	}
+	return f.TermID
 }

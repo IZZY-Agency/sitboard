@@ -81,7 +81,7 @@ func TestSecondBinaryOnOneStateFileIsRefused(t *testing.T) {
 	if err := os.Mkdir(home, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	env := append(os.Environ(), "HOME="+home, "XDG_STATE_HOME="+filepath.Join(home, ".local", "state"))
+	env := isolatedEnv(home)
 	first := runUntilLink(t, bin, env, "--no-open", "--port", "0")
 
 	var stdout, stderr bytes.Buffer
@@ -111,4 +111,31 @@ func TestSecondBinaryOnOneStateFileIsRefused(t *testing.T) {
 
 	runUntilLink(t, bin, env, "--no-open", "--port", "0", "--no-state")
 	runUntilLink(t, bin, env, "--no-open", "--port", "0", "--state", filepath.Join(t.TempDir(), "own.json"))
+}
+
+// The launchers' environment points every folder a tool of the developer's is
+// read from into the temporary home, even when the developer's own shell sets
+// CODEX_HOME or CLAUDE_CONFIG_DIR.
+func TestLaunchersIgnoreTheDevelopersToolFolders(t *testing.T) {
+	t.Setenv("CODEX_HOME", "/developers/codex")
+	t.Setenv("CLAUDE_CONFIG_DIR", "/developers/claude")
+	home := filepath.Join(t.TempDir(), "home")
+	got := map[string][]string{}
+	for _, kv := range isolatedEnv(home) {
+		k, v, _ := strings.Cut(kv, "=")
+		got[k] = append(got[k], v)
+	}
+	for k, want := range map[string]string{
+		"HOME":              home,
+		"XDG_STATE_HOME":    filepath.Join(home, ".local", "state"),
+		"CODEX_HOME":        filepath.Join(home, ".codex"),
+		"CLAUDE_CONFIG_DIR": filepath.Join(home, ".claude"),
+	} {
+		if v := got[k]; len(v) != 1 || v[0] != want {
+			t.Errorf("%s = %q, want exactly %q", k, v, want)
+		}
+	}
+	if len(got["PATH"]) != 1 {
+		t.Errorf("the rest of the environment was not kept: PATH = %q", got["PATH"])
+	}
 }

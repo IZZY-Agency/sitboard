@@ -201,7 +201,7 @@ export class BoardState {
   async jump(card: Card): Promise<void> {
     const name = clean(card.agent.name);
     const folder = clean(card.agent.folder);
-    if (!canJump(card, this.raw?.agtermPresent ?? false)) {
+    if (!canJump(card)) {
       this.notice = { kind: 'copy', cardId: card.id, name, folder, why: this.raw?.agtermPresent ? 'no_terminal' : 'no_agterm' };
       return;
     }

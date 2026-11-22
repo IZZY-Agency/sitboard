@@ -25,6 +25,8 @@ import {
   cardArtifacts,
   closesParts,
   closesText,
+  cardPrSummaryParts,
+  rowLineText,
   issueHref,
   prHref,
   effortOf,
@@ -42,7 +44,7 @@ import type { Artifact, Card, PullRequest, SourceStatus } from '../contract.gen'
 
 const NOW = Date.parse('2026-11-17T10:00:00Z');
 const pr = (number: number, over: Partial<PullRequest> = {}): PullRequest => ({
-  repo: 'org/repo',
+  forge: 'github' as const, host: 'github.com', repo: 'org/repo',
   number,
   title: 't',
   url: 'https://github.com/org/repo/pull/' + number,
@@ -233,7 +235,7 @@ describe('words', () => {
     ],
   ];
 
-  const issue = (number: number, repo = 'org/repo') => ({ repo, number, url: `https://github.com/${repo}/issues/${number}` });
+  const issue = (number: number, repo = 'org/repo') => ({ forge: 'github' as const, host: 'github.com', repo, number, url: `https://github.com/${repo}/issues/${number}` });
 
   it('closes: numbers only, at most two, then the count; duplicates counted once', () => {
     expect(closesText([], 'org/repo')).toBe('');
@@ -280,14 +282,33 @@ describe('words', () => {
     expect(cardPrSummary(d, homeIx(d))!.text).toBe('#5 open · checks passing · closes #7 other#3');
   });
 
-  it('the lane note keeps the closed issues apart, so they never take the note\'s tone', () => {
+  it('the lane note keeps the pull requests and closed issues apart from its text, last, the closes part marked', () => {
     const a = card({ attention: ['failing_checks'], pullRequests: [pr(5, { checks: 'failing' })], issues: [issue(7)] });
     const n = laneNote(a, homeIx(a));
     expect(n.tone).toBe('failing');
-    expect(n.tail).toMatch(/#5 open · checks failing$/);
-    expect(n.closes).toBe('closes #7');
+    expect(n.tail).not.toContain('#5');
+    expect(rowLineText(n.prs)).toBe('#5 open · checks failing · closes #7');
+    expect(n.prs.map((p) => p.closes)).toEqual([false, false, true]);
     const b = card({ pullRequests: [], issues: [issue(7)] });
-    expect(laneNote(b, homeIx(b)).closes).toBe('');
+    expect(laneNote(b, homeIx(b)).prs).toEqual([]);
+  });
+
+  it('a row line in parts links each number shown to its own address, and nothing else', () => {
+    const own = (n: number) => pr(n, { url: `https://github.com/org/repo/pull/${n}` });
+    const a = card({
+      pullRequests: [own(9), pr(8, { url: 'https://github.com/attacker-org/phish/pull/8' }), own(7), own(6), ...merged(5, 2)],
+      issues: [issue(3), { ...issue(2), url: 'javascript:alert(2)' }, issue(1)],
+    });
+    const s = cardPrSummaryParts(a, homeIx(a))!;
+    expect(rowLineText(s.parts)).toBe(cardPrSummary(a, homeIx(a))!.text);
+    expect(rowLineText(s.parts)).toBe('#9 #8 +2 open · checks passing · +2 merged · closes #3 #2 +1');
+    const links = s.parts.flatMap((p) => p.bits).filter((b) => b.href);
+    expect(links.map((b) => [b.text, b.kind, b.href])).toEqual([
+      ['#9', 'pr', 'https://github.com/org/repo/pull/9'],
+      ['#3', 'issue', 'https://github.com/org/repo/issues/3'],
+    ]);
+    // Only the numbers carry a kind; "+2", the words and the separators are text.
+    expect(s.parts.flatMap((p) => p.bits).filter((b) => b.kind).map((b) => b.text)).toEqual(['#9', '#8', '#3', '#2']);
   });
 
   it.each(cases)('pull requests, %s: card lines, card "more" line, row line', (_name, list, lines, more, row) => {
@@ -469,7 +490,7 @@ describe('artifacts', () => {
 });
 
 describe('pull request and issue links', () => {
-  const pr = (url: string, repo = 'o/r', number = 1) => ({ repo, number, url });
+  const pr = (url: string, repo = 'o/r', number = 1) => ({ forge: 'github' as const, host: 'github.com', repo, number, url });
 
   it('links only a github.com pull request or issue address of the one allowed form', () => {
     expect(prHref(pr('https://github.com/example-org/example-repo/pull/12', 'example-org/example-repo', 12))).toBe('https://github.com/example-org/example-repo/pull/12');
@@ -528,9 +549,9 @@ describe('pull request and issue links', () => {
   });
 
   it('closes in parts: the same labels as the text, each with its link or none', () => {
-    const ok = { repo: 'org/repo', number: 7, url: 'https://github.com/org/repo/issues/7' };
-    const bad = { repo: 'org/other', number: 8, url: 'javascript:alert(1)' };
-    const more = { repo: 'org/repo', number: 9, url: 'https://github.com/org/repo/issues/9' };
+    const ok = { forge: 'github' as const, host: 'github.com', repo: 'org/repo', number: 7, url: 'https://github.com/org/repo/issues/7' };
+    const bad = { forge: 'github' as const, host: 'github.com', repo: 'org/other', number: 8, url: 'javascript:alert(1)' };
+    const more = { forge: 'github' as const, host: 'github.com', repo: 'org/repo', number: 9, url: 'https://github.com/org/repo/issues/9' };
     expect(closesParts([], 'org/repo')).toBeNull();
     expect(closesParts([ok, bad, more], 'org/repo')).toEqual({
       items: [
@@ -543,6 +564,24 @@ describe('pull request and issue links', () => {
   });
 });
 describe('effortOf', () => {
+  it('an effort word off the ramp shows as written, with no level', () => {
+    const at = (effort: string, effortWord: string) =>
+      effortOf(card({ agent: { effort, effortSource: 'none', effortWord } as unknown as Partial<Card['agent']> }));
+    expect(at('', 'minimal')).toMatchObject({ level: 'word', text: 'minimal', launch: false });
+    expect(at('', 'minimal')!.title).toContain('not one of the levels');
+    for (const w of ['none', 'persistent']) expect(at('', w)).toMatchObject({ level: 'word', text: w });
+    expect(at('', 'Ultra')).toBeNull();
+    expect(at('', '<b>x</b>')).toBeNull();
+    expect(at('', 'abcdefghijklmnopq')).toBeNull();
+    expect(at('', '')).toBeNull();
+  });
+  it("Codex's ultra takes the top level's look and keeps its own word", () => {
+    const at = (effortWord: string) =>
+      effortOf(card({ agent: { effort: '', effortSource: 'none', effortWord } as unknown as Partial<Card['agent']> }));
+    expect(at('ultra')).toMatchObject({ level: 'max', text: 'ultra', launch: false });
+    expect(at('ultra')!.title).toContain('Effort ultra');
+    expect(at('ultra')!.title).toContain('max');
+  });
   it('a known level with its source; anything else is no level', () => {
     const at = (effort: string, effortSource: string) =>
       effortOf(card({ agent: { effort, effortSource } as unknown as Partial<Card['agent']> }));

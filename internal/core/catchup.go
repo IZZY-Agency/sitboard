@@ -139,7 +139,7 @@ func (b *Board) collectLocked(now, asOf, marker time.Time) []contract.CatchupIte
 		if name == "" && hasTerm {
 			name = clean(term.Name)
 		}
-		prs := b.linkedPRsLocked(s, repo)
+		prs := b.linkedPRsLocked(s)
 		ttl, _ := title(prs, s, term, hasTerm)
 		item := func(at time.Time, kind contract.CatchupKind, title string) contract.CatchupItem {
 			return contract.CatchupItem{
@@ -161,7 +161,9 @@ func (b *Board) collectLocked(now, asOf, marker time.Time) []contract.CatchupIte
 		}
 		for _, pr := range prs {
 			add := func(at time.Time, kind contract.CatchupKind) {
-				key := fmt.Sprintf("%s|%s#%d", kind, pr.Repo, pr.Number)
+				// GitHub: "<kind>|owner/name#12", byte for byte the key
+				// saved read marks were made from before forges.
+				key := string(kind) + "|" + model.PRRef{Repo: pr.Repo, Number: pr.Number}.Key()
 				if !in(at) || prsSeen[key] {
 					return
 				}
@@ -324,6 +326,23 @@ func (b *Board) backfillPendingLocked() bool {
 	return false
 }
 
+// spendPendingLocked: the spend days may still grow: Claude Code's older
+// sessions are being read (as for the catch-up panel), or Codex is present
+// and has not yet read the threads that had ended before this start. The
+// catch-up panel itself lists no Codex session, so it does not wait for Codex.
+// Callers hold b.mu.
+func (b *Board) spendPendingLocked() bool {
+	if b.backfillPendingLocked() {
+		return true
+	}
+	for _, s := range b.sources {
+		if s.Kind == contract.SourceCodex {
+			return s.State == contract.SourceOK && !b.backfilled[contract.SourceCodex]
+		}
+	}
+	return false
+}
+
 // mayCatchUpLocked: a session's history counts when its id has the safe form,
 // its folder is within the roots, and git has answered for its folder (so its
 // project id is the one the board uses). Ended sessions count too: catch-up
@@ -349,7 +368,7 @@ func prKey(p *contract.PullRequest) string {
 	if p == nil {
 		return ""
 	}
-	return fmt.Sprintf("%s#%09d", p.Repo, p.Number)
+	return fmt.Sprintf("%s|%s|%s#%09d", p.Forge, p.Host, p.Repo, p.Number)
 }
 
 func artKey(a *contract.Artifact) string {

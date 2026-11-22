@@ -21,6 +21,13 @@ function view(C: typeof Board | typeof Lanes | typeof Teams, s: Snapshot) {
 }
 const q = (sel: string) => r!.target.querySelector(sel);
 const qa = (sel: string) => [...r!.target.querySelectorAll(sel)];
+/** The text a sighted reader sees: without the words kept for screen readers. */
+const shown = (el: Element | null | undefined) => {
+  if (!el) return '';
+  const c = el.cloneNode(true) as Element;
+  for (const h of c.querySelectorAll('.visually-hidden')) h.remove();
+  return text(c);
+};
 
 describe('Board', () => {
   it('six columns in order, each with its count and one-line explanation', () => {
@@ -61,7 +68,7 @@ describe('Board', () => {
 
   it('a long pull request list stays at three lines on the card', () => {
     const many = Array.from({ length: 25 }, (_, i) => ({
-      repo: 'o/r',
+      forge: 'github' as const, host: 'github.com', repo: 'o/r',
       number: 100 - i,
       title: 't',
       url: `https://github.com/o/r/pull/${100 - i}`,
@@ -104,7 +111,7 @@ describe('Board', () => {
       expect(l.rel.split(' ').sort()).toEqual(['noopener', 'noreferrer']);
       expect(l.closest('button')).toBeNull();
     }
-    expect(q(`[data-card="${c.id}"] .prs`)!.getAttribute('aria-label')).toBe('Pull requests');
+    expect(q(`[data-card="${c.id}"] .prs`)!.getAttribute('aria-label')).toBe('Pull and merge requests'); // the golden board has a GitLab merge request
     // The card's button no longer holds the pull request lines.
     expect(text(el.querySelector('.main'))).not.toContain('#101 checks failing');
     links[0].addEventListener('click', (e) => e.preventDefault()); // no navigation in the test
@@ -113,11 +120,11 @@ describe('Board', () => {
   });
 
   it('keyboard order on a card: the jump button, its pull requests, the issues, its artifacts, then Mark seen', () => {
-    const pr = (n: number) => ({ repo: 'o/r', number: n, title: 't', url: `https://github.com/o/r/pull/${n}`, state: 'open' as const, checks: 'passing' as const, review: '' as const, draft: false });
+    const pr = (n: number) => ({ forge: 'github' as const, host: 'github.com', repo: 'o/r', number: n, title: 't', url: `https://github.com/o/r/pull/${n}`, state: 'open' as const, checks: 'passing' as const, review: '' as const, draft: false });
     const c = card({
       attention: ['unseen'],
       pullRequests: [pr(5), pr(4)],
-      issues: [{ repo: 'o/r', number: 3, url: 'https://github.com/o/r/issues/3' }],
+      issues: [{ forge: 'github' as const, host: 'github.com', repo: 'o/r', number: 3, url: 'https://github.com/o/r/issues/3' }],
       artifacts: [{ title: 'Placeholder', url: 'https://claude.ai/artifact/exampleArtifact0001' }],
     });
     view(Board, snapshot([c], [{ ...project(c.projectId, 'one'), repo: 'o/r' }]));
@@ -128,7 +135,7 @@ describe('Board', () => {
   });
 
   it('only a pull request\'s or an issue\'s own github.com address becomes a link; anything else stays text', () => {
-    const pr = (n: number, url: string) => ({ repo: 'o/r', number: n, title: 't', url, state: 'open' as const, checks: 'none' as const, review: '' as const, draft: false });
+    const pr = (n: number, url: string) => ({ forge: 'github' as const, host: 'github.com', repo: 'o/r', number: n, title: 't', url, state: 'open' as const, checks: 'none' as const, review: '' as const, draft: false });
     const c = card({
       pullRequests: [
         pr(9, 'javascript:alert(1)'),
@@ -136,8 +143,8 @@ describe('Board', () => {
         pr(7, 'https://github.com/o/r/pull/4'),
       ],
       issues: [
-        { repo: 'o/r', number: 2, url: 'javascript:alert(2)' },
-        { repo: 'o/r', number: 1, url: 'https://github.com/attacker-org/phish/issues/1' },
+        { forge: 'github' as const, host: 'github.com', repo: 'o/r', number: 2, url: 'javascript:alert(2)' },
+        { forge: 'github' as const, host: 'github.com', repo: 'o/r', number: 1, url: 'https://github.com/attacker-org/phish/issues/1' },
       ],
     });
     view(Board, snapshot([c], [{ ...project(c.projectId, 'one'), repo: 'o/r' }]));
@@ -148,19 +155,158 @@ describe('Board', () => {
     expect(r!.target.innerHTML).not.toContain('/pull/4');
   });
 
-  it('Lanes and Teams keep the compact pull request text inside the row button, with no link in a button', () => {
-    for (const V of [Lanes, Teams]) {
-      const g = golden();
-      view(V, g);
-      expect(text(r!.target)).toContain('#101');
-      expect(qa('button a, button [href]')).toHaveLength(0);
-      r!.destroy();
-      r = null;
+  // The row of the card in review: pull request #101 (checks failing), closing issue #7.
+  const reviewRow = (V: typeof Lanes | typeof Teams, g: Snapshot) => q(`${V === Lanes ? '.it' : '.trow'}[data-card="${g.cards[3].id}"]`)!;
+
+  it.each([
+    ['Lanes', Lanes],
+    ['Teams', Teams],
+  ] as const)('%s links the pull requests and the issues they close beside the jump button, never in it', (_n, V) => {
+    const g = golden();
+    view(V, g);
+    expect(qa('button a, button [href]')).toHaveLength(0);
+    const row = reviewRow(V, g);
+    const c = g.cards[3];
+    const links = [...row.querySelectorAll('a')] as HTMLAnchorElement[];
+    expect(links.map((l) => l.getAttribute('href'))).toEqual([c.pullRequests[0].url, c.issues[0].url]);
+    expect(links.map(text)).toEqual(['#101 (pull request, opens in a new tab)', '#7 (issue, opens in a new tab)']);
+    for (const l of links) {
+      expect(l.querySelectorAll('.num.ext')).toHaveLength(1);
+      expect(l.target).toBe('_blank');
+      expect(l.rel.split(' ').sort()).toEqual(['noopener', 'noreferrer']);
+      expect(l.closest('button')).toBeNull();
+    }
+    expect(links[1].closest('.closes')).not.toBeNull();
+    // No arrow in the text: .ext draws it as generated content.
+    expect(text(row)).not.toContain('↗');
+  });
+
+  // A row with a pull request, an issue, a model and an effort level (both with a tooltip).
+  const titled = () => {
+    const pr = { forge: 'github' as const, host: 'github.com', repo: 'o/r', number: 5, title: 't', url: 'https://github.com/o/r/pull/5', state: 'open' as const, checks: 'passing' as const, review: '' as const, draft: false };
+    const c = card({
+      column: 'in_review',
+      agent: { name: 'a', model: 'claude-opus-5-5', effort: 'high', effortSource: 'launch' },
+      pullRequests: [pr],
+      issues: [{ forge: 'github' as const, host: 'github.com', repo: 'o/r', number: 3, url: 'https://github.com/o/r/issues/3' }],
+    });
+    return { c, s: snapshot([c], [{ ...project(c.projectId, 'one'), repo: 'o/r' }]) };
+  };
+
+  it.each([
+    ['Lanes', Lanes],
+    ['Teams', Teams],
+  ] as const)('%s: activating a link does not call onjump; the jump button and a titled cell each call it once', (_n, V) => {
+    const { c, s } = titled();
+    const jumped: string[] = [];
+    r = render(V, { snapshot: s, ix: indexOf(s), now: NOW, arrivals: new Map(), onjump: (x) => jumped.push(x.id), onseen: noop });
+    const row = q(`[data-card="${c.id}"]`)!;
+    const links = [...row.querySelectorAll('a')];
+    expect(links).toHaveLength(2);
+    for (const l of links) {
+      let opened = false;
+      l.addEventListener('click', (e) => {
+        opened = true;
+        e.preventDefault(); // no navigation in the test
+      });
+      (l as HTMLElement).click();
+      expect(opened).toBe(true);
+    }
+    expect(jumped).toEqual([]);
+    (row.querySelector('button') as HTMLButtonElement).click();
+    expect(jumped).toEqual([c.id]);
+    const tips = [...row.querySelectorAll('[title]')] as HTMLElement[];
+    expect(tips.length).toBeGreaterThan(0);
+    for (const t of tips) t.click();
+    expect(jumped).toEqual([c.id, ...tips.map(() => c.id)]);
+  });
+
+  it.each([
+    ['Lanes', Lanes],
+    ['Teams', Teams],
+  ] as const)('%s: every element with a tooltip in a row sits above the jump area, so the pointer reaches it', (_n, V) => {
+    const { c, s } = titled();
+    view(V, s);
+    const row = q(`[data-card="${c.id}"]`)!;
+    const tips = [...row.querySelectorAll('[title]')];
+    expect(tips.map((t) => t.className.split(' ')[0])).toEqual(V === Lanes ? ['eff'] : ['model', 'eff']);
+    for (const t of tips) {
+      const st = getComputedStyle(t);
+      expect(st.position, t.className).toBe('relative');
+      expect(Number(st.zIndex), t.className).toBeGreaterThan(0);
     }
   });
 
+  // jsdom lays nothing out, so where a click lands is held by the CSS that decides it
+  // (the harness check in the pull request clicks it for real).
+  it.each([
+    ['Lanes', Lanes],
+    ['Teams', Teams],
+  ] as const)('%s: the jump button\'s hit area covers its whole row; each link sits above it with a larger hit area', (_n, V) => {
+    const g = golden();
+    view(V, g);
+    const row = reviewRow(V, g) as HTMLElement;
+    const jump = row.querySelector('button')!;
+    expect(getComputedStyle(row).position).toBe('relative');
+    const area = getComputedStyle(jump, '::after');
+    expect(area.content).toBe('""');
+    expect(area.position).toBe('absolute');
+    for (const side of ['top', 'right', 'bottom', 'left'] as const) expect(area.getPropertyValue(side)).toBe('0px');
+    // Nothing between the button and the row may hold the area instead of the row.
+    for (let e = jump as HTMLElement; e !== row; e = e.parentElement!) expect(getComputedStyle(e).position, e.className).toBe('static');
+    const links = [...row.querySelectorAll('a')];
+    expect(links.length).toBeGreaterThan(0);
+    for (const l of links) {
+      const st = getComputedStyle(l);
+      expect(st.position).toBe('relative');
+      expect(Number(st.zIndex)).toBeGreaterThan(0);
+      expect(parseFloat(st.paddingTop)).toBeGreaterThanOrEqual(5);
+      expect(parseFloat(st.paddingLeft)).toBeGreaterThanOrEqual(3);
+      // The padding is taken back by the margin, so the text stays where it was.
+      expect(parseFloat(st.marginTop)).toBe(-parseFloat(st.paddingTop));
+      expect(parseFloat(st.marginLeft)).toBe(-parseFloat(st.paddingLeft));
+      // The number and its arrow stay on one line, so the arrow is never a link of its own on the next one.
+      expect(getComputedStyle(l.querySelector('.num')!).whiteSpace).toBe('nowrap');
+    }
+  });
+
+  it.each([
+    ['Lanes', Lanes],
+    ['Teams', Teams],
+  ] as const)('%s keyboard order: a row\'s jump button, then its pull requests and issues, then the next row', (_n, V) => {
+    const pr = (n: number) => ({ forge: 'github' as const, host: 'github.com', repo: 'o/r', number: n, title: 't', url: `https://github.com/o/r/pull/${n}`, state: 'open' as const, checks: 'passing' as const, review: '' as const, draft: false });
+    const a = card({ column: 'in_review', agent: { name: 'a' }, pullRequests: [pr(5), pr(4)], issues: [{ forge: 'github' as const, host: 'github.com', repo: 'o/r', number: 3, url: 'https://github.com/o/r/issues/3' }] });
+    const b = card({ column: 'in_review', agent: { name: 'b' }, pullRequests: [pr(9)] });
+    view(V, snapshot([a, b], [{ ...project(a.projectId, 'one'), repo: 'o/r' }]));
+    const order = qa('[data-card] button, [data-card] a[href]').map((e) => (e.tagName === 'BUTTON' ? `jump ${text(e.closest('[data-card]')!.querySelector('.agent'))}` : e.getAttribute('href')));
+    // Rows in the order the view sorts them; within each, the button first, then its links.
+    const own: Record<string, string[]> = { a: ['jump a', pr(5).url, pr(4).url, 'https://github.com/o/r/issues/3'], b: ['jump b', pr(9).url] };
+    const rows = qa('[data-card]').map((e) => text(e.querySelector('.agent')));
+    expect(rows.sort()).toEqual(['a', 'b']);
+    expect(order).toEqual(qa('[data-card]').flatMap((e) => own[text(e.querySelector('.agent'))]));
+  });
+
+  it.each([
+    ['Lanes', Lanes],
+    ['Teams', Teams],
+  ] as const)('%s: only a pull request\'s or an issue\'s own github.com address becomes a link', (_n, V) => {
+    const pr = (n: number, url: string) => ({ forge: 'github' as const, host: 'github.com', repo: 'o/r', number: n, title: 't', url, state: 'open' as const, checks: 'none' as const, review: '' as const, draft: false });
+    const c = card({
+      pullRequests: [pr(9, 'javascript:alert(1)'), pr(8, 'https://github.com/attacker-org/phish/pull/1')],
+      issues: [
+        { forge: 'github' as const, host: 'github.com', repo: 'o/r', number: 2, url: 'javascript:alert(2)' },
+        { forge: 'github' as const, host: 'github.com', repo: 'o/r', number: 1, url: 'https://github.com/attacker-org/phish/issues/1' },
+      ],
+    });
+    view(V, snapshot([c], [{ ...project(c.projectId, 'one'), repo: 'o/r' }]));
+    expect(qa(`[data-card="${c.id}"] a`)).toHaveLength(0);
+    expect(shown(q(`[data-card="${c.id}"]`))).toContain('#9 #8 open · closes #2 #1');
+    expect(r!.target.innerHTML).not.toContain('javascript:');
+    expect(r!.target.innerHTML).not.toContain('attacker-org');
+  });
+
   it('a card with issues but no pull request shows nothing extra', () => {
-    const c = card({ issues: [{ repo: 'o/r', number: 7, url: 'https://github.com/o/r/issues/7' }] });
+    const c = card({ issues: [{ forge: 'github' as const, host: 'github.com', repo: 'o/r', number: 7, url: 'https://github.com/o/r/issues/7' }] });
     view(Board, snapshot([c], [project(c.projectId, 'one')]));
     expect(q(`[data-card="${c.id}"] .prs`)).toBeNull();
     expect(text(q(`[data-card="${c.id}"]`))).not.toContain('closes');
@@ -252,9 +398,9 @@ describe('model names take their family hue in every view', () => {
   });
   it('Teams: the Model cell of each row', () => {
     view(Teams, cards());
-    expect(seen('button.trow .model')).toEqual(sorted);
+    expect(seen('.trow[data-card] .model')).toEqual(sorted);
     // A name too long for the column is cut on screen and stays whole in the tooltip.
-    for (const e of qa('button.trow .model')) expect(e.getAttribute('title')).toBe(text(e));
+    for (const e of qa('.trow[data-card] .model')) expect(e.getAttribute('title')).toBe(text(e));
   });
 });
 
@@ -322,8 +468,8 @@ describe('Teams', () => {
     expect(panels.map((p) => text(p.querySelector('.ptitle')))).toEqual(['coordinator-a', 'Solo agents']);
     expect(text(panels[0].querySelector('.pmeta'))).toContain('~/projects/alpha');
     expect(text(panels[0].querySelector('.projs'))).toBe('alpha');
-    const agents = [...panels[0].querySelectorAll('button.trow .who')] as HTMLElement[];
-    expect(agents.map(text)[0]).toBe('coordinator-a');
+    const agents = [...panels[0].querySelectorAll('.trow[data-card] .who')] as HTMLElement[];
+    expect(agents.map(shown)[0]).toBe('coordinator-a');
     expect(agents[0].style.getPropertyValue('--depth')).toBe('0');
     expect(agents.slice(1).every((a) => a.style.getPropertyValue('--depth') === '1')).toBe(true);
   });
@@ -333,8 +479,8 @@ describe('Teams', () => {
     const w = card({ projectId: 'p_a', agent: { name: 'helper', parent: 'known', parentCardId: boss.id } });
     const lost = card({ projectId: 'p_a', agent: { name: 'lost', parent: 'unknown' } });
     view(Teams, snapshot([lost, w, boss], [project('p_a', 'alpha')]));
-    const agents = [...r!.target.querySelectorAll('.panel button.trow .who')] as HTMLElement[];
-    expect(agents.map(text)).toEqual(['boss', 'helper', 'lost']);
+    const agents = [...r!.target.querySelectorAll('.panel .trow[data-card] .who')] as HTMLElement[];
+    expect(agents.map(shown)).toEqual(['boss', 'helper', 'lost']);
     expect(agents[2].style.getPropertyValue('--depth')).toBe('0');
   });
 
@@ -342,7 +488,7 @@ describe('Teams', () => {
     const lost = card({ agent: { name: 'lost', parent: 'unknown' } });
     const orphan = card({ agent: { name: 'orphan', parent: 'known', parentCardId: 'claude:gone' } });
     view(Teams, snapshot([lost, orphan], [project(lost.projectId, 'one')]));
-    const rows = qa('.panel button.trow').map(text);
+    const rows = qa('.panel .trow[data-card]').map(text);
     expect(rows.find((t) => t.includes('lost'))).toContain('coordinator: unknown');
     expect(rows.find((t) => t.includes('orphan'))).toContain('coordinator not on the board');
     expect(text(q('.panel .pmeta'))).toContain('no coordinator on the board');
@@ -365,15 +511,21 @@ describe('Teams', () => {
     expect([...waiting.querySelectorAll('.agent')].map(text)).toEqual(['oldest', 'recent']);
   });
 
+  it('a queued session with nowhere to jump says it is in neither agterm nor tmux', () => {
+    const a = card({ column: 'idle', agent: { name: 'nowhere', jump: 'none' } });
+    view(Teams, snapshot([a], [project(a.projectId, 'one')]));
+    expect(text(qa('aside section')[1])).toContain('not in agterm or tmux');
+  });
+
   it('the pull requests cell is one short line: open ones with checks, then "+N merged"', () => {
     const prs = [
-      { repo: 'o/r', number: 60, title: 't', url: 'u60', state: 'open' as const, checks: 'failing' as const, review: '' as const, draft: false },
-      ...Array.from({ length: 40 }, (_, i) => ({ repo: 'o/r', number: 59 - i, title: 't', url: `u${59 - i}`, state: 'merged' as const, checks: 'passing' as const, review: '' as const, draft: false })),
+      { forge: 'github' as const, host: 'github.com', repo: 'o/r', number: 60, title: 't', url: 'u60', state: 'open' as const, checks: 'failing' as const, review: '' as const, draft: false },
+      ...Array.from({ length: 40 }, (_, i) => ({ forge: 'github' as const, host: 'github.com', repo: 'o/r', number: 59 - i, title: 't', url: `u${59 - i}`, state: 'merged' as const, checks: 'passing' as const, review: '' as const, draft: false })),
     ];
     const c = card({ pullRequests: prs, column: 'working' });
     const s = snapshot([c], [project(c.projectId, 'one')]);
     view(Teams, s);
-    expect(text(q('button.trow .prs'))).toBe('#60 open · checks failing · +40 merged');
+    expect(text(q('.trow[data-card] .prs'))).toBe('#60 open · checks failing · +40 merged');
     r!.destroy();
     view(Lanes, s);
     expect(text(q('.note'))).toContain('#60 open · checks failing · +40 merged');
@@ -393,31 +545,36 @@ describe('Teams', () => {
   it('Lanes and Teams append the closed issues after the pull request part', () => {
     const g = golden();
     view(Teams, g);
-    const cell = [...r!.target.querySelectorAll('button.trow .prs')].find((e) => text(e).includes('#101'))!;
-    expect(text(cell)).toBe('#101 open · checks failing · closes #7');
+    const cell = [...r!.target.querySelectorAll('.trow[data-card] .prs')].find((e) => text(e).includes('#101'))!;
+    expect(shown(cell)).toBe('#101 open · checks failing · closes #7');
     expect(cell.querySelector('.part.closes')).not.toBeNull();
     r!.destroy();
     view(Lanes, g);
     const note = qa('.note').find((e) => text(e).includes('#101'))!;
-    expect(text(note)).toContain('#101 open · checks failing · closes #7');
+    expect(shown(note)).toContain('#101 open · checks failing · closes #7');
     expect(note.classList.contains('tone-failing')).toBe(true);
-    expect(text(note.querySelector('.closes')!)).toBe('closes #7');
+    expect(shown(note.querySelector('.closes')!)).toBe('closes #7');
   });
 
-  it('rows are buttons reachable by keyboard', () => {
-    view(Teams, golden());
-    const rows = qa('button.trow') as HTMLButtonElement[];
+  it('each row has one jump button, reachable by keyboard, named by its agent only', () => {
+    const g = golden();
+    view(Teams, g);
+    const rows = qa('.trow[data-card]');
     expect(rows).toHaveLength(7);
-    for (const b of rows) {
+    for (const row of rows) {
+      const jumps = [...row.querySelectorAll('button')] as HTMLButtonElement[];
+      expect(jumps).toHaveLength(1);
+      const b = jumps[0];
       expect(b.tabIndex).toBe(0);
       expect(b.hasAttribute('aria-label')).toBe(false);
-      expect(text(b.querySelector('.visually-hidden'))).toMatch(/^(Jump to agterm|Show where it runs):$/);
+      expect(text(b)).toMatch(/^(Jump to agterm|Jump to tmux|Show where it runs): \S/);
+      expect(text(b)).toBe(`${text(b.querySelector('.visually-hidden'))} ${text(row.querySelector('.agent'))}`);
     }
   });
 
   it('unknown status shows the words "status unknown" as its state', () => {
     view(Teams, golden());
-    expect(qa('button.trow .state').map(text)).toContain('Status unknown');
+    expect(qa('.trow[data-card] .state').map(text)).toContain('Status unknown');
   });
 });
 
@@ -475,9 +632,27 @@ describe('the effort level sits next to the model in every view', () => {
     expect(note('a').querySelector('.eff')!.classList.contains('launch')).toBe(false);
   });
 
+  it("Codex's ultra: its own word, in the filled box of the top level, in every view", () => {
+    const u = card({ agent: { name: 'u', tool: 'codex', model: 'gpt-6.2-sol', effort: '', effortSource: 'none', effortWord: 'ultra' } });
+    const w = card({ agent: { name: 'w', tool: 'codex', model: 'gpt-6.2-sol', effort: '', effortSource: 'none', effortWord: 'minimal' } });
+    const s = () => snapshot([u, w], [project(u.projectId, 'one')]);
+    const views: [typeof Board | typeof Lanes | typeof Teams, string, string][] = [
+      [Board, '[data-card]', '.chip .eff'],
+      [Lanes, '.cell .it', '.note .eff'],
+      [Teams, '.trow[data-card]', '.mcell .eff'],
+    ];
+    for (const [v, item, sel] of views) {
+      r?.destroy();
+      view(v, s());
+      const of = (n: string) => qa(item).find((e) => text(e.querySelector('.agent')) === n)!;
+      expect(row(of('u'), sel), `${sel} ultra`).toEqual(['ultra', 'effort-max', false]);
+      expect(row(of('w'), sel), `${sel} minimal`).toEqual(['minimal', 'effort-word', false]);
+    }
+  });
+
   it('Teams: on its own line under the model name', () => {
     view(Teams, cards());
-    const cell = (n: string) => qa('button.trow').find((e) => text(e.querySelector('.agent')) === n)!.querySelector('.mcell')!;
+    const cell = (n: string) => qa('.trow[data-card]').find((e) => text(e.querySelector('.agent')) === n)!.querySelector('.mcell')!;
     for (const [n, t, k, l] of want) expect(row(cell(String(n)), '.eff')).toEqual([t, k, l]);
     expect(cell('d').querySelector('.eff')).toBeNull();
     expect(cell('c').querySelector('.eff')!.getAttribute('title')).toContain('set at launch');

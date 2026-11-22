@@ -24,6 +24,14 @@ describe('actions', () => {
     await r.actions.seen('claude:1');
     expect(r.calls[0].url).toBe('/api/v1/seen');
   });
+  it('a 503 from jump shows the server reason only when it is a known one', async () => {
+    for (const why of ['tmux not found', 'tmux did not answer', 'no tmux client is attached', 'agterm did not answer', 'agterm not found']) {
+      expect(await recorder(503, why + '\n').actions.jump('x')).toEqual({ ok: false, kind: 'failed', message: why });
+    }
+    expect(await recorder(503, '<b>anything else</b>').actions.jump('x')).toMatchObject({ message: 'sitboard answered 503' });
+    expect(await recorder(503, 'tmux not found').actions.seen('x')).toMatchObject({ message: 'sitboard answered 503' });
+  });
+
   it('a 409 from jump means no terminal', async () => {
     expect(await recorder(409).actions.jump('x')).toEqual({ ok: false, kind: 'no_terminal' });
   });

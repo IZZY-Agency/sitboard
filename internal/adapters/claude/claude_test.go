@@ -36,6 +36,24 @@ type env struct {
 	psBad  bool
 	reads  []int          // pids whose arguments and environment were read
 	launch map[int]string // pid → effort level it was launched with
+	tmux   map[int]model.TmuxPane
+	ttys   map[int]string            // pid → its terminal, as psTTY returns it
+	owns   func(model.TmuxPane) bool // tmux's answer to TmuxOwns; nil: no TmuxOwns
+	asked  []model.TmuxPane          // the panes TmuxOwns was asked about
+	scans  int                       // calls of starts: one per scan
+}
+
+func (e *env) tty(_ context.Context, pid int) string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.ttys[pid]
+}
+
+func (e *env) tmuxOwns(_ context.Context, p model.TmuxPane) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.asked = append(e.asked, p)
+	return e.owns(p)
 }
 
 func newEnv(t *testing.T) *env {
@@ -65,6 +83,7 @@ func (e *env) setPSBad(bad bool) {
 func (e *env) starts(_ context.Context, pids []int) (map[int]string, bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	e.scans++
 	if e.psBad {
 		return nil, false
 	}
@@ -81,7 +100,7 @@ func (e *env) proc(pid int) procFacts {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.reads = append(e.reads, pid)
-	f := procFacts{LaunchEffort: e.launch[pid]}
+	f := procFacts{LaunchEffort: e.launch[pid], Tmux: e.tmux[pid]}
 	if pid == 4242 {
 		f.TermID = termCoord
 	}
@@ -137,6 +156,10 @@ func (e *env) adapter() *adapter {
 	a := newAdapter(e.t, Options{Home: e.home, Now: func() time.Time { return fixedNow }})
 	a.starts = e.starts
 	a.proc = e.proc
+	a.tty = e.tty
+	if e.owns != nil {
+		a.opts.TmuxOwns = e.tmuxOwns
+	}
 	a.tick = 50 * time.Millisecond
 	a.liveTick = 50 * time.Millisecond
 	a.debounce = 5 * time.Millisecond
@@ -364,7 +387,7 @@ func TestLiveSessionsEmittedBeforeIndexingFinishes(t *testing.T) {
 	close(release)
 	f := c.wait(t, 2*time.Second, "derived", session(coordID, func(f model.SessionFact) bool { return f.Model.OK })).(model.SessionFact)
 	if f.Model.V != "claude-opus-5-5" || f.Folder != "/home/dev/projects/alpha" || len(f.TurnEnds) != 1 ||
-		!slices.Equal(f.CreatedPRs, []model.PRRef{{Repo: "example-org/example-repo", Number: 101}}) {
+		!slices.Equal(f.CreatedPRs, []model.PRRef{{Repo: model.GitHubRepo("example-org/example-repo"), Number: 101}}) {
 		t.Fatalf("derived fact = %+v", f)
 	}
 }
@@ -378,7 +401,7 @@ func TestCountsSubagentsNotAsSessions(t *testing.T) {
 	writeFile(t, filepath.Join(filepath.Dir(tr), coordID, "subagents", "agent-a1.meta.json"), []byte(`{}`))
 	c := run(t, e.adapter())
 	f := c.wait(t, 2*time.Second, "subagent", session(coordID, func(f model.SessionFact) bool { return f.Subagents == 1 })).(model.SessionFact)
-	want := []model.PRRef{{Repo: "example-org/example-repo", Number: 101}, {Repo: "example-org/example-repo", Number: 104}}
+	want := []model.PRRef{{Repo: model.GitHubRepo("example-org/example-repo"), Number: 101}, {Repo: model.GitHubRepo("example-org/example-repo"), Number: 104}}
 	if !slices.Equal(f.CreatedPRs, want) {
 		t.Fatalf("CreatedPRs = %+v", f.CreatedPRs)
 	}

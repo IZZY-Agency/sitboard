@@ -17,6 +17,9 @@ export interface Actions {
   setGrouping(projectId: string, mode: GroupingMode): Promise<ActionResult>;
 }
 
+/** The jump failures the server reports with a 503, shown as they are. */
+const JUMP_FAILURES = new Set(['agterm not found', 'agterm did not answer', 'tmux not found', 'tmux did not answer', 'no tmux client is attached']);
+
 export function createActions(fetchFn: typeof fetch): Actions {
   async function post(path: string, body: object): Promise<ActionResult> {
     let res: Response;
@@ -47,6 +50,11 @@ export function createActions(fetchFn: typeof fetch): Actions {
         return { ok: false, kind: 'failed', message: 'it is no longer grouped', final: true };
       }
       if (res.status === 500) return { ok: false, kind: 'failed', message: 'sitboard could not save it' };
+    }
+    if (path === Paths.jump && res.status === 503) {
+      // The server names what failed (internal/server/actions.go); only those known texts are shown.
+      const why = (await res.text().catch(() => '')).trim();
+      if (JUMP_FAILURES.has(why)) return { ok: false, kind: 'failed', message: why };
     }
     if (res.status === 409) return { ok: false, kind: 'no_terminal' };
     if (res.status === 404) return { ok: false, kind: 'failed', message: 'this card is no longer on the board' };

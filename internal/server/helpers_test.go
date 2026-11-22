@@ -13,6 +13,7 @@ import (
 
 	"github.com/IZZY-Agency/sitboard/internal/app"
 	"github.com/IZZY-Agency/sitboard/internal/contract"
+	"github.com/IZZY-Agency/sitboard/internal/model"
 )
 
 const (
@@ -30,7 +31,8 @@ type fakeBoard struct {
 	mu        sync.Mutex
 	snap      contract.Snapshot
 	subs      map[chan contract.Snapshot]struct{}
-	terminals map[string]string
+	terminals map[string]string         // card id -> agterm session id
+	tmux      map[string]model.TmuxPane // card id -> tmux pane, wins over terminals
 	seen      []string
 	catchup   int
 	upTo      time.Time
@@ -51,6 +53,7 @@ func newFakeBoard() *fakeBoard {
 		},
 		subs:      map[chan contract.Snapshot]struct{}{},
 		terminals: map[string]string{cardA: termA},
+		tmux:      map[string]model.TmuxPane{},
 	}
 }
 
@@ -155,23 +158,28 @@ func (f *fakeBoard) SetGrouping(id string, mode contract.GroupingMode) error {
 	return nil
 }
 
-func (f *fakeBoard) TerminalFor(id string) (string, bool) {
+func (f *fakeBoard) JumpTarget(id string) (model.FocusTarget, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if p, ok := f.tmux[id]; ok {
+		return model.FocusTarget{Kind: model.FocusTmux, ID: p.Pane, Socket: p.Socket, TTY: p.TTY}, true
+	}
 	t, ok := f.terminals[id]
-	return t, ok
+	return model.FocusTarget{Kind: model.FocusAgterm, ID: t}, ok
 }
 
 type fakeJumper struct {
-	mu  sync.Mutex
-	ids []string
-	err error
+	mu      sync.Mutex
+	ids     []string
+	targets []model.FocusTarget
+	err     error
 }
 
-func (j *fakeJumper) Jump(_ context.Context, id string) error {
+func (j *fakeJumper) Jump(_ context.Context, t model.FocusTarget) error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	j.ids = append(j.ids, id)
+	j.ids = append(j.ids, t.ID)
+	j.targets = append(j.targets, t)
 	return j.err
 }
 

@@ -26,6 +26,7 @@ export function card(over: Partial<Omit<Card, 'agent'>> & { agent?: Partial<Agen
     issues: [],
     artifacts: [],
     subagents: 0,
+    spend: { tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, usd: 0, priced: false, recorded: false },
     ...rest,
     agent: {
       tool: 'claude',
@@ -33,6 +34,7 @@ export function card(over: Partial<Omit<Card, 'agent'>> & { agent?: Partial<Agen
       model: 'claude-opus-5-5',
       effort: '',
       effortSource: 'none',
+      effortWord: '',
       status: 'busy',
       statusSince: '2026-11-17T09:00:00Z',
       live: 'yes',
@@ -41,6 +43,7 @@ export function card(over: Partial<Omit<Card, 'agent'>> & { agent?: Partial<Agen
       parentCardId: '',
       terminalId: 't1',
       workspace: 'one',
+      jump: 'agterm',
       ...agent,
     },
   };
@@ -52,6 +55,8 @@ export function project(id: string, name: string, counts: Partial<Project['count
     name,
     path: `~/projects/${name}`,
     repo: '',
+    repoForge: '',
+    repoHost: '',
     parentId: '',
     area: 'projects',
     counts: { working: 0, needsYou: 0, inReview: 0, stale: 0, ...counts },
@@ -71,6 +76,9 @@ export function snapshot(cards: Card[], projects: Project[], over: Partial<Snaps
     agtermPresent: true,
     build: { version: 'dev', commit: 'unknown', os: 'darwin', arch: 'arm64' },
     groupingSettings: [],
+    leftovers: { items: 0, held: 0, partial: false },
+    spend: { days: [], pending: false },
+    gitlabHosts: [],
     ...over,
   };
 }

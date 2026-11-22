@@ -91,7 +91,7 @@ func TestRecordNameWinsOverTheTranscripts(t *testing.T) {
 func TestEndedSessionsLeftOut(t *testing.T) {
 	e := newEnv(t)
 	const oldID, headless, cli = "44444444-4444-4444-8444-444444444444", "55555555-5555-4555-8555-555555555555", "66666666-6666-4666-8666-666666666666"
-	e.endedTranscript(oldID, "", fixedNow.Add(-turnWindow-time.Minute))
+	e.endedTranscript(oldID, "", fixedNow.Add(-sessionKeep-time.Minute))
 	e.endedTranscript(headless, strings.ReplaceAll(turnAt("2026-11-17T08:30:00Z"), `"cli"`, `"sdk-cli"`)+line(`{"type":"user","entrypoint":"sdk-cli","cwd":%q,"timestamp":"2026-11-17T08:31:00Z"}`, alphaF), fixedNow)
 	sub := e.endedTranscript(cli, turnAt("2026-11-17T08:30:00Z"), fixedNow)
 	writeFile(t, filepath.Join(filepath.Dir(sub), cli, "subagents", "agent-a1.jsonl"), fixture(t, "subagent.jsonl"))
@@ -174,7 +174,7 @@ func TestEndedSessionGoesAfterTheWindow(t *testing.T) {
 	c := run(t, a)
 	c.wait(t, 2*time.Second, "ended", ended(endedID))
 	mu.Lock()
-	now = fixedNow.Add(turnWindow)
+	now = fixedNow.Add(sessionKeep)
 	mu.Unlock()
 	c.wait(t, 2*time.Second, "gone", func(f model.Fact) bool {
 		g, ok := f.(model.SessionGone)
@@ -193,7 +193,7 @@ func TestLastPassDropsTheTailers(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go ix.run(ctx)
-	j := job{id: endedID, main: p, subDir: filepath.Dir(sub), ended: true}
+	j := job{id: endedID, main: p, subDirs: []string{filepath.Dir(sub)}, ended: true}
 	ix.want(map[string]job{endedID: j})
 	res := next(t, ix)
 	if !res.final || res.subagents != 1 || len(res.d.TurnEnds) != 1 {
@@ -224,8 +224,8 @@ func TestLiveIndexedBeforeEnded(t *testing.T) {
 	defer cancel()
 	go ix.run(ctx)
 	ix.want(map[string]job{
-		endedID: {id: endedID, main: small, subDir: "none", ended: true},
-		coordID: {id: coordID, main: big, subDir: "none"},
+		endedID: {id: endedID, main: small, subDirs: []string{"none"}, ended: true},
+		coordID: {id: coordID, main: big, subDirs: []string{"none"}},
 	})
 	if r := next(t, ix); r.id != coordID {
 		t.Fatalf("first result %s, want the live session", r.id)
@@ -258,7 +258,7 @@ func TestLastPassWaitsForTheFolder(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go ix.run(ctx)
-	j := map[string]job{endedID: {id: endedID, main: p, subDir: "none", ended: true}}
+	j := map[string]job{endedID: {id: endedID, main: p, subDirs: []string{"none"}, ended: true}}
 	ix.want(j)
 	select {
 	case r := <-ix.results:
@@ -286,7 +286,7 @@ func TestLastPassGivesUpOnTheFolder(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go ix.run(ctx)
-	j := map[string]job{endedID: {id: endedID, main: p, subDir: "none", ended: true}}
+	j := map[string]job{endedID: {id: endedID, main: p, subDirs: []string{"none"}, ended: true}}
 	got := make(chan result, 1)
 	go func() { got <- <-ix.results }()
 	for i := range finalTries {
@@ -470,7 +470,7 @@ func TestLastPassUsesTheReadCap(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go ix.run(ctx)
-	ix.want(map[string]job{endedID: {id: endedID, main: p, subDir: "none", ended: true}})
+	ix.want(map[string]job{endedID: {id: endedID, main: p, subDirs: []string{"none"}, ended: true}})
 	if r := next(t, ix); !slices.Equal(r.d.TurnEnds, []time.Time{ts("2026-11-17T08:50:00Z")}) {
 		t.Fatalf("turns %v: read more than the cap", r.d.TurnEnds)
 	}
@@ -488,11 +488,11 @@ func TestNewWorkComesBeforeTheEndedLeft(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go ix.run(ctx)
-	ja := job{id: endedID, main: a, subDir: "none", ended: true}
-	jb := job{id: second, main: b, subDir: "none", ended: true}
+	ja := job{id: endedID, main: a, subDirs: []string{"none"}, ended: true}
+	jb := job{id: second, main: b, subDirs: []string{"none"}, ended: true}
 	ix.want(map[string]job{endedID: ja, second: jb})
 	time.Sleep(100 * time.Millisecond) // the indexer waits to hand over the first
-	ix.want(map[string]job{endedID: ja, second: jb, coordID: {id: coordID, main: live, subDir: "none"}})
+	ix.want(map[string]job{endedID: ja, second: jb, coordID: {id: coordID, main: live, subDirs: []string{"none"}}})
 	var got []string
 	for range 3 {
 		got = append(got, (next(t, ix)).id)
@@ -524,8 +524,8 @@ func TestEachLastPassWaitsOnItsOwn(t *testing.T) {
 	defer cancel()
 	go ix.run(ctx)
 	ix.want(map[string]job{
-		endedID: {id: endedID, main: a, subDir: "none", ended: true},
-		second:  {id: second, main: b, subDir: "none", ended: true},
+		endedID: {id: endedID, main: a, subDirs: []string{"none"}, ended: true},
+		second:  {id: second, main: b, subDirs: []string{"none"}, ended: true},
 	})
 	for range 2 {
 		select {
@@ -629,7 +629,7 @@ func TestEndedSessionComesBack(t *testing.T) {
 func TestDiscoverSkipsOldTranscripts(t *testing.T) {
 	e := newEnv(t)
 	const oldID = "44444444-4444-4444-8444-444444444444"
-	e.endedTranscript(oldID, "", fixedNow.Add(-turnWindow-time.Minute))
+	e.endedTranscript(oldID, "", fixedNow.Add(-sessionKeep-time.Minute))
 	e.endedTranscript(endedID, "", fixedNow)
 	r := &registry{a: e.adapter(), emit: func(model.Fact) {}, sessions: map[string]*sess{}, sent: map[string]model.SessionFact{}}
 	r.discover()
@@ -644,7 +644,7 @@ func TestOldDeadRecordIsNotIndexed(t *testing.T) {
 	e := newEnv(t)
 	e.record(4242, nil) // no such process
 	tr := e.transcript(alphaF, coordID, "coordinator.jsonl")
-	old := fixedNow.Add(-turnWindow - time.Hour)
+	old := fixedNow.Add(-sessionKeep - time.Hour)
 	for _, p := range []string{tr, e.recordPath(4242)} {
 		if err := os.Chtimes(p, old, old); err != nil {
 			t.Fatal(err)
@@ -753,7 +753,7 @@ func TestHeadlessKeepsNothing(t *testing.T) {
 	s := &sess{rec: record{SessionID: endedID}, ended: true, live: model.Of(false), found: true}
 	r.sessions[endedID] = s
 	r.applyIndex(result{id: endedID, final: true, readable: true, subagents: 2,
-		d: derived{Entrypoint: "sdk-cli", Model: "m", TurnEnds: []time.Time{fixedNow}, CreatedPRs: []model.PRRef{{Repo: "example-org/x", Number: 1}}}})
+		d: derived{Entrypoint: "sdk-cli", Model: "m", TurnEnds: []time.Time{fixedNow}, CreatedPRs: []model.PRRef{{Repo: model.GitHubRepo("example-org/x"), Number: 1}}}})
 	if !s.headless || !reflect.DeepEqual(s.d, derived{}) || s.subagents != 0 {
 		t.Fatalf("kept %+v", s)
 	}
@@ -768,10 +768,10 @@ func TestEachEndGetsItsLastPass(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go ix.run(ctx)
-	ix.want(map[string]job{endedID: {id: endedID, main: p, subDir: "none", ended: true, gen: 1}})
+	ix.want(map[string]job{endedID: {id: endedID, main: p, subDirs: []string{"none"}, ended: true, gen: 1}})
 	next(t, ix)
 	appendFile(t, p, []byte(turnAt("2026-11-17T08:55:00Z")))
-	ix.want(map[string]job{endedID: {id: endedID, main: p, subDir: "none", ended: true, gen: 2}})
+	ix.want(map[string]job{endedID: {id: endedID, main: p, subDirs: []string{"none"}, ended: true, gen: 2}})
 	if r := next(t, ix); !slices.Contains(r.d.TurnEnds, ts("2026-11-17T08:55:00Z")) {
 		t.Fatalf("second last pass %+v", r)
 	}
@@ -960,11 +960,11 @@ func TestSecondLastPassWithAnUnchangedTranscript(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go ix.run(ctx)
-	ix.want(map[string]job{endedID: {id: endedID, main: p, subDir: "none", ended: true, gen: 1}})
+	ix.want(map[string]job{endedID: {id: endedID, main: p, subDirs: []string{"none"}, ended: true, gen: 1}})
 	if r := next(t, ix); !r.final || r.gen != 1 {
 		t.Fatalf("first %+v", r)
 	}
-	ix.want(map[string]job{endedID: {id: endedID, main: p, subDir: "none", ended: true, gen: 2}})
+	ix.want(map[string]job{endedID: {id: endedID, main: p, subDirs: []string{"none"}, ended: true, gen: 2}})
 	if r := next(t, ix); !r.final || r.gen != 2 {
 		t.Fatalf("second %+v", r)
 	}
@@ -1002,8 +1002,8 @@ func TestEveryPassRunsAnEndedJob(t *testing.T) {
 	live := e.transcript(alphaF, coordID, "coordinator.jsonl")
 	p := e.endedTranscript(endedID, "", fixedNow)
 	jobs := map[string]job{
-		coordID: {id: coordID, main: live, subDir: "none"},
-		endedID: {id: endedID, main: p, subDir: "none", ended: true, gen: 1},
+		coordID: {id: coordID, main: live, subDirs: []string{"none"}},
+		endedID: {id: endedID, main: p, subDirs: []string{"none"}, ended: true, gen: 1},
 	}
 	a := e.adapter()
 	ix := newIndexer(a)

@@ -40,8 +40,8 @@ func TestSubagentsShowAsACountNotCards(t *testing.T) {
 func TestWorktreeSessionJoinsMainRepoProject(t *testing.T) {
 	e := newEnv(t)
 	wt := alpha + "/.worktrees/worker-a"
-	e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Slug: exRepo, Branch: model.Of("main")})
-	e.repos.set(wt, model.Repo{Root: wt, MainRoot: alpha, Slug: exRepo, Branch: model.Of("worker-a")})
+	e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Remote: model.GitHubRepo(exRepo), Branch: model.Of("main")})
+	e.repos.set(wt, model.Repo{Root: wt, MainRoot: alpha, Remote: model.GitHubRepo(exRepo), Branch: model.Of("worker-a")})
 	main := busySession("s1", tNow)
 	worker := busySession("s2", tNow)
 	worker.Folder = wt
@@ -75,7 +75,7 @@ func TestFolderWithoutRepoIsItsOwnProject(t *testing.T) {
 
 func TestTitlePrecedence(t *testing.T) {
 	e := newEnv(t)
-	e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Slug: exRepo})
+	e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Remote: model.GitHubRepo(exRepo)})
 	b := e.board
 	id := mustCardID(t, "claude", "s1")
 	term := model.TerminalFact{ID: termUUID, Workspace: "alpha", Name: "worker-a", HasAgent: true}
@@ -115,8 +115,8 @@ func TestTitlePrecedence(t *testing.T) {
 
 	term.Title = "\u2733 Fix the login form"
 	b.applySync(term)
-	e.prs.prs = []model.PullRequest{{Repo: exRepo, Number: 101, Title: "Add the thing", URL: "https://github.com/example-org/example-repo/pull/101", State: model.PRStateOpen, Checks: model.ChecksPassing}}
-	s.CreatedPRs = []model.PRRef{{Repo: exRepo, Number: 101}}
+	e.prs.prs = []model.PullRequest{{Repo: model.GitHubRepo(exRepo), Number: 101, Title: "Add the thing", URL: "https://github.com/example-org/example-repo/pull/101", State: model.PRStateOpen, Checks: model.ChecksPassing}}
+	s.CreatedPRs = []model.PRRef{{Repo: model.GitHubRepo(exRepo), Number: 101}}
 	b.applySync(s)
 	if c, _ := cardByID(t, b, id); c.TitleSource == contract.TitleFromPR {
 		t.Fatal("pull request title used before GitHub answered")
@@ -130,16 +130,16 @@ func TestTitleOnlyFromTheNewestOpenPR(t *testing.T) {
 	b := e.board
 	day := 24 * time.Hour
 	merged := func(n int, title string, opened time.Duration) model.PullRequest {
-		return model.PullRequest{Repo: exRepo, Number: n, Title: title, State: model.PRStateMerged, OpenedAt: tNow.Add(-opened), ClosedAt: tNow.Add(-opened + time.Hour)}
+		return model.PullRequest{Repo: model.GitHubRepo(exRepo), Number: n, Title: title, State: model.PRStateMerged, OpenedAt: tNow.Add(-opened), ClosedAt: tNow.Add(-opened + time.Hour)}
 	}
 	open := func(n int, title string, opened time.Duration) model.PullRequest {
-		return model.PullRequest{Repo: exRepo, Number: n, Title: title, State: model.PRStateOpen, OpenedAt: tNow.Add(-opened)}
+		return model.PullRequest{Repo: model.GitHubRepo(exRepo), Number: n, Title: title, State: model.PRStateOpen, OpenedAt: tNow.Add(-opened)}
 	}
 	// A long-running coordinator: many merged pull requests, no open one.
 	e.prs.prs = []model.PullRequest{merged(1, "old one", 9*day), merged(2, "older merge", 5*day), merged(3, "last merge", 2*time.Hour)}
 	s := session("s1", model.StatusFinished, tNow)
 	s.Name = "coordinator-a"
-	s.CreatedPRs = []model.PRRef{{Repo: exRepo, Number: 1}, {Repo: exRepo, Number: 2}, {Repo: exRepo, Number: 3}}
+	s.CreatedPRs = []model.PRRef{{Repo: model.GitHubRepo(exRepo), Number: 1}, {Repo: model.GitHubRepo(exRepo), Number: 2}, {Repo: model.GitHubRepo(exRepo), Number: 3}}
 	b.applySync(s)
 	b.tick()
 	if c := onlyCard(t, b); c.Title != "coordinator-a" || c.TitleSource != contract.TitleFromSession {
@@ -148,7 +148,7 @@ func TestTitleOnlyFromTheNewestOpenPR(t *testing.T) {
 
 	// Two open ones: the most recently opened wins, whatever its number.
 	e.prs.prs = append(e.prs.prs, open(9, "opened earlier, higher number", 3*day), open(4, "opened last", day))
-	s.CreatedPRs = append(s.CreatedPRs, model.PRRef{Repo: exRepo, Number: 9}, model.PRRef{Repo: exRepo, Number: 4})
+	s.CreatedPRs = append(s.CreatedPRs, model.PRRef{Repo: model.GitHubRepo(exRepo), Number: 9}, model.PRRef{Repo: model.GitHubRepo(exRepo), Number: 4})
 	b.applySync(s)
 	b.tick()
 	if c := onlyCard(t, b); c.Title != "opened last" || c.TitleSource != contract.TitleFromPR {
@@ -160,15 +160,15 @@ func TestPullRequestOrderOpenFirstThenNewest(t *testing.T) {
 	e := newEnv(t)
 	h := time.Hour
 	e.prs.prs = []model.PullRequest{
-		{Repo: exRepo, Number: 1, State: model.PRStateMerged, OpenedAt: tNow.Add(-50 * h), ClosedAt: tNow.Add(-40 * h)},
-		{Repo: exRepo, Number: 2, State: model.PRStateOpen, OpenedAt: tNow.Add(-30 * h)},
-		{Repo: exRepo, Number: 3, State: model.PRStateClosed, OpenedAt: tNow.Add(-20 * h), ClosedAt: tNow.Add(-2 * h)},
-		{Repo: exRepo, Number: 4, State: model.PRStateOpen, OpenedAt: tNow.Add(-5 * h)},
-		{Repo: exRepo, Number: 5, State: model.PRStateMerged, OpenedAt: tNow.Add(-10 * h), ClosedAt: tNow.Add(-9 * h)},
+		{Repo: model.GitHubRepo(exRepo), Number: 1, State: model.PRStateMerged, OpenedAt: tNow.Add(-50 * h), ClosedAt: tNow.Add(-40 * h)},
+		{Repo: model.GitHubRepo(exRepo), Number: 2, State: model.PRStateOpen, OpenedAt: tNow.Add(-30 * h)},
+		{Repo: model.GitHubRepo(exRepo), Number: 3, State: model.PRStateClosed, OpenedAt: tNow.Add(-20 * h), ClosedAt: tNow.Add(-2 * h)},
+		{Repo: model.GitHubRepo(exRepo), Number: 4, State: model.PRStateOpen, OpenedAt: tNow.Add(-5 * h)},
+		{Repo: model.GitHubRepo(exRepo), Number: 5, State: model.PRStateMerged, OpenedAt: tNow.Add(-10 * h), ClosedAt: tNow.Add(-9 * h)},
 	}
 	s := session("s1", model.StatusFinished, tNow)
 	for n := 1; n <= 5; n++ {
-		s.CreatedPRs = append(s.CreatedPRs, model.PRRef{Repo: exRepo, Number: n})
+		s.CreatedPRs = append(s.CreatedPRs, model.PRRef{Repo: model.GitHubRepo(exRepo), Number: n})
 	}
 	e.board.applySync(s)
 	e.board.tick()
@@ -200,36 +200,45 @@ func TestTerminalJoinedByTerminalID(t *testing.T) {
 	}
 }
 
-func TestCodexSessionLinksPRByBranch(t *testing.T) {
+// A Codex session links the pull requests it created (from gh pr create),
+// as a Claude session does. Being on a pull request's branch links nothing: a
+// reviewer started in the author's worktree is on the author's branch.
+func TestCodexSessionLinksOnlyCreatedPRs(t *testing.T) {
 	e := newEnv(t)
-	e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Slug: exRepo, Branch: model.Of("feature-x")})
+	e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Remote: model.GitHubRepo(exRepo), Branch: model.Of("feature-x")})
 	e.prs.prs = []model.PullRequest{
-		{Repo: exRepo, Number: 101, Title: "Feature X", HeadBranch: "feature-x", State: model.PRStateOpen, Checks: model.ChecksRunning},
-		{Repo: exRepo, Number: 102, Title: "Other", HeadBranch: "other", State: model.PRStateOpen},
+		{Repo: model.GitHubRepo(exRepo), Number: 101, Title: "Feature X", HeadBranch: "feature-x", State: model.PRStateOpen, Checks: model.ChecksRunning},
+		{Repo: model.GitHubRepo(exRepo), Number: 102, Title: "Other", HeadBranch: "other", State: model.PRStateOpen},
 	}
-	s := session("c1", model.StatusFinished, tNow)
-	s.Key = model.SessionKey{Tool: model.ToolCodex, ID: "c1"}
-	e.board.applySync(s)
+	author := session("a1", model.StatusFinished, tNow)
+	author.Key = model.SessionKey{Tool: model.ToolCodex, ID: "a1"}
+	author.CreatedPRs = []model.PRRef{{Repo: model.GitHubRepo(exRepo), Number: 101}}
+	reviewer := session("r1", model.StatusFinished, tNow)
+	reviewer.Key = model.SessionKey{Tool: model.ToolCodex, ID: "r1"}
+	reviewer.Headless = true
+	e.board.applySync(author)
+	e.board.applySync(reviewer)
 	e.board.tick()
-	c := onlyCard(t, e.board)
+	c, _ := cardByID(t, e.board, "codex:a1")
 	if len(c.PullRequests) != 1 || c.PullRequests[0].Number != 101 || c.Column != contract.ColumnInReview {
-		t.Fatalf("card %+v", c)
+		t.Fatalf("author card %+v", c)
 	}
-
-	// A Claude session on the same branch links only pull requests it created.
-	s2 := session("s1", model.StatusFinished, tNow)
-	e.board.applySync(s2)
-	e.board.tick()
-	if c, _ := cardByID(t, e.board, "claude:s1"); len(c.PullRequests) != 0 {
-		t.Fatalf("claude session linked by branch: %+v", c.PullRequests)
+	if c, _ := cardByID(t, e.board, "codex:r1"); len(c.PullRequests) != 0 || c.Column == contract.ColumnInReview {
+		t.Fatalf("reviewer on the same branch linked: %+v", c)
+	}
+	// Nothing is asked about by branch.
+	for _, call := range e.prs.calls {
+		if len(call.branches) != 0 {
+			t.Fatalf("lookup by branch: %+v", call)
+		}
 	}
 }
 
 func TestIssuesComeFromClosingReferences(t *testing.T) {
 	e := newEnv(t)
-	e.prs.prs = []model.PullRequest{{Repo: exRepo, Number: 101, State: model.PRStateOpen, ClosingIssues: []int{7, 9}}}
+	e.prs.prs = []model.PullRequest{{Repo: model.GitHubRepo(exRepo), Number: 101, State: model.PRStateOpen, ClosingIssues: []int{7, 9}}}
 	s := session("s1", model.StatusFinished, tNow)
-	s.CreatedPRs = []model.PRRef{{Repo: exRepo, Number: 101}}
+	s.CreatedPRs = []model.PRRef{{Repo: model.GitHubRepo(exRepo), Number: 101}}
 	e.board.applySync(s)
 	e.board.tick()
 	c := onlyCard(t, e.board)
@@ -287,10 +296,10 @@ func TestEndedWithoutPRLeavesTheBoard(t *testing.T) {
 func TestEndedWithMergedPRIsDoneFor24h(t *testing.T) {
 	withFullEndedRule(t)
 	e := newEnv(t)
-	e.prs.prs = []model.PullRequest{{Repo: exRepo, Number: 101, State: model.PRStateMerged, ClosedAt: tNow.Add(-2 * time.Hour)}}
+	e.prs.prs = []model.PullRequest{{Repo: model.GitHubRepo(exRepo), Number: 101, State: model.PRStateMerged, ClosedAt: tNow.Add(-2 * time.Hour)}}
 	s := session("s1", model.StatusFinished, tNow.Add(-3*time.Hour))
 	s.Ended, s.EndedAt = true, tNow.Add(-time.Hour)
-	s.CreatedPRs = []model.PRRef{{Repo: exRepo, Number: 101}}
+	s.CreatedPRs = []model.PRRef{{Repo: model.GitHubRepo(exRepo), Number: 101}}
 	e.board.applySync(s)
 	e.board.tick()
 	if c := onlyCard(t, e.board); c.Column != contract.ColumnDone || c.Agent.Status != contract.AgentStatusEnded {
@@ -306,10 +315,10 @@ func TestEndedWithMergedPRIsDoneFor24h(t *testing.T) {
 func TestEndedWithOpenPRKeptUpTo7Days(t *testing.T) {
 	withFullEndedRule(t)
 	e := newEnv(t)
-	e.prs.prs = []model.PullRequest{{Repo: exRepo, Number: 101, State: model.PRStateOpen}}
+	e.prs.prs = []model.PullRequest{{Repo: model.GitHubRepo(exRepo), Number: 101, State: model.PRStateOpen}}
 	s := session("s1", model.StatusFinished, tNow)
 	s.Ended, s.EndedAt = true, tNow
-	s.CreatedPRs = []model.PRRef{{Repo: exRepo, Number: 101}}
+	s.CreatedPRs = []model.PRRef{{Repo: model.GitHubRepo(exRepo), Number: 101}}
 	e.board.applySync(s)
 	e.board.tick()
 	if c := onlyCard(t, e.board); c.Column != contract.ColumnInReview {
@@ -330,10 +339,10 @@ func TestEndedWithOpenPRKeptUpTo7Days(t *testing.T) {
 func TestEndedNeverGetsUnseenAttention(t *testing.T) {
 	withFullEndedRule(t)
 	e := newEnv(t)
-	e.prs.prs = []model.PullRequest{{Repo: exRepo, Number: 101, State: model.PRStateOpen}}
+	e.prs.prs = []model.PullRequest{{Repo: model.GitHubRepo(exRepo), Number: 101, State: model.PRStateOpen}}
 	s := session("s1", model.StatusFinished, tNow)
 	s.Ended, s.EndedAt = true, tNow
-	s.CreatedPRs = []model.PRRef{{Repo: exRepo, Number: 101}}
+	s.CreatedPRs = []model.PRRef{{Repo: model.GitHubRepo(exRepo), Number: 101}}
 	e.board.applySync(s)
 	e.board.tick()
 	c := onlyCard(t, e.board)
@@ -435,9 +444,9 @@ func TestHostileStringsAreCleaned(t *testing.T) {
 
 func TestUnsafePRURLIsDropped(t *testing.T) {
 	e := newEnv(t)
-	e.prs.prs = []model.PullRequest{{Repo: exRepo, Number: 101, State: model.PRStateOpen, URL: "javascript:alert(1)"}}
+	e.prs.prs = []model.PullRequest{{Repo: model.GitHubRepo(exRepo), Number: 101, State: model.PRStateOpen, URL: "javascript:alert(1)"}}
 	s := session("s1", model.StatusFinished, tNow)
-	s.CreatedPRs = []model.PRRef{{Repo: exRepo, Number: 101}}
+	s.CreatedPRs = []model.PRRef{{Repo: model.GitHubRepo(exRepo), Number: 101}}
 	e.board.applySync(s)
 	e.board.tick()
 	if c := onlyCard(t, e.board); c.PullRequests[0].URL != "" {
@@ -455,9 +464,9 @@ func withFullEndedRule(t *testing.T) {
 
 func TestPOCEndedSessionLeavesTheBoardEvenWithAPR(t *testing.T) {
 	e := newEnv(t)
-	e.prs.prs = []model.PullRequest{{Repo: exRepo, Number: 101, State: model.PRStateOpen}}
+	e.prs.prs = []model.PullRequest{{Repo: model.GitHubRepo(exRepo), Number: 101, State: model.PRStateOpen}}
 	s := session("s1", model.StatusFinished, tNow)
-	s.CreatedPRs = []model.PRRef{{Repo: exRepo, Number: 101}}
+	s.CreatedPRs = []model.PRRef{{Repo: model.GitHubRepo(exRepo), Number: 101}}
 	e.board.applySync(s)
 	e.board.tick()
 	if n := len(e.board.Snapshot().Cards); n != 1 {

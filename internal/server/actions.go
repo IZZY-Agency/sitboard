@@ -13,6 +13,7 @@ import (
 
 	"github.com/IZZY-Agency/sitboard/internal/app"
 	"github.com/IZZY-Agency/sitboard/internal/contract"
+	"github.com/IZZY-Agency/sitboard/internal/model"
 	"github.com/IZZY-Agency/sitboard/internal/source"
 )
 
@@ -23,12 +24,30 @@ const maxBody = 1024
 // server has no global read timeout because the event stream is long-lived.
 var bodyReadTimeout = 10 * time.Second
 
-// terminalIDRe is the shape of an agterm session id. The id comes from the
-// board, not the page; this is defence in depth before it reaches agtermctl.
+// terminalIDRe is the shape of an agterm session id. The target comes from
+// the board, not the page; this check and TmuxPane.Valid are defence in depth
+// before an id reaches agtermctl or tmux.
 var terminalIDRe = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
-// jump focuses the card's agterm session. The server resolves the session from
-// the card id; a terminal id sent by the page is never read.
+// validTarget says whether t has the shape its kind requires.
+func validTarget(t model.FocusTarget) bool {
+	switch t.Kind {
+	case model.FocusAgterm:
+		return terminalIDRe.MatchString(t.ID) && t.Socket == "" && t.TTY == ""
+	case model.FocusTmux:
+		return model.TmuxPane{Socket: t.Socket, Pane: t.ID, TTY: t.TTY}.Valid()
+	}
+	return false
+}
+
+// Jump failures the page shows as they are (web/src/data/actions.ts).
+const (
+	jumpNoTarget = "this card has no agterm session or tmux pane to focus"
+	jumpNoClient = "no tmux client is attached"
+)
+
+// jump focuses the card's tmux pane or agterm session. The server resolves the
+// target from the card id; a terminal id sent by the page is never read.
 func jump(opts Options) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		cardID, ok := readCard(w, r)
@@ -39,17 +58,23 @@ func jump(opts Options) http.HandlerFunc {
 			http.Error(w, "unknown card", http.StatusNotFound)
 			return
 		}
-		terminal, ok := opts.Board.TerminalFor(cardID)
-		if !ok || opts.Jumper == nil || !terminalIDRe.MatchString(terminal) {
-			http.Error(w, "this card has no agterm session to focus", http.StatusConflict)
+		target, ok := opts.Board.JumpTarget(cardID)
+		if !ok || opts.Jumper == nil || !validTarget(target) {
+			http.Error(w, jumpNoTarget, http.StatusConflict)
 			return
 		}
-		if err := opts.Jumper.Jump(r.Context(), terminal); err != nil {
-			if errors.Is(err, source.ErrUnknownTerminal) {
-				http.Error(w, "the agterm session is gone", http.StatusConflict)
-				return
+		kind := string(target.Kind) // a constant: validTarget accepted it
+		if err := opts.Jumper.Jump(r.Context(), target); err != nil {
+			switch {
+			case errors.Is(err, source.ErrUnknownTerminal):
+				http.Error(w, "the "+kind+" session is gone", http.StatusConflict)
+			case errors.Is(err, source.ErrNotInstalled):
+				http.Error(w, kind+" not found", http.StatusServiceUnavailable)
+			case errors.Is(err, source.ErrNoClient):
+				http.Error(w, jumpNoClient, http.StatusServiceUnavailable)
+			default:
+				http.Error(w, kind+" did not answer", http.StatusServiceUnavailable)
 			}
-			http.Error(w, "agterm did not answer", http.StatusServiceUnavailable)
 			return
 		}
 		// Jumping to a card is looking at it.

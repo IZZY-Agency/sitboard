@@ -3,6 +3,7 @@
 // lost its key, and a different contract version means the page is outdated.
 
 import { CONTRACT_VERSION, EVENT_SNAPSHOT, Paths, type Snapshot } from '../contract.gen';
+import { readGitlabHosts } from './derive';
 
 export type Conn =
   | 'connecting' // first load, nothing shown yet
@@ -68,7 +69,8 @@ export function createFeed(deps: FeedDeps): Feed {
           halt('outdated');
           return false;
         }
-        snapshot = s;
+        // The one list of hosts a GitLab link may point at is checked here, as the snapshot arrives.
+        snapshot = { ...s, gitlabHosts: readGitlabHosts(s.gitlabHosts) };
         emit('live');
         return true;
       };

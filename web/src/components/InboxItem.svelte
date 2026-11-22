@@ -1,7 +1,7 @@
 <script lang="ts">
   // One entry of the needs-you inbox or the idle queue: who, where, what, and why.
   import type { Card } from '../contract.gen';
-  import { agentName, attentionLines, canJump, cardTitle, columnTone, projectLabel, timeInState, type Index, type Line } from '../data/derive';
+  import { agentName, attentionLines, cardTitle, columnTone, jumpLabel, projectLabel, timeInState, type Index, type Line } from '../data/derive';
   import { flash } from '../motion';
   import { critterState } from '../data/critter';
   import Critter from './Critter.svelte';
@@ -10,7 +10,6 @@
     card,
     ix,
     now,
-    agtermPresent,
     reason,
     showProject = true,
     flashToken = 0,
@@ -20,7 +19,6 @@
     card: Card;
     ix: Index;
     now: number;
-    agtermPresent: boolean;
     /** Overrides the attention words, for the idle queue. */
     reason?: Line;
     showProject?: boolean;
@@ -46,7 +44,7 @@
     type="button"
     onclick={() => onjump(card)}
   >
-    <span class="visually-hidden">{canJump(card, agtermPresent) ? 'Jump to agterm:' : 'Show where it runs:'}</span>
+    <span class="visually-hidden">{jumpLabel(card)}</span>
     <span class="top">
       <Critter id={card.id} mood={critterState(card)} size={24} />
       <span class="agent u">{name}</span>

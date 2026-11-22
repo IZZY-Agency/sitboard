@@ -151,8 +151,8 @@ KINDS=(
   "internal=server/dist/.keep"
   "scripts:.md .mjs .sh .tmpl"
   "test:.go"
-  "testdata:.json .jsonl .md"
-  "web:.css .html .js .json .mjs .svelte .svg .ts .txt .woff2"
+  "testdata:.json .jsonl .md .txt"
+  "web:.css .html .js .json .mjs .snap .svelte .svg .ts .txt .woff2"
 )
 # An exported .github SVG is plain drawing only (svg_plain below):
 # - its tags are these elements and no other, spelled exactly (the banner

@@ -449,7 +449,7 @@ func TestJumpRejectsMalformedID(t *testing.T) {
 	f := &fakeCtl{tree: fixture(t, "tree.json")}
 	a := newTest(t, f)
 	for _, id := range []string{"", "not-a-uuid", "--window", idCoord + " ", "active", "11111111"} {
-		if err := a.Jump(context.Background(), id); !errors.Is(err, source.ErrUnknownTerminal) {
+		if err := a.Jump(context.Background(), model.FocusTarget{Kind: model.FocusAgterm, ID: id}); !errors.Is(err, source.ErrUnknownTerminal) {
 			t.Errorf("Jump(%q) = %v", id, err)
 		}
 	}
@@ -489,7 +489,7 @@ func TestHostileIDsFromAgtermAreDropped(t *testing.T) {
 func TestJumpRejectsIDNotInTree(t *testing.T) {
 	f := &fakeCtl{tree: fixture(t, "tree.json")}
 	a := newTest(t, f)
-	if err := a.Jump(context.Background(), "99999999-9999-4999-8999-999999999999"); !errors.Is(err, source.ErrUnknownTerminal) {
+	if err := a.Jump(context.Background(), model.FocusTarget{Kind: model.FocusAgterm, ID: "99999999-9999-4999-8999-999999999999"}); !errors.Is(err, source.ErrUnknownTerminal) {
 		t.Fatalf("Jump = %v", err)
 	}
 	if f.count("session") != 0 {
@@ -500,7 +500,7 @@ func TestJumpRejectsIDNotInTree(t *testing.T) {
 func TestJumpPassesIDAsOneArgument(t *testing.T) {
 	f := &fakeCtl{tree: fixture(t, "tree.json")}
 	a := newTest(t, f)
-	if err := a.Jump(context.Background(), idWorker); err != nil {
+	if err := a.Jump(context.Background(), model.FocusTarget{Kind: model.FocusAgterm, ID: idWorker}); err != nil {
 		t.Fatal(err)
 	}
 	if f.count("session", "select", "--target", idWorker, "--window", winA) != 1 {
@@ -513,7 +513,7 @@ func TestJumpPassesIDAsOneArgument(t *testing.T) {
 
 func TestJumpWithoutAgtermReturnsError(t *testing.T) {
 	a := New(Options{Bin: filepath.Join(t.TempDir(), "agtermctl")})
-	if err := a.Jump(context.Background(), idWorker); err == nil {
+	if err := a.Jump(context.Background(), model.FocusTarget{Kind: model.FocusAgterm, ID: idWorker}); err == nil {
 		t.Fatal("Jump without agterm must fail")
 	}
 }
@@ -566,5 +566,16 @@ func TestLastSelectedAtFromTheTree(t *testing.T) {
 	c.waitFor(t, "newer worker selection", sel(idWorker, 1794913000))
 	if n := count(); n != 3 {
 		t.Fatalf("selections = %d, want 3", n)
+	}
+}
+
+func TestJumpRefusesAnotherKind(t *testing.T) {
+	f := &fakeCtl{tree: fixture(t, "tree.json")}
+	a := newTest(t, f)
+	if err := a.Jump(context.Background(), model.FocusTarget{Kind: model.FocusTmux, ID: idWorker}); !errors.Is(err, source.ErrUnknownTerminal) {
+		t.Fatalf("Jump(tmux kind) = %v", err)
+	}
+	if len(f.calls) != 0 {
+		t.Fatalf("runner called: %v", f.calls)
 	}
 }

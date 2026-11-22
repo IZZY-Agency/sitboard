@@ -143,7 +143,7 @@ const C = (column: Column, attention: Attention[] = [], status: Card['agent']['s
   pullRequests: [] as Card['pullRequests'],
   ...more,
 });
-const PR = (state: Card['pullRequests'][number]['state']) => ({ repo: 'example-org/one', number: 1, title: 'x', url: 'https://github.com/example-org/one/pull/1', state, checks: 'none' as const, review: '' as const, draft: false });
+const PR = (state: Card['pullRequests'][number]['state']) => ({ forge: 'github' as const, host: 'github.com', repo: 'example-org/one', number: 1, title: 'x', url: 'https://github.com/example-org/one/pull/1', state, checks: 'none' as const, review: '' as const, draft: false });
 
 describe('critter state', () => {
   it('maps every combination the server sends', () => {

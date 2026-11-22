@@ -64,7 +64,7 @@ func (e *groupEnv) repo(t *testing.T, rel string) string {
 	t.Helper()
 	p := e.dir(t, rel)
 	e.dir(t, filepath.Join(rel, ".git"))
-	e.repos.set(p, model.Repo{Root: p, MainRoot: p, Branch: model.Of("main"), Slug: exRepo})
+	e.repos.set(p, model.Repo{Root: p, MainRoot: p, Branch: model.Of("main"), Remote: model.GitHubRepo(exRepo)})
 	return p
 }
 

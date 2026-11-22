@@ -446,14 +446,15 @@ func fromUnix(ts float64) time.Time {
 	return time.Unix(int64(sec), int64(frac*1e9))
 }
 
-// Jump focuses the terminal session terminalID. It accepts only an id that
-// exists in the current agterm tree, read fresh for this call.
-func (a *Adapter) Jump(ctx context.Context, terminalID string) error {
-	if !uuidRe.MatchString(terminalID) {
+// Jump focuses the agterm session target.ID. It accepts only an agterm
+// target whose id exists in the current agterm tree, read fresh for this call.
+func (a *Adapter) Jump(ctx context.Context, target model.FocusTarget) error {
+	terminalID := target.ID
+	if target.Kind != model.FocusAgterm || !uuidRe.MatchString(terminalID) {
 		return source.ErrUnknownTerminal
 	}
 	if a.found(a.bin) == "" {
-		return errors.New("agterm not found")
+		return source.ErrNotInstalled
 	}
 	terms, err := a.loadTree(ctx)
 	if err != nil {

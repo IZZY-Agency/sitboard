@@ -82,8 +82,6 @@ func (g *gatedRepos) Resolve(ctx context.Context, folder string) (model.Repo, er
 		return model.Repo{}, ctx.Err()
 	}
 }
-func (g *gatedRepos) Worktrees(context.Context, string) ([]model.Worktree, error) { return nil, nil }
-func (g *gatedRepos) LocalBranches(context.Context, string) ([]string, error)     { return nil, nil }
 
 func (g *gatedRepos) answer(i int, r model.Repo) {
 	g.mu.Lock()
@@ -116,7 +114,7 @@ func TestSlowGitDoesNotFreezeTheBoard(t *testing.T) {
 		t.Fatalf("%d cards before git answered; a card waits for its project", n)
 	}
 	<-g.arrived
-	g.answer(0, model.Repo{Root: alpha, MainRoot: alpha, Slug: exRepo})
+	g.answer(0, model.Repo{Root: alpha, MainRoot: alpha, Remote: model.GitHubRepo(exRepo)})
 	b.resolving.Wait()
 	if c := onlyCard(t, b); c.ProjectID != contract.ProjectID(alpha) {
 		t.Fatalf("project %q", c.ProjectID)
@@ -151,7 +149,7 @@ func TestInvalidRepoNeverReachesLookup(t *testing.T) {
 	e := newEnv(t)
 	s := session("s1", model.StatusBusy, tNow)
 	for _, bad := range []string{"../x", "x/..", "a/b/c", "a b/c", "evil;rm/x", "-x/y\n", "", "owner"} {
-		s.CreatedPRs = append(s.CreatedPRs, model.PRRef{Repo: bad, Number: 1})
+		s.CreatedPRs = append(s.CreatedPRs, model.PRRef{Repo: model.GitHubRepo(bad), Number: 1})
 	}
 	e.board.applySync(s)
 	e.board.tick()
@@ -161,7 +159,7 @@ func TestInvalidRepoNeverReachesLookup(t *testing.T) {
 	if calls != 0 {
 		t.Fatalf("%d lookups for invalid repos: %+v", calls, e.prs.calls)
 	}
-	s.CreatedPRs = append(s.CreatedPRs, model.PRRef{Repo: "example-org/example.repo_1", Number: 1})
+	s.CreatedPRs = append(s.CreatedPRs, model.PRRef{Repo: model.GitHubRepo("example-org/example.repo_1"), Number: 1})
 	e.board.applySync(s)
 	e.board.tick()
 	if n := e.prs.callsFor("example-org/example.repo_1"); n != 1 {

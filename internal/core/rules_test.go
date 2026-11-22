@@ -15,11 +15,11 @@ var tNow = time.Date(2026, 11, 17, 10, 0, 0, 0, time.UTC)
 func st(s model.Status) model.Known[model.Status] { return model.Of(s) }
 
 func openPR(checks model.Checks) model.PullRequest {
-	return model.PullRequest{Repo: "example-org/example-repo", Number: 101, State: model.PRStateOpen, Checks: checks}
+	return model.PullRequest{Repo: model.GitHubRepo("example-org/example-repo"), Number: 101, State: model.PRStateOpen, Checks: checks}
 }
 
 func closedPR(state model.PRState, closedAgo time.Duration) model.PullRequest {
-	return model.PullRequest{Repo: "example-org/example-repo", Number: 102, State: state, Checks: model.ChecksPassing, ClosedAt: tNow.Add(-closedAgo)}
+	return model.PullRequest{Repo: model.GitHubRepo("example-org/example-repo"), Number: 102, State: state, Checks: model.ChecksPassing, ClosedAt: tNow.Add(-closedAgo)}
 }
 
 // TestColumnTable is the rule table from the plan (Task E2), one sub-test per

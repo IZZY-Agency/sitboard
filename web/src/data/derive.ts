@@ -4,7 +4,9 @@
 import {
   ARTIFACT_URL_PATTERN,
   ColumnValues,
+  GITLAB_ISSUE_URL_PATTERN,
   ISSUE_URL_PATTERN,
+  MERGE_REQUEST_URL_PATTERN,
   PULL_REQUEST_URL_PATTERN,
   type Artifact,
   type Attention,
@@ -18,6 +20,7 @@ import {
   type SourceStatus,
 } from '../contract.gen';
 import { since } from './time';
+import { doneHint, inReviewEmpty, inReviewHint, reviewWords } from './words';
 import { clean } from './text';
 import { countsOf, grouping, partParent, projectsById } from './groups';
 
@@ -59,14 +62,14 @@ export const COLUMN_META: Record<Column, ColumnMeta> = {
     label: 'In review',
     word: 'In review',
     tone: 'review',
-    hint: 'Stopped with an open pull request.',
-    empty: 'Empty right now. An agent lands here when it stops while one of its pull requests is still open.',
+    hint: inReviewHint(false),
+    empty: inReviewEmpty(false),
   },
   done: {
     label: 'Done · 24h',
     word: 'Done',
     tone: 'done',
-    hint: 'Every pull request it opened is merged or closed.',
+    hint: doneHint(false),
     empty: 'Nothing finished in the last 24 hours.',
   },
   idle: {
@@ -173,25 +176,55 @@ export type EffortLevel = (typeof EFFORT_LEVELS)[number];
 
 /** A card's effort level, ready to show; null when none is known. */
 export interface EffortShown {
-  level: EffortLevel;
+  /** Its place on the ramp; 'word' for a word the tool recorded that has none (Codex's "minimal"). */
+  level: EffortLevel | 'word';
+  /** What the chip says. */
+  text: string;
   /** Set at launch and not yet confirmed by a reply. */
   launch: boolean;
   /** The chip's hover text: what the level is and where it comes from. */
   title: string;
 }
 
+/**
+ * Effort words off the ramp that still take a level's look, keeping their own
+ * word: the owner ruled (#115) that Codex's "ultra" looks like max, the filled
+ * box. Codex's other words off the ramp ("none", "minimal", "persistent") keep
+ * the plain chip.
+ */
+const WORD_LEVELS: Readonly<Record<string, EffortLevel>> = { ultra: 'max' };
+
 export function effortOf(card: Card): EffortShown | null {
   const level = (EFFORT_LEVELS as readonly string[]).includes(card.agent.effort) ? (card.agent.effort as EffortLevel) : null;
-  if (!level) return null;
+  if (!level) {
+    const word = /^[a-z]{1,16}$/.test(card.agent.effortWord ?? '') ? card.agent.effortWord : '';
+    if (!word) return null;
+    const shownAs = Object.hasOwn(WORD_LEVELS, word) ? WORD_LEVELS[word] : null;
+    if (shownAs) {
+      return {
+        level: shownAs,
+        text: word,
+        launch: false,
+        title: `Effort ${word}, as the session recorded it: shown like ${shownAs}, the top level sitboard ranks.`,
+      };
+    }
+    return {
+      level: 'word',
+      text: word,
+      launch: false,
+      title: `Effort ${word}, as the session recorded it: not one of the levels sitboard ranks.`,
+    };
+  }
   if (card.agent.effortSource === 'launch') {
     return {
       level,
+      text: level,
       launch: true,
       title: `Effort ${level}, set at launch (the --effort flag or CLAUDE_CODE_EFFORT_LEVEL). Not yet confirmed: the level the first reply runs at replaces it. It differs when CLAUDE_CODE_EFFORT_LEVEL is set in a settings file, or when the model cannot run this level.`,
     };
   }
   if (card.agent.effortSource === 'recorded') {
-    return { level, launch: false, title: `Effort ${level}: the level the last reply ran at. A change shows at the next reply.` };
+    return { level, text: level, launch: false, title: `Effort ${level}: the level the last reply ran at. A change shows at the next reply.` };
   }
   return null;
 }
@@ -208,9 +241,19 @@ export interface Index {
   byId: Map<string, Card>;
   workers: Map<string, Card[]>; // coordinator card id → its workers
   projects: Map<string, Project>;
+  gitlabHosts: readonly string[]; // the only hosts a GitLab link may point at (Snapshot.gitlabHosts)
 }
 
-export function indexOf(s: Pick<Snapshot, 'cards' | 'projects'>): Index {
+/**
+ * The GitLab hosts a snapshot lists: an array's strings, whole; anything else
+ * (a string, an object, nothing) reads as none, so a damaged value never
+ * approves a host that was not listed. Hosts are compared exactly.
+ */
+export function readGitlabHosts(v: unknown): string[] {
+  return Array.isArray(v) ? v.filter((h): h is string => typeof h === 'string') : [];
+}
+
+export function indexOf(s: Pick<Snapshot, 'cards' | 'projects'> & Partial<Pick<Snapshot, 'gitlabHosts'>>): Index {
   const byId = new Map(s.cards.map((c) => [c.id, c]));
   const workers = new Map<string, Card[]>();
   for (const c of s.cards) {
@@ -220,7 +263,7 @@ export function indexOf(s: Pick<Snapshot, 'cards' | 'projects'>): Index {
       workers.set(c.agent.parentCardId, list);
     }
   }
-  return { byId, workers, projects: projectsById(s.projects) };
+  return { byId, workers, projects: projectsById(s.projects), gitlabHosts: readGitlabHosts(s.gitlabHosts) };
 }
 
 const plural = (n: number, one: string, many = one + 's') => `${n} ${n === 1 ? one : many}`;
@@ -251,9 +294,16 @@ export function projectName(card: Card, ix: Index): string {
   return l.part ? `${l.name} / ${l.part}` : l.name;
 }
 
-/** True when jump can focus the card's terminal. */
-export function canJump(card: Card, agtermPresent: boolean): boolean {
-  return agtermPresent && card.agent.terminalId !== '';
+/** True when jump can focus the card's terminal: its agterm session or its tmux pane (the server decides which). */
+export function canJump(card: Card): boolean {
+  return card.agent.jump !== 'none';
+}
+
+/** The words a screen reader hears before the card: where activating it goes. */
+export function jumpLabel(card: Card): string {
+  if (card.agent.jump === 'tmux') return 'Jump to tmux:';
+  if (card.agent.jump === 'agterm') return 'Jump to agterm:';
+  return 'Show where it runs:';
 }
 
 const CHECK_RANK: Record<Checks, number> = { failing: 4, running: 3, unknown: 2, passing: 1, none: 0 };
@@ -270,16 +320,39 @@ export interface PrParts {
   tone: Tone;
 }
 
+/** A pull request's number as the page writes it: "#12" on GitHub, "!12" for a GitLab merge request. */
+export function prNumber(pr: Pick<PullRequest, 'forge' | 'number'>): string {
+  return `${pr.forge === 'gitlab' ? '!' : '#'}${pr.number}`;
+}
+
+/**
+ * A pull or merge request's identity across forges: GitHub "owner/name#12"
+ * (as before forges), GitLab "gitlab:<host>/<path>!12". The same path on
+ * another forge or host is another key.
+ */
+export function prKey(pr: Pick<PullRequest, 'forge' | 'host' | 'repo' | 'number'>): string {
+  return pr.forge === 'gitlab' ? `gitlab:${pr.host}/${pr.repo}!${pr.number}` : `${pr.repo}#${pr.number}`;
+}
+
+/**
+ * A repository's identity across forges for comparing names, lowercased
+ * (GitHub and GitLab names ignore case); "" for none.
+ */
+export function repoKey(r: { forge: string; host: string; repo: string }): string {
+  if (!r.repo) return '';
+  return (r.forge === 'gitlab' ? `gitlab:${r.host}/${r.repo}` : r.repo).toLowerCase();
+}
+
 export function prLineParts(pr: PullRequest): PrParts {
-  const num = `#${pr.number}`;
+  const num = prNumber(pr);
   if (pr.state === 'merged') return { num, rest: 'merged', tone: 'done' };
   if (pr.state === 'closed') return { num, rest: 'closed', tone: 'muted' };
   const parts: string[] = [];
   if (pr.draft) parts.push('draft');
   const tone: Tone = pr.checks === 'failing' ? 'failing' : pr.checks === 'running' ? 'coordinator' : 'body';
   parts.push(pr.checks === 'none' ? 'open' : `checks ${pr.checks}`);
-  if (pr.review === 'changes_requested') parts.push('· changes requested');
-  if (pr.review === 'approved') parts.push('· approved');
+  const review = reviewWords(pr);
+  if (review) parts.push(`· ${review}`);
   return { num, rest: parts.join(' '), tone };
 }
 
@@ -288,19 +361,33 @@ export function prLine(pr: PullRequest): Line {
   return { text: `${p.num} ${p.rest}`, tone: p.tone };
 }
 
+type Linkable = Pick<PullRequest, 'forge' | 'host' | 'repo' | 'number' | 'url'>;
+
+/** url when it is the address forgeLink's rule builds for this forge, host, repo and number; null otherwise. */
+function forgeLink(it: Linkable, gitlabHosts: readonly string[], github: RegExp, gitlab: RegExp, ghKind: string, glKind: string): string | null {
+  if (it.forge === 'github') {
+    return it.host === 'github.com' && github.test(it.url) && it.url === `https://github.com/${it.repo}/${ghKind}/${it.number}` ? it.url : null;
+  }
+  if (it.forge === 'gitlab') {
+    return gitlabHosts.includes(it.host) && gitlab.test(it.url) && it.url === `https://${it.host}/${it.repo}/-/${glKind}/${it.number}` ? it.url : null;
+  }
+  return null;
+}
+
 /**
  * A pull request's link, or null. The page links only the address of this
- * very pull request: it must match PULL_REQUEST_URL_PATTERN and be the one
- * for its own repo and number, so a tampered snapshot cannot put another
- * repository's address on the row.
+ * very pull request: it must match its forge's pattern and be the one for its
+ * own host, repo and number, so a tampered snapshot cannot put another
+ * repository's address on the row. A GitLab address must also be on one of
+ * gitlabHosts (Snapshot.gitlabHosts); with none given, no GitLab link passes.
  */
-export function prHref(pr: Pick<PullRequest, 'repo' | 'number' | 'url'>): string | null {
-  return PULL_REQUEST_URL_PATTERN.test(pr.url) && pr.url === `https://github.com/${pr.repo}/pull/${pr.number}` ? pr.url : null;
+export function prHref(pr: Linkable, gitlabHosts: readonly string[] = []): string | null {
+  return forgeLink(pr, gitlabHosts, PULL_REQUEST_URL_PATTERN, MERGE_REQUEST_URL_PATTERN, 'pull', 'merge_requests');
 }
 
 /** An issue's link, or null: the same rule as prHref, with /issues/. */
-export function issueHref(is: Pick<Issue, 'repo' | 'number' | 'url'>): string | null {
-  return ISSUE_URL_PATTERN.test(is.url) && is.url === `https://github.com/${is.repo}/issues/${is.number}` ? is.url : null;
+export function issueHref(is: Pick<Issue, 'forge' | 'host' | 'repo' | 'number' | 'url'>, gitlabHosts: readonly string[] = []): string | null {
+  return forgeLink(is, gitlabHosts, ISSUE_URL_PATTERN, GITLAB_ISSUE_URL_PATTERN, 'issues', 'issues');
 }
 
 /** At most this many pull request lines on a card, the last one possibly "+N more merged". */
@@ -352,33 +439,78 @@ export function cardArtifacts(list: readonly Artifact[]): { shown: Artifact[]; m
 const NUMS_IN_LINE = 2;
 
 /**
- * One line for a row: the open ones with their worst check, then "+N merged".
- * Never a long run of numbers: "#9 #8 open · checks failing · +12 merged",
- * "#194 #193 +28 merged" when nothing is open.
+ * A piece of a row line: plain text, or a pull request's or an issue's number
+ * with its own address when that has the one allowed form (prHref, issueHref).
  */
-export function prSummary(prs: readonly PullRequest[]): Line | null {
+export interface RowBit {
+  text: string;
+  href: string | null;
+  /** A pull request, a merge request (GitLab), an issue, or plain text. */
+  kind: 'pr' | 'mr' | 'issue' | null;
+}
+
+/** One part of a row line, between its " · " separators; the closes part is muted. */
+export interface RowPart {
+  bits: RowBit[];
+  closes: boolean;
+}
+
+/** A row line in parts, so a row can link each number. */
+export interface RowLine {
+  parts: RowPart[];
+  tone: Tone;
+}
+
+const plainBit = (text: string): RowBit => ({ text, href: null, kind: null });
+const plainPart = (text: string): RowPart => ({ bits: [plainBit(text)], closes: false });
+
+/** A row line as the text it shows. */
+export function rowLineText(parts: readonly RowPart[]): string {
+  return parts.map((p) => p.bits.map((b) => b.text).join('')).join(' · ');
+}
+
+/**
+ * One line for a row, in parts: the open ones with their worst check, then
+ * "+N merged". Never a long run of numbers: "#9 #8 open · checks failing ·
+ * +12 merged", "#194 #193 +28 merged" when nothing is open. Each number shown
+ * carries its pull request's link.
+ */
+export function prSummaryParts(prs: readonly PullRequest[], gitlabHosts: readonly string[] = []): RowLine | null {
   if (prs.length === 0) return null;
   const open = prs.filter((p) => p.state === 'open');
   const merged = prs.filter((p) => p.state === 'merged');
   const closed = prs.filter((p) => p.state === 'closed');
-  const lead = (l: readonly PullRequest[], word: string) => {
-    const nums = l.slice(0, NUMS_IN_LINE + 1 === l.length ? l.length : NUMS_IN_LINE).map((p) => `#${p.number}`);
+  const lead = (l: readonly PullRequest[], word: string): RowPart => {
+    const nums = l.slice(0, NUMS_IN_LINE + 1 === l.length ? l.length : NUMS_IN_LINE);
+    const bits: RowBit[] = [];
+    nums.forEach((p, i) => {
+      if (i) bits.push(plainBit(' '));
+      bits.push({ text: prNumber(p), href: prHref(p, gitlabHosts), kind: p.forge === 'gitlab' ? 'mr' : 'pr' });
+    });
     const extra = l.length - nums.length;
-    return `${nums.join(' ')}${extra > 0 ? ` +${extra}` : ''} ${word}`;
+    bits.push(plainBit(`${extra > 0 ? ` +${extra}` : ''} ${word}`));
+    return { bits, closes: false };
   };
-  const parts: string[] = [];
+  const parts: RowPart[] = [];
   let tone: Tone = 'muted';
   if (open.length) {
     const worst = open.map((p) => p.checks).sort((a, b) => CHECK_RANK[b] - CHECK_RANK[a])[0];
-    parts.push(lead(open, 'open') + (worst === 'none' ? '' : ` · checks ${worst}`));
+    parts.push(lead(open, 'open'));
+    if (worst !== 'none') parts.push(plainPart(`checks ${worst}`));
     tone = worst === 'failing' ? 'failing' : worst === 'running' ? 'coordinator' : 'body';
   }
   if (merged.length) {
-    parts.push(parts.length ? `+${merged.length} merged` : lead(merged, 'merged'));
+    parts.push(parts.length ? plainPart(`+${merged.length} merged`) : lead(merged, 'merged'));
     if (!open.length) tone = 'done';
   }
-  if (closed.length) parts.push(parts.length ? `+${closed.length} closed` : lead(closed, 'closed'));
-  return { text: parts.join(' · '), tone };
+  if (closed.length) parts.push(parts.length ? plainPart(`+${closed.length} closed`) : lead(closed, 'closed'));
+  return { parts, tone };
+}
+
+/** prSummaryParts as one line of text. */
+export function prSummary(prs: readonly PullRequest[]): Line | null {
+  const s = prSummaryParts(prs);
+  return s ? { text: rowLineText(s.parts), tone: s.tone } : null;
 }
 
 /**
@@ -394,8 +526,7 @@ export function prSummary(prs: readonly PullRequest[]): Line | null {
  */
 export function closesText(issues: readonly Issue[], home: string): string {
   const p = closesParts(issues, home);
-  if (!p) return '';
-  return `closes ${p.items.map((i) => i.label).join(' ')}${p.extra > 0 ? ` +${p.extra}` : ''}`;
+  return p ? rowLineText([closesPart(p)]) : '';
 }
 
 /** One issue as the closes line shows it, with its link when its address has the one allowed form. */
@@ -409,55 +540,90 @@ export interface ClosesItem {
  * (closesText's labels, in its order) and how many more there are. null when
  * there is no issue.
  */
-export function closesParts(issues: readonly Issue[], home: string): { items: ClosesItem[]; extra: number } | null {
-  const key = (repo: string) => repo.toLowerCase();
+export function closesParts(
+  issues: readonly Issue[],
+  home: string,
+  gitlabHosts: readonly string[] = [],
+): { items: ClosesItem[]; extra: number } | null {
+  const key = (i: Issue) => repoKey(i);
   const short = (repo: string) => repo.slice(repo.lastIndexOf('/') + 1);
   const seen = new Set<string>();
   const list: Issue[] = [];
   const shown = new Map<string, string>(); // repository key → its name as first seen
   for (const i of issues) {
-    const k = `${key(i.repo)}#${i.number}`;
+    const k = `${key(i)}#${i.number}`;
     if (seen.has(k)) continue;
     seen.add(k);
     list.push(i);
-    if (!shown.has(key(i.repo))) shown.set(key(i.repo), i.repo);
+    if (!shown.has(key(i))) shown.set(key(i), i.repo);
   }
   if (list.length === 0) return null;
-  const own = key(home) || (shown.size === 1 ? [...shown.keys()][0] : '');
+  const own = home.toLowerCase() || (shown.size === 1 ? [...shown.keys()][0] : '');
   const owners = new Map<string, Set<string>>(); // short name key → the repositories using it
   for (const r of own ? [...shown.keys(), own] : shown.keys()) {
     const set = owners.get(short(r)) ?? new Set<string>();
     set.add(r);
     owners.set(short(r), set);
   }
+  // Two repositories with the same full path on different hosts (or forges): only the host tells them apart.
+  const pathOwners = new Map<string, Set<string>>(); // lowercased full path → the repositories using it
+  const ownPath = own.startsWith('gitlab:') ? own.slice(own.indexOf('/') + 1) : own;
+  for (const [r, name] of own ? [...shown, [own, ownPath] as const] : shown) {
+    const set = pathOwners.get(name.toLowerCase()) ?? new Set<string>();
+    set.add(r);
+    pathOwners.set(name.toLowerCase(), set);
+  }
   const label = (i: Issue) => {
-    const r = key(i.repo);
+    const r = key(i);
     if (r === own) return `#${i.number}`;
     const name = shown.get(r) as string;
+    if ((pathOwners.get(name.toLowerCase())?.size ?? 0) > 1) return `${clean(`${i.host}/${name}`)}#${i.number}`;
     return `${clean((owners.get(short(r))?.size ?? 0) > 1 ? name : short(name))}#${i.number}`;
   };
   return {
-    items: list.slice(0, NUMS_IN_LINE).map((i) => ({ label: label(i), href: issueHref(i) })),
+    items: list.slice(0, NUMS_IN_LINE).map((i) => ({ label: label(i), href: issueHref(i, gitlabHosts) })),
     extra: Math.max(0, list.length - NUMS_IN_LINE),
   };
 }
 
 /** The closes line for a card in parts, measured against its own project's repository. */
 export function cardClosesParts(card: Card, ix: Index): { items: ClosesItem[]; extra: number } | null {
-  return closesParts(card.issues, ix.projects.get(card.projectId)?.repo ?? '');
+  const p = ix.projects.get(card.projectId);
+  return closesParts(card.issues, p ? repoKey({ forge: p.repoForge, host: p.repoHost, repo: p.repo }) : '', ix.gitlabHosts);
 }
 
-/** The closes text for a card, measured against its own project's repository. */
-export function cardCloses(card: Card, ix: Index): string {
-  return closesText(card.issues, ix.projects.get(card.projectId)?.repo ?? '');
+/** The closes part of a row line: "closes #7 #8 +1", each number with its issue's link. */
+export function closesPart(p: { items: ClosesItem[]; extra: number }): RowPart {
+  const bits: RowBit[] = [plainBit('closes')];
+  for (const i of p.items) bits.push(plainBit(' '), { text: i.label, href: i.href, kind: 'issue' });
+  if (p.extra > 0) bits.push(plainBit(` +${p.extra}`));
+  return { bits, closes: true };
 }
 
-/** The one-line pull request form plus the issues they close; null when the card has no pull request. */
-export function cardPrSummary(card: Card, ix: Index): Line | null {
-  const s = prSummary(card.pullRequests);
+/** The one-line pull request form plus the issues they close, in parts; null when the card has no pull request. */
+export function cardPrSummaryParts(card: Card, ix: Index): RowLine | null {
+  const s = prSummaryParts(card.pullRequests, ix.gitlabHosts);
   if (!s) return null;
-  const closes = cardCloses(card, ix);
-  return closes ? { ...s, text: `${s.text} · ${closes}` } : s;
+  const closes = cardClosesParts(card, ix);
+  return closes ? { ...s, parts: [...s.parts, closesPart(closes)] } : s;
+}
+
+/** cardPrSummaryParts as one line of text. */
+export function cardPrSummary(card: Card, ix: Index): Line | null {
+  const s = cardPrSummaryParts(card, ix);
+  return s ? { text: rowLineText(s.parts), tone: s.tone } : null;
+}
+
+/**
+ * A column's words for this board: COLUMN_META, with the hints naming pull
+ * or merge requests once the board has a GitLab one (Index.gitlabHosts).
+ */
+export function columnMeta(col: Column, gitlabHosts: readonly string[]): ColumnMeta {
+  const m = COLUMN_META[col];
+  const gl = gitlabHosts.length > 0;
+  if (col === 'in_review') return { ...m, hint: inReviewHint(gl), empty: inReviewEmpty(gl) };
+  if (col === 'done') return { ...m, hint: doneHint(gl) };
+  return m;
 }
 
 const ATTENTION_ORDER: Record<Attention, number> = { blocked: 0, unseen: 1, failing_checks: 2, stale: 3 };
@@ -475,7 +641,7 @@ export function attentionLines(card: Card, now: number): Line[] {
         case 'failing_checks': {
           const nums = card.pullRequests
             .filter((p) => p.state === 'open' && p.checks === 'failing')
-            .map((p) => `#${p.number}`);
+            .map((p) => prNumber(p));
           return { text: nums.length ? `Checks failing on ${nums.join(' ')}` : 'Checks failing', tone: 'failing' };
         }
         case 'stale': {
@@ -588,7 +754,8 @@ export interface LaneNote {
   hue: ModelFamily | '';
   effort: EffortShown | null;
   tail: string;
-  closes: string;
+  /** The pull requests and the issues they close, last in the note, each number a link. */
+  prs: RowPart[];
 }
 
 /** The short note under an agent in a lane cell. */
@@ -603,10 +770,9 @@ export function laneNote(card: Card, ix: Index): LaneNote {
     const parent = card.agent.parentCardId ? ix.byId.get(card.agent.parentCardId) : undefined;
     if (parent) back.push(`for ${agentName(parent)}`);
   } else if (card.agent.parent === 'unknown') back.push('coordinator: unknown');
-  const prs = prSummary(card.pullRequests);
+  const prs = cardPrSummaryParts(card, ix);
   const title = cardTitle(card);
-  if (prs) back.push(prs.text);
-  else if (title !== agentName(card)) back.push(title);
+  if (!prs && title !== agentName(card)) back.push(title);
   let tone: Tone = 'muted';
   if (card.column === 'needs_you') tone = 'needs';
   else if (card.attention.includes('failing_checks')) tone = 'failing';
@@ -618,7 +784,7 @@ export function laneNote(card: Card, ix: Index): LaneNote {
     hue: tone === 'muted' ? modelFamily(card.agent.model) : '',
     effort: effortOf(card),
     tail: back.join(' · '),
-    closes: prs ? cardCloses(card, ix) : '',
+    prs: prs?.parts ?? [],
   };
 }
 
@@ -744,6 +910,7 @@ export const SOURCE_LABEL: Record<SourceStatus['kind'], string> = {
   agterm: 'agterm',
   git: 'git',
   github: 'github',
+  gitlab: 'gitlab',
 };
 
 /** One status-bar entry per source: "agterm not found", "github off", "claude code 3 live". */
@@ -758,6 +925,7 @@ export function sourceLine(src: SourceStatus, s: Pick<Snapshot, 'cards'>): Line 
         return { text: withDetail(live ? `${live} live` : 'found'), tone: 'body' };
       }
       if (src.kind === 'github') return { text: withDetail('through gh'), tone: 'body' };
+      if (src.kind === 'gitlab') return { text: withDetail('through glab'), tone: 'body' };
       return { text: withDetail('found'), tone: 'body' };
     }
     case 'missing':

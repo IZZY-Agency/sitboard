@@ -13,12 +13,16 @@
 //   - Every string can come from session records, git or GitHub and is
 //     untrusted: the page renders it as text, never as markup.
 //   - No transcript content, no absolute path, no token ever appears here,
-//     with two exceptions: Artifact.Title (the title its own publish
-//     reported) and Agent.Name of a session whose record has no name (the
+//     with three exceptions: Artifact.Title (the title its own publish
+//     reported), Agent.Name of a Claude session whose record has no name (the
 //     agent-name its transcript records), which CatchupItem.AgentName
-//     repeats. Both are text taken from the session's transcript, cleaned
-//     of control and invisible characters and capped like every other title
-//     or name.
+//     repeats, and Agent.Name of a Codex session (the thread title in
+//     Codex's session_index.jsonl, which the model wrote from the
+//     conversation or the person renamed; the adapter cuts it at 1,024 bytes).
+//     All three are free text taken from the session's records, cleaned of
+//     control and invisible characters and capped like every other title or
+//     name. The only other word read from a Codex record is the effort
+//     (Agent.EffortWord), held to [a-z]{1,16}.
 //     Every path is home-relative ("~/..."). A folder outside the home folder
 //     is given by its base name only ("alpha", never "/srv/alpha").
 package contract
@@ -37,7 +41,7 @@ import (
 
 // Version of the API. The page stops and shows "reload the page" when a
 // snapshot carries a different version than it was built for.
-const Version = 10
+const Version = 16
 
 // HTTP surface, all under one origin.
 const (
@@ -59,13 +63,24 @@ const (
 // model.ArtifactURLPattern, which the adapters check against.
 const ArtifactURLPattern = `^https://claude\.ai/(?:artifact/[A-Za-z0-9_-]{8,64}|code/artifact/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$`
 
-// PullRequestURLPattern is the only form of PullRequest.URL and
-// IssueURLPattern the only form of Issue.URL: an address on github.com built
-// from the repo and the number. The page links only a URL that matches. Equal
-// to model.PullRequestURLPattern and model.IssueURLPattern.
+// PullRequestURLPattern is the only form of a GitHub PullRequest.URL and
+// IssueURLPattern the only form of a GitHub Issue.URL: an address on
+// github.com built from the repo and the number. The page links only a URL
+// that matches. Equal to model.PullRequestURLPattern and
+// model.IssueURLPattern.
 const (
 	PullRequestURLPattern = `^https://github\.com/[A-Za-z0-9_][A-Za-z0-9_-]*/\.*[A-Za-z0-9_-][A-Za-z0-9_.-]*/pull/[1-9][0-9]{0,9}$`
 	IssueURLPattern       = `^https://github\.com/[A-Za-z0-9_][A-Za-z0-9_-]*/\.*[A-Za-z0-9_-][A-Za-z0-9_.-]*/issues/[1-9][0-9]{0,9}$`
+)
+
+// MergeRequestURLPattern is the only form of a GitLab PullRequest.URL and
+// GitLabIssueURLPattern the only form of a GitLab Issue.URL: built from the
+// host, the project path and the number. Group 1 is the host, which must also
+// be one of Snapshot.GitLabHosts; group 2 the path, group 3 the number. Equal
+// to model.MergeRequestURLPattern and model.GitLabIssueURLPattern.
+const (
+	MergeRequestURLPattern = `^https://([a-z0-9.-]+)/([A-Za-z0-9_][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_][A-Za-z0-9_.-]*){1,21})/-/merge_requests/([1-9][0-9]{0,9})$`
+	GitLabIssueURLPattern  = `^https://([a-z0-9.-]+)/([A-Za-z0-9_][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_][A-Za-z0-9_.-]*){1,21})/-/issues/([1-9][0-9]{0,9})$`
 )
 
 // EventSnapshot is the server-sent event name; its data is a Snapshot.
@@ -237,6 +252,21 @@ const (
 // EffortSources lists every effort source.
 var EffortSources = []EffortSource{EffortSourceRecorded, EffortSourceLaunch, EffortSourceNone}
 
+// JumpKind says where a card's jump goes: its agterm session, its tmux pane
+// (a session in tmux inside agterm goes through tmux, which also raises the
+// agterm session showing it), or none: the page shows the folder and name to
+// copy instead.
+type JumpKind string
+
+const (
+	JumpAgterm JumpKind = "agterm"
+	JumpTmux   JumpKind = "tmux"
+	JumpNone   JumpKind = "none"
+)
+
+// JumpKinds lists every jump kind.
+var JumpKinds = []JumpKind{JumpAgterm, JumpTmux, JumpNone}
+
 // PRState is a pull request's state.
 type PRState string
 
@@ -285,10 +315,23 @@ const (
 	SourceAgterm SourceKind = "agterm"
 	SourceGit    SourceKind = "git"
 	SourceGitHub SourceKind = "github"
+	SourceGitLab SourceKind = "gitlab"
 )
 
 // SourceKinds lists every source, in the order the page shows them.
-var SourceKinds = []SourceKind{SourceClaude, SourceCodex, SourceAgterm, SourceGit, SourceGitHub}
+var SourceKinds = []SourceKind{SourceClaude, SourceCodex, SourceAgterm, SourceGit, SourceGitHub, SourceGitLab}
+
+// Forge is where a repository's pull or merge requests live.
+type Forge string
+
+const (
+	ForgeGitHub Forge = "github"
+	ForgeGitLab Forge = "gitlab"
+	ForgeNone   Forge = "" // Project.RepoForge only: no repository on a forge
+)
+
+// Forges lists every forge value.
+var Forges = []Forge{ForgeGitHub, ForgeGitLab, ForgeNone}
 
 // SourceState is how a source is doing.
 type SourceState string
@@ -321,13 +364,43 @@ var CatchupKinds = []CatchupKind{CatchupTurnFinished, CatchupPROpened, CatchupPR
 type LeftoverKind string
 
 const (
-	LeftoverWorktree LeftoverKind = "worktree"
-	LeftoverBranch   LeftoverKind = "branch"
-	LeftoverSession  LeftoverKind = "session"
+	LeftoverWorktree     LeftoverKind = "worktree"
+	LeftoverBranch       LeftoverKind = "branch"
+	LeftoverSession      LeftoverKind = "session"
+	LeftoverRemoteBranch LeftoverKind = "remoteBranch" // the branch on GitHub
 )
 
 // LeftoverKinds lists every leftover kind.
-var LeftoverKinds = []LeftoverKind{LeftoverWorktree, LeftoverBranch, LeftoverSession}
+var LeftoverKinds = []LeftoverKind{LeftoverWorktree, LeftoverBranch, LeftoverSession, LeftoverRemoteBranch}
+
+// LeftoversState says whether the leftovers list could be made.
+type LeftoversState string
+
+const (
+	LeftoversReady   LeftoversState = "ready"
+	LeftoversLoading LeftoversState = "loading" // the first look is under way
+	LeftoversOff     LeftoversState = "off"     // GitHub is off or missing: no evidence, so nothing is listed
+	LeftoversNoGit   LeftoversState = "noGit"   // git is missing
+)
+
+// LeftoversStates lists every leftovers state.
+var LeftoversStates = []LeftoversState{LeftoversReady, LeftoversLoading, LeftoversOff, LeftoversNoGit}
+
+// HeldReason says why merged work was held back from the list.
+type HeldReason string
+
+const (
+	HeldCommits HeldReason = "commits" // commits after the merged pull request
+	HeldChanges HeldReason = "changes" // modified, staged or untracked files
+	HeldStash   HeldReason = "stash"   // a stash belongs to the branch
+	HeldInUse   HeldReason = "inUse"   // a process works in the worktree
+	HeldLocked  HeldReason = "locked"  // the worktree is locked
+	HeldNested  HeldReason = "nested"  // another checkout sits inside the worktree
+	HeldUnknown HeldReason = "unknown" // git, GitHub or the process list could not tell
+)
+
+// HeldReasons lists every held-back reason, in the order the page shows them.
+var HeldReasons = []HeldReason{HeldCommits, HeldChanges, HeldStash, HeldInUse, HeldLocked, HeldNested, HeldUnknown}
 
 // GroupingMode is the owner's setting for a folder. Auto (no setting) groups
 // as sitboard sees it: a plain folder where agents sit, remembered for 30
@@ -370,6 +443,16 @@ type Snapshot struct {
 	// GroupingSettings are the folders set to always or never group, sorted
 	// by name, then project id.
 	GroupingSettings []GroupingSetting `json:"groupingSettings"`
+	// Leftovers is what the status bar shows of the list GET PathLeftovers
+	// gives now; all zero when the list is not ready.
+	Leftovers LeftoversSummary `json:"leftovers"`
+	// Spend is the token use and estimated cost of every session sitboard
+	// knows, ended ones included, by day for the last 7 days and by project.
+	Spend SpendSummary `json:"spend"`
+	// GitLabHosts are the only hosts a GitLab link (forge "gitlab") may point
+	// at: those sitboard looked merge requests up on, sorted. The page drops
+	// any GitLab link whose host is not listed.
+	GitLabHosts []string `json:"gitlabHosts"`
 }
 
 // Build is the sitboard build that serves the page. Version and Commit are as
@@ -415,11 +498,14 @@ type Counts struct {
 // Counts are the project's own cards only: the page sums parts into their
 // parent. Card.ProjectID stays the part.
 type Project struct {
-	ID       string `json:"id"`       // ProjectID
-	Name     string `json:"name"`     // the folder's base name
-	Path     string `json:"path"`     // home-relative, "~/..."; the base name only outside the home folder
-	Repo     string `json:"repo"`     // "owner/name", "" when none
-	ParentID string `json:"parentId"` // the umbrella this project is a part of; "" for a top-level project. A parent never has a parent.
+	ID   string `json:"id"`   // ProjectID
+	Name string `json:"name"` // the folder's base name
+	Path string `json:"path"` // home-relative, "~/..."; the base name only outside the home folder
+	Repo string `json:"repo"` // GitHub "owner/name" or GitLab "group/…/project", "" when none
+	// RepoForge and RepoHost say where Repo is: ForgeNone and "" when none.
+	RepoForge Forge  `json:"repoForge"`
+	RepoHost  string `json:"repoHost"`
+	ParentID  string `json:"parentId"` // the umbrella this project is a part of; "" for a top-level project. A parent never has a parent.
 	// Area is the base name of the folder that directly contains the top-level
 	// project's folder (a part carries its parent's area). "" when that folder
 	// is the home folder or the root, when the project is outside the home
@@ -443,6 +529,65 @@ type Card struct {
 	Issues       []Issue       `json:"issues"`
 	Artifacts    []Artifact    `json:"artifacts"` // most recently published first
 	Subagents    int           `json:"subagents"` // in-process subagents, shown as a count
+	// Spend is the session's own, with its in-process subagents; all zero
+	// when none was recorded.
+	Spend Spend `json:"spend"`
+}
+
+// Tokens are token counts as the agent tool records them.
+type Tokens struct {
+	Input      int64 `json:"input"` // input not read from the cache
+	Output     int64 `json:"output"`
+	CacheRead  int64 `json:"cacheRead"`
+	CacheWrite int64 `json:"cacheWrite"`
+}
+
+// Spend is token use with its cost estimated at API list price: the agent
+// tool's own estimate, never a bill (on a subscription nobody pays it). USD is
+// the cost of the use that has a price. Priced says whether all of it has one:
+// when it is false, some use has no price (a model missing from the price
+// table, say) and USD is only the priced part, so the page shows "≈ $X +
+// unpriced", or tokens alone when USD is 0. A total is never shown as complete
+// when it is not. A Codex card's Spend is tokens only (usd 0, priced false):
+// Codex keeps no price on the machine.
+type Spend struct {
+	Tokens Tokens  `json:"tokens"`
+	USD    float64 `json:"usd"` // the priced part; all of it when Priced
+	Priced bool    `json:"priced"`
+	// Recorded: USD is the total the tool itself wrote when the session ended
+	// (it also counts calls that leave no transcript line); otherwise it is
+	// computed from the counted tokens and the tool's price table.
+	Recorded bool `json:"recorded"`
+}
+
+// SpendSummary is spend by day and project. A day's figures count the
+// replies made that day, priced; they can add up to a little less than the
+// sessions' recorded totals.
+type SpendSummary struct {
+	Days []SpendDay `json:"days"` // the last 7 days, oldest first; only days with use
+	// Pending: older sessions are still being read, so the figures can grow.
+	Pending bool `json:"pending"`
+}
+
+// SpendDay is one day's spend. Spend is Claude Code's (tokens and its cost
+// estimate); Codex is Codex's tokens, beside it and never in it: Codex keeps
+// no price, so its use would make every total it joined "unpriced". A day is
+// listed when either has use.
+type SpendDay struct {
+	Day      string         `json:"day"` // the local date on the machine, "2006-01-02"
+	Spend    Spend          `json:"spend"`
+	Codex    Tokens         `json:"codex"`
+	Projects []ProjectSpend `json:"projects"` // by name
+}
+
+// ProjectSpend is one project's spend within a day. A project with no card
+// on the board (all its sessions ended) is named here only.
+type ProjectSpend struct {
+	ProjectID string `json:"projectId"` // ProjectID; "" for sessions with no known folder
+	Name      string `json:"name"`      // the folder's base name; "" with no folder
+	Path      string `json:"path"`      // home-relative, "~/..."; the base name only outside the home folder
+	Spend     Spend  `json:"spend"`     // Claude Code's, as in SpendDay
+	Codex     Tokens `json:"codex"`     // Codex's tokens, as in SpendDay
 }
 
 // Agent is the session behind a card.
@@ -454,24 +599,38 @@ type Agent struct {
 	// from. EffortUnknown always goes with EffortSourceNone.
 	Effort       Effort       `json:"effort"`
 	EffortSource EffortSource `json:"effortSource"`
-	Status       AgentStatus  `json:"status"`
-	StatusSince  time.Time    `json:"statusSince,omitzero"`
-	StartedAt    time.Time    `json:"startedAt,omitzero"`
-	LastActivity time.Time    `json:"lastActivity,omitzero"`
-	Live         Tri          `json:"live"`
-	Folder       string       `json:"folder"` // home-relative; "" when unknown
-	Parent       ParentState  `json:"parent"`
-	ParentCardID string       `json:"parentCardId"` // "" when the parent has no card
-	TerminalID   string       `json:"terminalId"`   // agterm session id, "" when none
-	Workspace    string       `json:"workspace"`    // agterm workspace name, "" when none
+	// EffortWord is an effort word the tool recorded that is not one of the
+	// Effort levels (Codex's "ultra", "minimal"), as written: lowercase
+	// letters only, at most 16. "" otherwise. When it is set, Effort is
+	// EffortUnknown: the word has no place on the ramp.
+	EffortWord   string      `json:"effortWord"`
+	Status       AgentStatus `json:"status"`
+	StatusSince  time.Time   `json:"statusSince,omitzero"`
+	StartedAt    time.Time   `json:"startedAt,omitzero"`
+	LastActivity time.Time   `json:"lastActivity,omitzero"`
+	Live         Tri         `json:"live"`
+	Folder       string      `json:"folder"` // home-relative; "" when unknown
+	Parent       ParentState `json:"parent"`
+	ParentCardID string      `json:"parentCardId"` // "" when the parent has no card
+	TerminalID   string      `json:"terminalId"`   // agterm session id, "" when none
+	Workspace    string      `json:"workspace"`    // agterm workspace name, "" when none
+	// Jump is where a jump to this card goes. The tmux pane and socket stay
+	// on the server.
+	Jump JumpKind `json:"jump"`
 }
 
-// PullRequest linked to a card.
+// PullRequest linked to a card: a GitHub pull request, or a GitLab merge
+// request (forge "gitlab", shown as !Number). The name stays for both.
 type PullRequest struct {
-	Repo   string  `json:"repo"` // "owner/name"
-	Number int     `json:"number"`
-	Title  string  `json:"title"`
-	URL    string  `json:"url"` // matches PullRequestURLPattern; "" when none can be built
+	Forge  Forge  `json:"forge"`  // ForgeGitHub or ForgeGitLab, never ForgeNone
+	Host   string `json:"host"`   // "github.com"; for GitLab one of Snapshot.GitLabHosts
+	Repo   string `json:"repo"`   // GitHub "owner/name"; GitLab "group/…/project"
+	Number int    `json:"number"` // GitLab: the merge request's iid
+	Title  string `json:"title"`
+	// URL matches PullRequestURLPattern (GitHub) or MergeRequestURLPattern
+	// (GitLab) and is the address built from host, repo and number; "" when
+	// none can be built.
+	URL    string  `json:"url"`
 	State  PRState `json:"state"`
 	Checks Checks  `json:"checks"`
 	Review Review  `json:"review"`
@@ -485,11 +644,15 @@ type Artifact struct {
 	URL   string `json:"url"`   // matches ArtifactURLPattern
 }
 
-// Issue a linked pull request closes.
+// Issue a linked pull request closes: on the same forge, host and repo.
 type Issue struct {
+	Forge  Forge  `json:"forge"`
+	Host   string `json:"host"`
 	Repo   string `json:"repo"`
 	Number int    `json:"number"`
-	URL    string `json:"url"` // matches IssueURLPattern; "" when none can be built
+	// URL matches IssueURLPattern (GitHub) or GitLabIssueURLPattern (GitLab);
+	// "" when none can be built.
+	URL string `json:"url"`
 }
 
 // Catchup is what the board learned since the marker, up to 7 days back,
@@ -535,20 +698,61 @@ type CatchupReadRequest struct {
 	UpTo time.Time `json:"upTo"`
 }
 
-// Leftovers lists merged work whose worktree, branch or session still exists.
+// Leftovers lists merged work whose worktree, branch or session still exists,
+// for the repositories of the projects on the board. Only what positive
+// evidence shows to hold nothing more than a merged pull request is listed; merged work
+// that still holds something is only counted, by reason. The list is for reading: sitboard removes nothing
+// and offers no way to.
 type Leftovers struct {
-	Items []Leftover `json:"items"`
+	State LeftoversState `json:"state"`
+	AsOf  time.Time      `json:"asOf,omitzero"` // when the list was made; absent before the first
+	Items []Leftover     `json:"items"`         // the newest merge first
+	Held  []HeldCount    `json:"held"`          // in HeldReasons order; reasons with none are absent
+	// Partial: the list may be incomplete: a repository could not be looked
+	// at, had more branches than one look checks (100), or GitHub may not
+	// have given every pull request of a branch.
+	Partial bool `json:"partial"`
 }
 
-// Leftover is one worktree, branch or idle session left after a merge.
+// LeftoversSummary is the leftovers list in numbers, for the status bar.
+type LeftoversSummary struct {
+	Items   int  `json:"items"`   // items listed
+	Held    int  `json:"held"`    // merged work held back, every reason
+	Partial bool `json:"partial"` // the list may be incomplete
+}
+
+// HeldCount is how many merged branches, or sessions that could be closed,
+// were held back for one reason.
+type HeldCount struct {
+	Reason HeldReason `json:"reason"`
+	Count  int        `json:"count"`
+}
+
+// Leftover is one merged pull request whose parts are still around.
 type Leftover struct {
-	Kind        LeftoverKind `json:"kind"`
-	ProjectID   string       `json:"projectId"`
-	Path        string       `json:"path"`   // home-relative; "" for a branch or session
-	Branch      string       `json:"branch"` // "" when none
-	CardID      string       `json:"cardId"` // "" when none
-	PullRequest *PullRequest `json:"pullRequest,omitempty"`
-	IdleSince   time.Time    `json:"idleSince,omitzero"` // sessions only
+	ProjectID   string         `json:"projectId"`
+	PullRequest PullRequest    `json:"pullRequest"`
+	MergedAt    time.Time      `json:"mergedAt,omitzero"`
+	Parts       []LeftoverPart `json:"parts"` // session, worktree, branch, then the branch on GitHub
+	// Waiting: the worktree's only users are leftover sessions.
+	Waiting bool `json:"waiting"`
+	// OwnSession: waiting, and every session in the worktree is a part of
+	// this row (not of another pull request's row).
+	OwnSession bool `json:"ownSession"`
+}
+
+// LeftoverPart is one thing left over.
+type LeftoverPart struct {
+	Kind LeftoverKind `json:"kind"`
+	// Path: worktrees: the worktree; branches: the clone's main checkout.
+	// Home-relative and exact (nothing cleaned): sitboard lists no part
+	// whose path is outside the home folder. "" otherwise.
+	Path      string    `json:"path"`
+	Branch    string    `json:"branch"`             // branches: the name, exact; "" otherwise
+	CardID    string    `json:"cardId"`             // sessions: the card; "" otherwise
+	Name      string    `json:"name"`               // sessions: the agent's name; "" when it has none
+	IdleSince time.Time `json:"idleSince,omitzero"` // sessions only
+	Ignored   int       `json:"ignored"`            // worktrees: how many git-ignored entries it holds
 }
 
 // CardRequest is the body of POST PathJump and POST PathSeen. Any other field

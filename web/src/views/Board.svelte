@@ -2,7 +2,7 @@
   // Board (default): one column per state. The project grouping above or beside it filters the cards.
   import { flip } from 'svelte/animate';
   import type { Card as CardT, Snapshot } from '../contract.gen';
-  import { byColumn, COLUMN_META, COLUMNS, columnTone, type Index } from '../data/derive';
+  import { byColumn, columnMeta, COLUMNS, columnTone, type Index } from '../data/derive';
   import { flipOpts, makeMove } from '../motion';
   import Card from '../components/Card.svelte';
   import Count from '../components/Count.svelte';
@@ -30,7 +30,7 @@
 <div class="scroller">
   <div class="grid">
     {#each COLUMNS as col (col)}
-      {@const meta = COLUMN_META[col]}
+      {@const meta = columnMeta(col, ix.gitlabHosts)}
       <section class="col" aria-labelledby="col-{col}" data-column={col}>
         <div class="head">
           <span class="dot tone-{columnTone(col)}"></span>

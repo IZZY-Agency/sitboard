@@ -11,7 +11,7 @@ GOLANGCI := $(shell command -v golangci-lint 2>/dev/null || echo go run github.c
 # release` stamps it into the binaries, scripts/publish.sh tags it, and
 # CHANGELOG.md must open with its entry. A dev build (`make build`) prints
 # `git describe` instead.
-RELEASE_VERSION := 0.3.0
+RELEASE_VERSION := 0.4.0
 RELEASE_DIR := bin/release/$(RELEASE_VERSION)
 # Published builds sign (and notarize) the macOS binaries; empty: unsigned.
 SIGN_IDENTITY ?=
@@ -27,7 +27,7 @@ HAS_GEN := $(wildcard internal/contract/gen/main.go)
 HAS_CMD := $(wildcard cmd/sitboard/main.go)
 
 .PHONY: check build test lint web-deps web-check web-build go-build contract contract-check private private-all \
-	notices notices-check release verify-release release-test release-test-linux print-version
+	notices notices-check release verify-release release-test release-test-linux test-tmux-linux print-version
 
 check: lint test web-check contract-check notices-check private release-test
 	@echo "make check: all steps passed"
@@ -131,7 +131,12 @@ release-test:
 # file points at a host path the container cannot see, so the container gets a
 # plain clone, and it clones that again (through git's own protocol, not by
 # copying files across the mount) so nothing is written into the mount.
-# Uncommitted changes are not tested. Ctrl-C stops the container: --init runs
+# Uncommitted changes are not tested. The host clone uses --no-hardlinks: a
+# plain local clone hard-links the loose objects, so the container would read
+# files that are the same inodes as the live repository's, which other
+# worktrees write, repack and prune, and git inside the container would die
+# with "unable to open loose object ... Permission denied" (ticket #70); copies
+# belong to the clone alone. Ctrl-C stops the container: --init runs
 # tini as its first process, and TINI_KILL_PROCESS_GROUP=1 has it pass the
 # signal to every process in it. Needs docker.
 LINUX_IMAGE ?= golang:1.27
@@ -139,11 +144,28 @@ release-test-linux:
 	@command -v docker >/dev/null || { echo "release-test-linux: needs docker" >&2; exit 2; }
 	@if [ -n "$$(git status --porcelain)" ]; then echo "release-test-linux: uncommitted changes are not tested; the clone sees commits only" >&2; fi
 	@tmp="$$(mktemp -d)" && trap 'rm -rf "$$tmp"' EXIT && \
-	git -c advice.detachedHead=false clone -q . "$$tmp/src" && \
+	git -c advice.detachedHead=false clone -q --no-hardlinks . "$$tmp/src" && \
 	echo "release-test-linux: $$(git -C "$$tmp/src" log -1 --format='%h %s') in $(LINUX_IMAGE)" && \
 	docker run --rm --init -e TINI_KILL_PROCESS_GROUP=1 -v "$$tmp/src":/src:ro $(LINUX_IMAGE) \
 	  bash -c 'git config --global --add safe.directory "*" && git -c advice.detachedHead=false clone -q --no-local /src /w && cd /w \
 	    && make release-test && bash scripts/check-private_test.sh'
+
+# test-tmux-linux runs the tmux jump against a real tmux (TestRealTmux: a
+# server of its own on a private socket, clients attached through script(1)),
+# on Linux in a container, from a clone of what is committed, as
+# release-test-linux does; it never touches a tmux server on this machine.
+# Not part of `make check`: it needs docker and the network (apt-get).
+test-tmux-linux:
+	@command -v docker >/dev/null || { echo "test-tmux-linux: needs docker" >&2; exit 2; }
+	@if [ -n "$$(git status --porcelain)" ]; then echo "test-tmux-linux: uncommitted changes are not tested; the clone sees commits only" >&2; fi
+	@tmp="$$(mktemp -d)" && trap 'rm -rf "$$tmp"' EXIT && \
+	git -c advice.detachedHead=false clone -q --no-hardlinks . "$$tmp/src" && \
+	echo "test-tmux-linux: $$(git -C "$$tmp/src" log -1 --format='%h %s') in $(LINUX_IMAGE)" && \
+	docker run --rm --init -e TINI_KILL_PROCESS_GROUP=1 -v "$$tmp/src":/src:ro $(LINUX_IMAGE) \
+	  bash -c 'export DEBIAN_FRONTEND=noninteractive && apt-get update -qq >/dev/null && apt-get install -y -qq tmux bsdutils >/dev/null \
+	    && git config --global --add safe.directory "*" && git -c advice.detachedHead=false clone -q --no-local /src /w && cd /w \
+	    && tmux -V && go test -count=1 -v -run TestRealTmux ./internal/adapters/tmux 2>&1 | tee /tmp/out \
+	    && grep -q "^--- PASS: TestRealTmux" /tmp/out'
 
 print-version:
 	@echo $(RELEASE_VERSION)

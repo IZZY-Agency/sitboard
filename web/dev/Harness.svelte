@@ -8,8 +8,18 @@
     live,
     catchup,
     catchups,
-  }: { scenario: string; scenarios: readonly string[]; live: boolean; catchup: string; catchups: readonly string[] } = $props();
-  const q = (s: string, c: string, l: boolean) => `?s=${s}&c=${c}${l ? '&live=1' : ''}`;
+    leftover,
+    leftovers,
+  }: {
+    scenario: string;
+    scenarios: readonly string[];
+    live: boolean;
+    catchup: string;
+    catchups: readonly string[];
+    leftover: string;
+    leftovers: readonly string[];
+  } = $props();
+  const q = (s: string, c: string, l: boolean, lo = leftover) => `?s=${s}&c=${c}&l=${lo}${l ? '&live=1' : ''}`;
 </script>
 
 <div class="bar" data-harness={marker}>
@@ -21,6 +31,10 @@
   <span>catch-up:</span>
   {#each catchups as c (c)}
     <a href={q(scenario, c, live)} aria-current={c === catchup ? 'page' : undefined}>{c}</a>
+  {/each}
+  <span>leftovers:</span>
+  {#each leftovers as l (l)}
+    <a href={q(scenario, catchup, live, l)} aria-current={l === leftover ? 'page' : undefined}>{l}</a>
   {/each}
 </div>
 

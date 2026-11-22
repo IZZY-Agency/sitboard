@@ -3,17 +3,23 @@
   import { SOURCE_LABEL, sourceLine } from '../data/derive';
   import { clean } from '../data/text';
   import { statusVersion } from '../data/about';
+  import { sourceRead } from '../data/words';
   import { tick } from 'svelte';
   import About, { type Refocus } from './About.svelte';
   import GroupingPanel from './GroupingPanel.svelte';
+  import LeftoversSheet from './LeftoversSheet.svelte';
+  import { leftoversLink, type LeftoversClient } from '../data/leftovers';
 
   let {
     snapshot,
     onauto,
+    leftovers,
   }: {
     snapshot: Snapshot | null;
     /** Sets a folder with a grouping setting back to auto; resolves true when the server did. */
     onauto?: (s: GroupingSetting) => Promise<boolean>;
+    /** Loads the leftovers list for the sheet. */
+    leftovers?: LeftoversClient;
   } = $props();
 
   const ABOUT_ID = 'about-sitboard';
@@ -23,6 +29,52 @@
   let gopen = $state(false);
   let gbtn = $state<HTMLButtonElement>();
   const settings = $derived(snapshot?.groupingSettings ?? []);
+
+  // Leftovers: a quiet count, only while the last look has something to say
+  // (a leftover, one held back, or a look that was incomplete); it opens a
+  // sheet over the bottom of the view. Housekeeping never asks for attention.
+  const LEFTOVERS_ID = 'leftovers-sheet';
+  let lopen = $state(false);
+  let lbtn = $state<HTMLButtonElement>();
+  const loText = $derived(leftovers && snapshot ? leftoversLink(snapshot.leftovers) : '');
+  const projectNames = $derived(new Map((snapshot?.projects ?? []).map((p) => [p.id, p.name])));
+
+  // Nothing more to say (the next look found nothing, or Leftovers went
+  // off): the link and the sheet go, and the focus goes to the About button.
+  $effect(() => {
+    if (lopen && !loText) {
+      lopen = false;
+      btn?.focus();
+    }
+  });
+
+  async function showLeftovers() {
+    open = false;
+    gopen = false;
+    lopen = true;
+    // Every time, not only when the sheet mounts: opened again while it was
+    // still going away, the same sheet comes back and is not mounted anew.
+    await tick();
+    document.getElementById(`${LEFTOVERS_ID}-title`)?.focus();
+  }
+
+  function closeLeftovers(refocus: Refocus) {
+    lopen = false;
+    if (refocus !== 'button') return;
+    lbtn?.focus();
+    setTimeout(() => {
+      const a = document.activeElement;
+      if (!a || a === document.body) lbtn?.focus();
+    });
+  }
+
+  function onlkeydown(e: KeyboardEvent) {
+    if (e.key === 'Escape' && lopen) {
+      e.preventDefault();
+      e.stopPropagation();
+      closeLeftovers('button');
+    }
+  }
   // "1 folder never groups" while any is set to never, else the folders set
   // to always; the panel lists both.
   const settingText = $derived.by(() => {
@@ -43,6 +95,7 @@
 
   async function showGrouping() {
     open = false;
+    lopen = false;
     gopen = true;
     await tick();
     document.getElementById(GROUPING_ID)?.focus();
@@ -66,10 +119,12 @@
     }
   }
   const build = $derived(snapshot?.build ?? null);
+  const reads = $derived({ github: sourceRead(snapshot?.sources ?? [], 'github'), gitlab: sourceRead(snapshot?.sources ?? [], 'gitlab') });
   const version = $derived(statusVersion(build));
 
   async function show() {
     gopen = false;
+    lopen = false;
     open = true;
     // Focus from here, not from the panel's mount: a panel reopened during its
     // closing fade is resumed, not mounted again.
@@ -97,7 +152,7 @@
   }
 </script>
 
-<footer class:raised={open || gopen}>
+<footer class:raised={open || gopen || lopen}>
   <button
     bind:this={btn}
     type="button"
@@ -114,7 +169,7 @@
     ></span></button
   >
   {#if open}
-    <About id={ABOUT_ID} {build} toggle={btn} onclose={close} />
+    <About id={ABOUT_ID} {build} {reads} toggle={btn} onclose={close} />
   {/if}
   <span>local only</span>
   {#if snapshot}
@@ -141,7 +196,21 @@
         onkeydown={ongkeydown}>{settingText}</button
       >
     {/if}
+    {#if loText}
+      <button
+        bind:this={lbtn}
+        type="button"
+        class="setting"
+        aria-expanded={lopen}
+        aria-controls={lopen ? LEFTOVERS_ID : undefined}
+        onclick={() => (lopen ? closeLeftovers('button') : showLeftovers())}
+        onkeydown={onlkeydown}>{loText}</button
+      >
+    {/if}
     </div>
+  {/if}
+  {#if lopen && leftovers}
+    <LeftoversSheet id={LEFTOVERS_ID} client={leftovers} projects={projectNames} toggle={lbtn} onclose={closeLeftovers} />
   {/if}
   {#if gopen && onauto}
     <GroupingPanel id={GROUPING_ID} {settings} toggle={gbtn} onclose={closeGrouping} {onauto} />

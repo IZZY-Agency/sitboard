@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -57,9 +58,6 @@ func (f *fakeRepos) Resolve(_ context.Context, folder string) (model.Repo, error
 	return model.Repo{Root: folder, MainRoot: folder}, nil
 }
 
-func (f *fakeRepos) Worktrees(context.Context, string) ([]model.Worktree, error) { return nil, nil }
-func (f *fakeRepos) LocalBranches(context.Context, string) ([]string, error)     { return nil, nil }
-
 func (f *fakeRepos) set(folder string, r model.Repo) {
 	f.mu.Lock()
 	f.repos[folder] = r
@@ -70,6 +68,7 @@ type lookupCall struct {
 	repo     string
 	numbers  []int
 	branches []string
+	evidence bool // asked through Evidence
 }
 
 // fakePRs answers from a fixed set and records each call.
@@ -77,17 +76,44 @@ type fakePRs struct {
 	mu    sync.Mutex
 	prs   []model.PullRequest
 	calls []lookupCall
-	err   error // when set, every lookup fails with it
+	err   error  // when set, every lookup fails with it
+	gate  func() // when set, runs in every Lookup before it answers
+	// incomplete: heads Evidence says may have more pull requests
+	incomplete map[string]bool
 }
 
 func (f *fakePRs) Probe(context.Context) source.Status {
 	return source.Status{Kind: source.KindGitHub, State: source.StateOK}
 }
 
-func (f *fakePRs) Lookup(_ context.Context, repo string, numbers []int, branches []string) ([]model.PullRequest, error) {
+// Evidence answers from the same pull requests, by head branch, and fails
+// with err like Lookup. incomplete marks heads as maybe missing some.
+func (f *fakePRs) Evidence(_ context.Context, repo model.ForgeRepo, branches []string) (model.PREvidence, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.calls = append(f.calls, lookupCall{repo, numbers, branches})
+	f.calls = append(f.calls, lookupCall{repo: repo.Key(), branches: branches, evidence: true})
+	if f.err != nil {
+		return model.PREvidence{}, f.err
+	}
+	var prs []model.PullRequest
+	for _, pr := range f.prs {
+		if pr.Repo == repo && slices.Contains(branches, pr.HeadBranch) {
+			prs = append(prs, pr)
+		}
+	}
+	return model.PREvidence{PRs: prs, Incomplete: f.incomplete}, nil
+}
+
+func (f *fakePRs) Lookup(_ context.Context, repo model.ForgeRepo, numbers []int, branches []string) ([]model.PullRequest, error) {
+	f.mu.Lock()
+	gate := f.gate
+	f.mu.Unlock()
+	if gate != nil {
+		gate()
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, lookupCall{repo: repo.Key(), numbers: numbers, branches: branches})
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -157,6 +183,7 @@ func newBoard(t *testing.T, opts Options) *Board {
 	t.Cleanup(func() {
 		b.markClosed()
 		b.resolving.Wait()
+		b.hostChecks.Wait()
 	})
 	return b
 }

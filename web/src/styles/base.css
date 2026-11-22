@@ -188,6 +188,12 @@ a.ext:focus-visible::after {
   --effort-fill: var(--effort-max-fill);
   --effort-weight: var(--effort-lift);
 }
+/* An effort word the tool recorded that has no place on the ramp (Codex's
+   "minimal"; "ultra" takes max's look, effortOf): the plain chip look, no
+   ramp colour, no fill, no extra weight. */
+.effort-word {
+  --effort: var(--fg-body);
+}
 
 @media (prefers-reduced-motion: reduce) {
   *,

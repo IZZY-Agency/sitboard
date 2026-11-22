@@ -75,9 +75,9 @@ func TestWorkerOfAnEndedCoordinatorIsStillHinted(t *testing.T) {
 func TestIssuesOnlyFromOpenPullRequests(t *testing.T) {
 	for _, st := range []model.PRState{model.PRStateClosed, model.PRStateMerged} {
 		e := newEnv(t)
-		e.prs.prs = []model.PullRequest{{Repo: exRepo, Number: 101, State: st, ClosingIssues: []int{7}}}
+		e.prs.prs = []model.PullRequest{{Repo: model.GitHubRepo(exRepo), Number: 101, State: st, ClosingIssues: []int{7}}}
 		s := session("s1", model.StatusFinished, tNow)
-		s.CreatedPRs = []model.PRRef{{Repo: exRepo, Number: 101}}
+		s.CreatedPRs = []model.PRRef{{Repo: model.GitHubRepo(exRepo), Number: 101}}
 		e.board.applySync(s)
 		e.board.tick()
 		c := onlyCard(t, e.board)
@@ -95,11 +95,11 @@ func TestIssuesOnlyFromOpenPullRequests(t *testing.T) {
 
 	e := newEnv(t)
 	e.prs.prs = []model.PullRequest{
-		{Repo: exRepo, Number: 101, State: model.PRStateOpen, ClosingIssues: []int{7}},
-		{Repo: exRepo, Number: 102, State: model.PRStateMerged, ClosingIssues: []int{8}},
+		{Repo: model.GitHubRepo(exRepo), Number: 101, State: model.PRStateOpen, ClosingIssues: []int{7}},
+		{Repo: model.GitHubRepo(exRepo), Number: 102, State: model.PRStateMerged, ClosingIssues: []int{8}},
 	}
 	s := session("s1", model.StatusFinished, tNow)
-	s.CreatedPRs = []model.PRRef{{Repo: exRepo, Number: 101}, {Repo: exRepo, Number: 102}}
+	s.CreatedPRs = []model.PRRef{{Repo: model.GitHubRepo(exRepo), Number: 101}, {Repo: model.GitHubRepo(exRepo), Number: 102}}
 	e.board.applySync(s)
 	e.board.tick()
 	c := onlyCard(t, e.board)

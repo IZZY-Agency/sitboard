@@ -6,7 +6,7 @@
   import {
     agentName,
     byLongest,
-    canJump,
+    jumpLabel,
     cardTitle,
     effortOf,
     inbox,
@@ -14,6 +14,7 @@
     modelLabel,
     modelUnknown,
     cardPrSummary,
+    cardPrSummaryParts,
     projectName,
     stateWord,
     teams,
@@ -21,13 +22,17 @@
     uncertainRole,
     type Index,
     type Line,
+    type RowLine,
   } from '../data/derive';
   import { since } from '../data/time';
+  import { hasGitLab, requestsHeading } from '../data/words';
   import { flipOpts, makeMove } from '../motion';
   import Count from '../components/Count.svelte';
   import InboxItem from '../components/InboxItem.svelte';
   import Critter from '../components/Critter.svelte';
+  import RowLinks from '../components/RowLinks.svelte';
   import { critterState } from '../data/critter';
+  import { SPOKEN_ESTIMATE, TOKENS_ONLY, TOKEN_FIGURE, fmtTokens, fmtUSD, hasSpend, isPartial, spendTitle, tokenCount } from '../data/spend';
 
   let {
     snapshot,
@@ -50,8 +55,8 @@
   const panels = $derived(teams(snapshot));
   const [send, receive] = makeMove();
 
-  function prCell(card: CardT): Line | null {
-    const s = cardPrSummary(card, ix);
+  function prCell(card: CardT): RowLine | Line | null {
+    const s = cardPrSummaryParts(card, ix);
     if (s) return s;
     if ((ix.workers.get(card.id)?.length ?? 0) > 0) {
       const up = since(card.agent.startedAt, now);
@@ -60,12 +65,18 @@
     return null;
   }
 
+  // A click that reached the row itself, not the jump button or a link: a
+  // raised cell (.tip). The button and the links handle their own clicks.
+  function rowClick(e: MouseEvent, card: CardT) {
+    if (!(e.target instanceof Element) || !e.target.closest('a, button')) onjump(card);
+  }
+
   function idleReason(card: CardT): Line {
     const parts = [projectName(card, ix)];
     const s = cardPrSummary(card, ix);
     if (s) parts.push(s.text);
     if (card.agent.status === 'unknown') parts.push('status unknown');
-    else if (snapshot.agtermPresent && !card.agent.terminalId) parts.push('not in agterm');
+    else if (snapshot.agtermPresent && card.agent.jump === 'none') parts.push('not in agterm or tmux');
     return { text: parts.join(' · '), tone: 'muted' };
   }
 </script>
@@ -81,7 +92,7 @@
       </div>
       {#each needs as card (card.id)}
         <div animate:flip={flipOpts()} in:receive={{ key: 'q' + card.id }} out:send={{ key: 'q' + card.id }}>
-          <InboxItem {card} {ix} {now} agtermPresent={snapshot.agtermPresent} flashToken={arrivals.get(card.id) ?? 0} {onjump} {onseen} />
+          <InboxItem {card} {ix} {now} flashToken={arrivals.get(card.id) ?? 0} {onjump} {onseen} />
         </div>
       {:else}
         <p class="empty">Nobody needs you right now.</p>
@@ -96,7 +107,7 @@
       </div>
       {#each waiting as card (card.id)}
         <div animate:flip={flipOpts()} in:receive={{ key: 'w' + card.id }} out:send={{ key: 'w' + card.id }}>
-          <InboxItem {card} {ix} {now} agtermPresent={snapshot.agtermPresent} reason={idleReason(card)} showProject={false} {onjump} {onseen} />
+          <InboxItem {card} {ix} {now} reason={idleReason(card)} showProject={false} {onjump} {onseen} />
         </div>
       {:else}
         <p class="empty">No agent is waiting for your next message.</p>
@@ -116,7 +127,7 @@
         <div class="scroller">
           <div class="tbl">
             <div class="trow thead" aria-hidden="true">
-              <span>State</span><span>Agent</span><span>Doing</span><span>Model</span><span>Pull requests</span><span class="r">For</span>
+              <span>State</span><span>Agent</span><span>Doing</span><span>Model</span><span>{requestsHeading(hasGitLab(ix.gitlabHosts))}</span><span class="r">{TOKEN_FIGURE === 'output' ? 'Out' : 'Tokens'}</span><span class="r">≈ $</span><span class="r">For</span>
             </div>
             {#each team.rows as r (r.card.id)}
               {@const card = r.card}
@@ -126,32 +137,63 @@
               {@const model = modelLabel(card.agent.model)}
               {@const family = modelFamily(card.agent.model)}
               {@const effort = effortOf(card)}
-              <button
-                type="button"
+              <!-- The agent's name is the jump button; its hit area covers the
+                   whole row, and the links in Pull requests sit above it (RowLinks). -->
+              <!-- A pointer-only click for the cells raised above the jump area
+                   (.tip, for their tooltips): they still jump. Keyboards and
+                   screen readers use the button. -->
+              <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+              <div
                 class="trow"
                 data-card={card.id}
+                onclick={(e) => rowClick(e, card)}
                 animate:flip={flipOpts()}
                 in:receive={{ key: card.id }}
                 out:send={{ key: card.id }}
-                onclick={() => onjump(card)}
               >
-                <span class="visually-hidden">{canJump(card, snapshot.agtermPresent) ? 'Jump to agterm:' : 'Show where it runs:'}</span>
                 <span class="state" class:needs={card.column === 'needs_you'}>{stateWord(card)}</span>
-                <span class="who" style:--depth={r.depth}><Critter id={card.id} mood={critterState(card)} size={20} /><span class="agent u">{name}</span></span>
+                <span class="who" style:--depth={r.depth}
+                  ><button
+                    type="button"
+                    class="jump"
+                    aria-describedby={hasSpend(card.spend) ? `tok-${card.id} usd-${card.id}` : undefined}
+                    onclick={() => onjump(card)}
+                    ><span class="visually-hidden">{jumpLabel(card)}</span
+                    ><Critter id={card.id} mood={critterState(card)} size={20} /><span class="agent u">{name}</span></button
+                  ></span
+                >
                 <span class="doing">
                   {#if team.solo}<span class="proj u">{projectName(card, ix)}</span>{/if}{#if unsure}<span class="proj">{unsure}</span>{/if}<span class="u">{cardTitle(card)}</span>
                 </span>
                 <span class="mcell"
-                  ><span class="model u {family ? `model-${family}` : ''}" class:unknown={modelUnknown(card.agent.model)} title={model}>{model}</span
-                  >{#if effort}<span class="visually-hidden">{', effort '}</span><span class="eff effort-{effort.level}" class:launch={effort.launch} title={effort.title}
-                      >{effort.level}{#if effort.launch}<span class="at">{' at launch'}</span>{/if}</span
+                  ><span class="model tip u {family ? `model-${family}` : ''}" class:unknown={modelUnknown(card.agent.model)} title={model}>{model}</span
+                  >{#if effort}<span class="visually-hidden">{', effort '}</span><span class="eff tip effort-{effort.level}" class:launch={effort.launch} title={effort.title}
+                      >{effort.text}{#if effort.launch}<span class="at">{' at launch'}</span>{/if}</span
                     >{/if}</span
                 >
-                <span class="prs tone-{pr?.tone ?? 'muted'} u"
-                  >{#each (pr?.text ?? '').split(' · ').filter(Boolean) as part, i (i)}{#if i}{' · '}{/if}<span class="part" class:closes={part.startsWith('closes ')}>{part}</span>{/each}</span
+                <span class="prs tone-{pr?.tone ?? 'muted'}"
+                  >{#if pr && 'parts' in pr}<RowLinks parts={pr.parts} keep />{:else if pr}<span class="u">{pr.text}</span>{/if}</span
                 >
+                {#if hasSpend(card.spend)}
+                  <!-- Raised above the jump area (.tip) for their tooltips; the
+                       jump button is described by them for a keyboard. -->
+                  {@const codex = card.agent.tool === 'codex'}
+                  <span class="num tip" id="tok-{card.id}" title={spendTitle(card.spend, codex)}
+                    ><span class="visually-hidden">{TOKEN_FIGURE === 'output' ? ', output tokens ' : ', tokens '}</span>{fmtTokens(tokenCount(card.spend.tokens))}</span
+                  >
+                  <span class="num tip" id="usd-{card.id}" title={spendTitle(card.spend, codex)}
+                    >{#if codex}<span class="none tonly" aria-hidden="true">{TOKENS_ONLY}</span><span class="visually-hidden">, {TOKENS_ONLY}</span
+                      >{:else if card.spend.priced || isPartial(card.spend)}<span aria-hidden="true"
+                        >{'≈ '}{fmtUSD(card.spend.usd).replace('$', '')}{#if !card.spend.priced}<span class="more">+ unpriced</span>{/if}</span
+                      ><span class="visually-hidden"
+                        >{`, about ${fmtUSD(card.spend.usd)}${card.spend.priced ? '' : ' plus unpriced use'}, ${SPOKEN_ESTIMATE}`}</span
+                      >{:else}<span class="none" aria-hidden="true">no price</span><span class="visually-hidden">, no price</span>{/if}</span
+                  >
+                {:else}
+                  <span class="num none" aria-hidden="true">—</span><span class="num none" aria-hidden="true">—</span>
+                {/if}
                 <span class="for">{timeInState(card, now)}</span>
-              </button>
+              </div>
             {/each}
           </div>
         </div>
@@ -249,13 +291,14 @@
     overflow-x: auto;
   }
   .tbl {
-    min-width: 920px;
+    min-width: 1060px;
   }
   .trow {
     /* The critter's eyes are holes in the page ground, or in the hover wash. */
     --hole: var(--bg);
+    position: relative;
     display: grid;
-    grid-template-columns: 160px 170px minmax(0, 1fr) 128px 250px 84px;
+    grid-template-columns: 160px 170px minmax(0, 1fr) 128px 230px 72px 80px 84px;
     align-items: center;
     width: 100%;
     min-height: 46px;
@@ -265,15 +308,39 @@
       background-color var(--press) ease-out,
       transform var(--press) ease-out;
   }
-  button.trow:hover {
+  /* The wash shows only while the pointer is on the jump area, not on a link. */
+  .trow:has(.jump:hover, .tip:hover) {
     --hole: color-mix(in srgb, rgb(221 218 207) 4%, var(--bg));
     background: rgb(221 218 207 / 4%);
   }
-  button.trow:active {
+  .trow:has(.jump:active, .tip:active) {
     transform: translateY(1px);
   }
-  button.trow:focus-visible {
+  .jump {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+  /* The button's hit area, stretched over the whole row; its focus ring too. */
+  .jump::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+  }
+  .jump:focus-visible {
+    outline: none;
+  }
+  .jump:focus-visible::after {
+    outline: 2px solid var(--amber);
     outline-offset: -2px;
+  }
+  /* A cell with a tooltip sits above the jump area, so the pointer reaches its
+     title; a click on it still jumps (rowClick). */
+  .tip {
+    position: relative;
+    z-index: 1;
+    cursor: pointer;
   }
   .trow:last-child {
     border-bottom: 0;
@@ -376,7 +443,7 @@
     color: var(--effort-low);
     font-weight: 400;
   }
-  /* The line is short by construction (prSummary), so it wraps rather than being cut. */
+  /* The line is short by construction (prSummaryParts), so it wraps rather than being cut. */
   .prs {
     padding-right: 12px;
     font-size: var(--text-s);
@@ -384,14 +451,28 @@
     color: var(--tone);
     overflow-wrap: anywhere;
   }
-  .part {
-    white-space: nowrap;
-  }
-  .part.closes {
-    color: var(--muted);
-  }
   .for {
     font-size: var(--text-m);
     color: var(--muted);
+  }
+  .num {
+    text-align: right;
+    font-size: var(--text-s);
+    color: var(--fg-body);
+    white-space: nowrap;
+  }
+  .num.none,
+  .num .none {
+    color: var(--muted);
+  }
+  /* A Codex agent's "tokens only": the small size fits the narrow column. */
+  .num .tonly {
+    font-size: var(--text-xs);
+  }
+  /* "+ unpriced" on a line of its own: the column is too narrow for both. */
+  .num .more {
+    display: block;
+    color: var(--amber);
+    font-size: var(--text-xs);
   }
 </style>

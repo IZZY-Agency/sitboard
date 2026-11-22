@@ -31,9 +31,13 @@ import (
 	"github.com/IZZY-Agency/sitboard/internal/adapters/claude"
 	"github.com/IZZY-Agency/sitboard/internal/adapters/codex"
 	"github.com/IZZY-Agency/sitboard/internal/adapters/github"
+	"github.com/IZZY-Agency/sitboard/internal/adapters/gitlab"
 	"github.com/IZZY-Agency/sitboard/internal/adapters/gitsrc"
+	"github.com/IZZY-Agency/sitboard/internal/adapters/procs"
+	"github.com/IZZY-Agency/sitboard/internal/adapters/tmux"
 	"github.com/IZZY-Agency/sitboard/internal/buildinfo"
 	"github.com/IZZY-Agency/sitboard/internal/core"
+	"github.com/IZZY-Agency/sitboard/internal/model"
 	"github.com/IZZY-Agency/sitboard/internal/server"
 	"github.com/IZZY-Agency/sitboard/internal/source"
 	"github.com/IZZY-Agency/sitboard/internal/state"
@@ -103,6 +107,7 @@ type config struct {
 	portSet    bool // --port was given: never fall back to another port
 	noOpen     bool
 	noGitHub   bool
+	noGitLab   bool
 	roots      []string
 	staleAfter time.Duration
 	statePath  string // --state; "" is the platform's default file
@@ -118,7 +123,8 @@ func parseArgs(args []string, stderr io.Writer) (config, error) {
 	fs.SetOutput(stderr)
 	fs.IntVar(&cfg.port, "port", defaultPort, "port on 127.0.0.1; 0 picks a free one")
 	fs.BoolVar(&cfg.noOpen, "no-open", false, "do not open the browser")
-	fs.BoolVar(&cfg.noGitHub, "no-github", false, "never call gh: no pull request lookups, no network traffic")
+	fs.BoolVar(&cfg.noGitHub, "no-github", false, "never call gh: no pull request lookups on GitHub")
+	fs.BoolVar(&cfg.noGitLab, "no-gitlab", false, "never call glab: no merge request lookups on GitLab (with --no-github: no network traffic)")
 	fs.StringVar(&roots, "roots", "", "comma-separated folders; only agents working under them are shown")
 	fs.DurationVar(&cfg.staleAfter, "stale-after", 20*time.Minute, "a busy agent with no activity for this long is flagged stale")
 	fs.StringVar(&cfg.statePath, "state", "", "`file` for seen marks, the catch-up marker and project groupings (default: ~/Library/Application Support/sitboard/state.json on macOS; elsewhere sitboard/state.json under $XDG_STATE_HOME, or ~/.local/state)")
@@ -165,21 +171,31 @@ func parseArgs(args []string, stderr io.Writer) (config, error) {
 type sources struct {
 	watchers []source.Watcher
 	repos    source.RepoResolver
-	prs      source.PRProvider
+	inv      source.RepoInventory // nil: Leftovers off
+	folders  source.FolderUse
+	prs      source.PRProvider // GitHub
+	gitlab   core.GitLab       // nil: no GitLab source at all
 	jumper   source.Jumper
 }
 
 func realSources(cfg config, home string) sources {
 	term := agterm.New(agterm.Options{})
+	tm := tmux.New(tmux.Options{AgtermOf: claude.AgtermIDOf, Raise: term, Alive: claude.ProcessAlive})
 	return sources{
 		watchers: []source.Watcher{
-			claude.New(claude.Options{Home: home}),
-			codex.New(codex.Options{Home: home}),
+			claude.New(claude.Options{Home: home, TmuxOwns: tm.Owns}),
+			codex.New(codex.Options{Home: home, CodexHome: os.Getenv("CODEX_HOME")}),
 			term,
 		},
-		repos:  gitsrc.New(gitsrc.Options{}),
-		prs:    github.New(github.Options{Off: cfg.noGitHub}),
-		jumper: term,
+		repos:   gitsrc.New(gitsrc.Options{}),
+		inv:     gitsrc.NewInventory(gitsrc.Options{}),
+		folders: procs.New(),
+		prs:     github.New(github.Options{Off: cfg.noGitHub}),
+		gitlab:  gitlab.NewSource(gitlab.Options{Off: cfg.noGitLab}),
+		jumper: source.Jumpers{
+			model.FocusAgterm: term,
+			model.FocusTmux:   tm,
+		},
 	}
 }
 
@@ -213,7 +229,10 @@ func run(ctx context.Context, cfg config, env runEnv) error {
 
 	board := core.New(core.Options{
 		Repos:      src.repos,
+		Inventory:  src.inv,
+		Folders:    src.folders,
 		PRs:        src.prs,
+		GitLab:     src.gitlab,
 		State:      st,
 		StaleAfter: cfg.staleAfter,
 		Roots:      cfg.roots,
@@ -221,11 +240,15 @@ func run(ctx context.Context, cfg config, env runEnv) error {
 		// page says so.
 		StateInMemory: cfg.noState,
 	})
-	statuses := make([]source.Status, 0, len(src.watchers)+2)
+	statuses := make([]source.Status, 0, len(src.watchers)+3)
 	for _, w := range src.watchers {
 		statuses = append(statuses, w.Probe(ctx))
 	}
 	statuses = append(statuses, src.repos.Probe(ctx), src.prs.Probe(ctx))
+	if src.gitlab != nil && cfg.noGitLab {
+		// Switched off: the line says so at once and glab never runs.
+		statuses = append(statuses, src.gitlab.Probe(ctx))
+	}
 	board.SetSources(statuses)
 
 	// A stop asked for during the start (the lock wait can take seconds)
@@ -270,6 +293,12 @@ func run(ctx context.Context, cfg config, env runEnv) error {
 			log.Printf("core: %v", err)
 		}
 	}()
+	if src.gitlab != nil && !cfg.noGitLab {
+		// glab is probed once sitboard listens, in the background: a slow or
+		// stuck glab delays nothing. Logins are per host and show on its line
+		// once a session's merge requests need one.
+		board.StartGitLabProbe(runCtx)
+	}
 
 	srv := newHTTPServer(runCtx, server.New(server.Options{
 		Board:    board,

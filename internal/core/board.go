@@ -31,7 +31,10 @@ import (
 // Options configure the core.
 type Options struct {
 	Repos      source.RepoResolver
-	PRs        source.PRProvider
+	PRs        source.PRProvider    // GitHub
+	GitLab     GitLab               // nil: no GitLab merge requests
+	Inventory  source.RepoInventory // for Leftovers; nil: Leftovers off
+	Folders    source.FolderUse     // which folders processes work in; nil: no worktree is listed
 	State      state.Store
 	Now        func() time.Time // the only clock the core reads; nil means time.Now
 	StaleAfter time.Duration    // a busy card with no activity for this long is stale
@@ -53,57 +56,75 @@ type Board struct {
 	roots []string
 	build contract.Build // read once: build info does not change while it runs
 
-	mu          sync.Mutex
-	sessions    map[model.SessionKey]model.SessionFact
-	terminals   map[string]model.TerminalFact
-	repos       map[string]model.Repo // by folder; a folder absent here is still being resolved
-	repoGen     map[string]uint64     // by folder: the latest git lookup started; older answers are dropped
-	plain       map[string]bool       // by folder: git answered that it is in no repository (see isPlain)
-	umbrellas   map[string]time.Time  // umbrella folder -> last time an agent sat in it (live or remembered)
-	umbrellaTo  map[string]time.Time  // umbrella times to write to the state file on the next tick
-	liveSince   map[string]time.Time  // live umbrella -> when it became live, until it is remembered
-	missing     map[string]int        // remembered umbrella -> checks in a row that found it gone
-	forgotten   map[string]time.Time  // folder whose grouping the owner forgot -> last time an agent sat in it
-	forgotTo    map[string]time.Time  // forgotten times to write to the state file on the next tick
-	vacantFrom  map[string]time.Time  // forgotten folder -> since when no agent sits in it
-	release     map[string]time.Time  // forgotten folders to drop from the state file on the next tick -> their time when released
-	settings    map[string]string     // folder -> state.GroupingAlways or state.GroupingNever; absent: auto
-	goneAt      time.Time             // when the gone check last started
-	goneBusy    bool                  // a gone check's worker is running
-	closed      bool                  // Run returned: no more state writes from checks, no more publishes
-	prs         map[model.PRRef]model.PullRequest
-	branchPRs   map[string]map[string][]model.PullRequest // repo -> head branch -> pull requests
-	lookedUp    map[string]time.Time                      // repo -> last GitHub lookup (wall clock)
-	pending     map[string]bool                           // repos with pull request refs never looked up
-	asked       map[string]bool                           // refs and branches GitHub was asked about
-	resolved    time.Time                                 // last time live folders were resolved again
-	memSeen     map[string]time.Time                      // used when no state store is given
-	selected    map[string]time.Time                      // terminal id -> last selection in agterm
-	seenWrites  map[string]time.Time                      // seen marks to write once b.mu is released
-	writeMu     sync.Mutex                                // orders state file writes; taken after b.mu, never before
-	lastTick    time.Time
-	resumedAt   time.Time
-	sources     []contract.SourceStatus
-	ready       map[contract.SourceKind]bool // watchers that sent model.SourceReady
-	backfilled  map[contract.SourceKind]bool // watchers that sent model.BackfillDone
-	runStart    time.Time                    // when this board was made: catch-up's line between this run and earlier ones
-	startMarker time.Time                    // the catch-up marker as loaded at start
-	lastAsOf    time.Time                    // the newest catch-up list's AsOf
-	learned     map[string]learnedItem       // catch-up item -> when a list first held it
-	startUnread map[string]time.Time         // catch-up items the last run saved as unread (state key -> own time)
-	unreadSaved map[string]time.Time         // what the state file holds as unread now
-	listed      bool                         // a catch-up list was made, or the marker moved, in this run
-	missingRefs map[model.PRRef]bool         // pull requests a lookup did not find: ended sessions stop asking
-	goneRepos   map[string]bool              // repos GitHub did not find: ended sessions stop asking
+	mu           sync.Mutex
+	sessions     map[model.SessionKey]model.SessionFact
+	terminals    map[string]model.TerminalFact
+	repos        map[string]model.Repo // by folder; a folder absent here is still being resolved
+	repoGen      map[string]uint64     // by folder: the latest git lookup started; older answers are dropped
+	plain        map[string]bool       // by folder: git answered that it is in no repository (see isPlain)
+	umbrellas    map[string]time.Time  // umbrella folder -> last time an agent sat in it (live or remembered)
+	umbrellaTo   map[string]time.Time  // umbrella times to write to the state file on the next tick
+	liveSince    map[string]time.Time  // live umbrella -> when it became live, until it is remembered
+	missing      map[string]int        // remembered umbrella -> checks in a row that found it gone
+	forgotten    map[string]time.Time  // folder whose grouping the owner forgot -> last time an agent sat in it
+	forgotTo     map[string]time.Time  // forgotten times to write to the state file on the next tick
+	vacantFrom   map[string]time.Time  // forgotten folder -> since when no agent sits in it
+	release      map[string]time.Time  // forgotten folders to drop from the state file on the next tick -> their time when released
+	settings     map[string]string     // folder -> state.GroupingAlways or state.GroupingNever; absent: auto
+	goneAt       time.Time             // when the gone check last started
+	goneBusy     bool                  // a gone check's worker is running
+	closed       bool                  // Run returned: no more state writes from checks, no more publishes
+	prs          map[model.PRRef]model.PullRequest
+	lookedUp     map[model.ForgeRepo]time.Time // repo -> last lookup on its forge (wall clock)
+	pending      map[model.ForgeRepo]bool      // repos with pull request refs never looked up
+	asked        map[model.PRRef]bool          // pull request refs its forge was asked about
+	resolved     time.Time                     // last time live folders were resolved again
+	memSeen      map[string]time.Time          // used when no state store is given
+	selected     map[string]time.Time          // terminal id -> last selection in agterm
+	seenWrites   map[string]time.Time          // seen marks to write once b.mu is released
+	writeMu      sync.Mutex                    // orders state file writes; taken after b.mu, never before
+	lastTick     time.Time
+	resumedAt    time.Time
+	sources      []contract.SourceStatus
+	ready        map[contract.SourceKind]bool  // watchers that sent model.SourceReady
+	backfilled   map[contract.SourceKind]bool  // watchers that sent model.BackfillDone
+	runStart     time.Time                     // when this board was made: catch-up's line between this run and earlier ones
+	startMarker  time.Time                     // the catch-up marker as loaded at start
+	lastAsOf     time.Time                     // the newest catch-up list's AsOf
+	learned      map[string]learnedItem        // catch-up item -> when a list first held it
+	startUnread  map[string]time.Time          // catch-up items the last run saved as unread (state key -> own time)
+	unreadSaved  map[string]time.Time          // what the state file holds as unread now
+	listed       bool                          // a catch-up list was made, or the marker moved, in this run
+	missingRefs  map[model.PRRef]bool          // pull requests a lookup did not find: ended sessions stop asking
+	goneRepos    map[model.ForgeRepo]bool      // repos their forge did not find: ended sessions stop asking
+	leftovers    contract.Leftovers            // the latest leftovers list; State "" before the first
+	leftoverAt   time.Time                     // when the latest look started
+	leftoverBusy bool                          // a look is under way
+	leftoverSaw  map[model.PRRef]bool          // the merged pull requests the board knew when the latest look started
+	glHosts      map[string]hostDecision       // GitLab host -> may lookups go there (forges.go)
+	glBase       contract.SourceStatus         // the GitLab source line as glab's probe gave it
+	glAsking     map[string]context.CancelFunc // GitLab hosts being checked now, each with what calls its check off (forges.go)
+	glGen        map[string]uint64             // GitLab host -> its generation: what was learned there before it changed is dropped (hostStamp)
+	glEpoch      uint64                        // the generation of every GitLab host at once (hostStamp)
+	glSrc        uint64                        // times the GitLab source line was set; a probe that started before is dropped
+	glDemand     map[string]bool               // the GitLab hosts sessions needed at the last rebuild (noteGitLabDemandLocked)
+	glScans      int                           // times the sessions were scanned for GitLab hosts; tests read it
+	glDecided    int                           // host checks answered so far; tests wait on it
+	glProbed     time.Time                     // when glab was last probed
+	glProbing    bool                          // a probe runs in the background
+	// notOwn: per session, merge requests a push announced that GitLab says
+	// none of its pushes created (forges.go, creditPushedLocked).
+	notOwn map[model.SessionKey]map[model.PRRef]bool
 
-	seq       uint64
-	view      view
-	cardKeys  map[string]model.SessionKey // card id -> session, for cards on the board
-	subs      map[chan contract.Snapshot]struct{}
-	lastPub   time.Time // real time of the last publish
-	pubTimer  *time.Timer
-	refreshCh chan struct{}
-	resolving sync.WaitGroup // git lookups in flight; tests wait on it
+	seq        uint64
+	view       view
+	cardKeys   map[string]model.SessionKey // card id -> session, for cards on the board
+	subs       map[chan contract.Snapshot]struct{}
+	lastPub    time.Time // real time of the last publish
+	pubTimer   *time.Timer
+	refreshCh  chan struct{}
+	resolving  sync.WaitGroup // git lookups in flight; tests wait on it
+	hostChecks sync.WaitGroup // GitLab host checks and probes in flight; tests wait on it
 	// flushGap, when set (tests only), runs in flushUmbrellas between reading
 	// the changes and writing them, where a ForgetGrouping can fall. Set it
 	// before the board ticks; a tick reads it without a lock.
@@ -121,6 +142,9 @@ type view struct {
 	umbrellas   []string          // umbrella folders with an agent in them now, sorted
 	groupings   map[string]string // project id -> umbrella folder, for umbrellas that have parts now
 	settings    []contract.GroupingSetting
+	leftovers   contract.LeftoversSummary // the latest leftovers list in numbers
+	spend       contract.SpendSummary
+	gitlabHosts []string // hosts of the GitLab merge requests the board knows, sorted
 }
 
 // New returns an empty board.
@@ -148,10 +172,9 @@ func New(opts Options) *Board {
 		release:     map[string]time.Time{},
 		settings:    map[string]string{},
 		prs:         map[model.PRRef]model.PullRequest{},
-		branchPRs:   map[string]map[string][]model.PullRequest{},
-		lookedUp:    map[string]time.Time{},
-		pending:     map[string]bool{},
-		asked:       map[string]bool{},
+		lookedUp:    map[model.ForgeRepo]time.Time{},
+		pending:     map[model.ForgeRepo]bool{},
+		asked:       map[model.PRRef]bool{},
 		memSeen:     map[string]time.Time{},
 		selected:    map[string]time.Time{},
 		seenWrites:  map[string]time.Time{},
@@ -163,7 +186,11 @@ func New(opts Options) *Board {
 		refreshCh:   make(chan struct{}, 1),
 		learned:     map[string]learnedItem{},
 		missingRefs: map[model.PRRef]bool{},
-		goneRepos:   map[string]bool{},
+		goneRepos:   map[model.ForgeRepo]bool{},
+		glHosts:     map[string]hostDecision{},
+		glAsking:    map[string]context.CancelFunc{},
+		glGen:       map[string]uint64{},
+		notOwn:      map[model.SessionKey]map[model.PRRef]bool{},
 	}
 	b.runStart = b.now()
 	if opts.State != nil {
@@ -200,7 +227,7 @@ func New(opts Options) *Board {
 			}
 		}
 	}
-	b.view = view{cards: []contract.Card{}, projects: []contract.Project{}, sources: []contract.SourceStatus{}, settings: []contract.GroupingSetting{}}
+	b.view = view{cards: []contract.Card{}, projects: []contract.Project{}, sources: []contract.SourceStatus{}, settings: []contract.GroupingSetting{}, spend: contract.SpendSummary{Days: []contract.SpendDay{}}, gitlabHosts: []string{}}
 	return b
 }
 
@@ -212,14 +239,29 @@ func (b *Board) Apply(f model.Fact) {
 	defer b.flushSeen() // runs after the unlock below
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if batch, ok := f.(model.Batch); ok {
+		for _, g := range batch.Facts {
+			b.applyLocked(g)
+		}
+	} else {
+		b.applyLocked(f)
+	}
+	b.rebuildLocked()
+}
+
+// applyLocked takes one fact into the board's state, with no rebuild. Callers
+// hold b.mu.
+func (b *Board) applyLocked(f model.Fact) {
 	switch f := f.(type) {
 	case model.SessionFact:
 		if f.Folder != "" {
 			f.Folder = filepath.Clean(f.Folder) // "a/" and "a/." are "a"
 		}
 		f.CreatedPRs = slices.Clone(f.CreatedPRs)
+		f.PushedPRs = slices.Clone(f.PushedPRs)
 		f.Artifacts = slices.Clone(f.Artifacts)
 		f.TurnEnds = slices.Clone(f.TurnEnds)
+		b.creditPushedLocked(&f)
 		b.sessions[f.Key] = f
 		if _, started := b.repoGen[f.Folder]; f.Folder != "" && !started {
 			b.startResolveLocked(f.Folder)
@@ -229,6 +271,7 @@ func (b *Board) Apply(f model.Fact) {
 		}
 	case model.SessionGone:
 		delete(b.sessions, f.Key)
+		delete(b.notOwn, f.Key)
 	case model.TerminalFact:
 		b.terminals[f.ID] = f
 	case model.TerminalGone:
@@ -249,7 +292,6 @@ func (b *Board) Apply(f model.Fact) {
 			}
 		}
 	}
-	b.rebuildLocked()
 }
 
 // maxResolves caps the git lookups running at once in the process. A start
@@ -312,7 +354,7 @@ func (b *Board) resolve(folder string) (repo model.Repo, plain bool) {
 	if repo.MainRoot == "" {
 		repo.MainRoot = repo.Root
 	}
-	plain = repo.Root == folder && repo.MainRoot == folder && !repo.Branch.OK && repo.Slug == ""
+	plain = repo.Root == folder && repo.MainRoot == folder && !repo.Branch.OK && repo.Remote.IsZero()
 	if plain {
 		if _, err := os.Lstat(filepath.Join(folder, ".git")); err == nil {
 			plain = false
@@ -346,16 +388,19 @@ func (b *Board) SetSources(statuses []source.Status) {
 	defer b.mu.Unlock()
 	for i := range next {
 		next[i].Ready = b.isReadyLocked(next[i].Kind, next[i].State)
+		if next[i].Kind == contract.SourceGitLab {
+			b.setGitLabBaseLocked(next[i])
+		}
 	}
 	b.sources = next
 	b.rebuildLocked()
 }
 
 // isReadyLocked applies the readiness rule of contract.SourceStatus: a source
-// that is not ok, and git and GitHub (which answer on demand), are ready; a
+// that is not ok, and git, GitHub and GitLab (which answer on demand), are ready; a
 // present watcher is ready once it sent model.SourceReady. Callers hold b.mu.
 func (b *Board) isReadyLocked(kind contract.SourceKind, st contract.SourceState) bool {
-	if st != contract.SourceOK || kind == contract.SourceGit || kind == contract.SourceGitHub {
+	if st != contract.SourceOK || kind == contract.SourceGit || kind == contract.SourceGitHub || kind == contract.SourceGitLab {
 		return true
 	}
 	return b.ready[kind]
@@ -418,6 +463,9 @@ func (b *Board) snapshotLocked() contract.Snapshot {
 		Build:         b.build,
 
 		GroupingSettings: v.settings,
+		Leftovers:        v.leftovers,
+		Spend:            v.spend,
+		GitLabHosts:      v.gitlabHosts,
 	}
 }
 
@@ -446,6 +494,7 @@ func buildOf(version, commit string) contract.Build {
 // rebuildLocked derives the board again and publishes it when its content
 // changed. Callers hold b.mu.
 func (b *Board) rebuildLocked() {
+	b.noteGitLabDemandLocked()
 	now := b.now()
 	next, keys := b.deriveLocked(now)
 	if b.settledLocked() {
@@ -516,11 +565,6 @@ func (b *Board) publishLocked() {
 	}
 }
 
-// Leftovers is out of the proof of concept: it reports no items.
-func (b *Board) Leftovers(context.Context) (contract.Leftovers, error) {
-	return contract.Leftovers{Items: []contract.Leftover{}}, nil
-}
-
 // ErrUnknownCard is returned for a card id that is not on the board.
 var ErrUnknownCard = errors.New("core: unknown card")
 
@@ -545,23 +589,27 @@ func (b *Board) MarkSeen(cardID string) error {
 	return nil
 }
 
-// TerminalFor resolves a card on the board to its terminal in the current
-// agterm tree.
-func (b *Board) TerminalFor(cardID string) (string, bool) {
+// JumpTarget resolves a card on the board to where its jump goes: its tmux
+// pane, or its agterm session when that is in the current agterm tree (the
+// same rule as the card's Jump field).
+func (b *Board) JumpTarget(cardID string) (model.FocusTarget, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	key, ok := b.cardKeys[cardID]
 	if !ok {
-		return "", false
+		return model.FocusTarget{}, false
 	}
-	id := b.sessions[key].TerminalID
-	if id == "" {
-		return "", false
+	s := b.sessions[key]
+	if s.Tmux.Valid() {
+		return model.FocusTarget{Kind: model.FocusTmux, ID: s.Tmux.Pane, Socket: s.Tmux.Socket, TTY: s.Tmux.TTY, PID: s.Tmux.PID, Start: s.Tmux.Start}, true
 	}
-	if _, ok := b.terminals[id]; !ok {
-		return "", false
+	if s.TerminalID == "" {
+		return model.FocusTarget{}, false
 	}
-	return id, true
+	if _, ok := b.terminals[s.TerminalID]; !ok {
+		return model.FocusTarget{}, false
+	}
+	return model.FocusTarget{Kind: model.FocusAgterm, ID: s.TerminalID}, true
 }
 
 // expandHome turns "~/x" into an absolute, clean path.

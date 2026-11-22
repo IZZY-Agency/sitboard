@@ -1,0 +1,186 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`GitHub only: nothing visible changes > Board reads as before 1`] = `
+"Needs you 2 Blocked, or finished a turn you have not seen. Jump to tmux: solo-a 2m solo-a beta model unknown, effort high at launch Used 7 k out · no price Blocked on a question or a permissionin tmux Untitled artifact (artifact, opens in a new tab) Jump to agterm: coordinator-a 5m coordinator-a alpha Opus 4.7, effort xhigh coordinator · 4 workers Used 84 k out · ≈ $6.25 at API list price, not a bill on a subscription Finished a turn you have not seen2 subagents Placeholder plan, second draft (artifact, opens in a new tab)Placeholder deck (artifact, opens in a new tab) Mark seen Working 1 Busy right now. Jump to agterm: worker-a 50m worker-a alpha Opus 4.7, effort high for coordinator-a Used 21 k out · ≈ $1.50 at API list price, not a bill on a subscription Stale · no activity for 25m With coordinator 1 Finished a turn, waiting for its coordinator. Jump to agterm: worker-b 10m worker-b alpha Opus 4.7, effort max for coordinator-a In review 1 Stopped with an open pull request. Jump to agterm: worker-c 20m Placeholder pull request title alpha Opus 4.7, effort medium for coordinator-a Checks failing on #101 #101 checks failing (pull request, opens in a new tab) closes #7 (issue, opens in a new tab) Done · 24h 1 Every pull request it opened is merged or closed. Show where it runs: worker-d 1h 30m Another placeholder title alpha Opus 4.7, effort low for coordinator-a Used 160 k out · ≈ $12.75 at API list price, not a bill on a subscription session ended #102 merged (pull request, opens in a new tab) Idle 1 Finished a turn, waiting for your next message. Show where it runs: worker-e 2h 15m beta beta model unknown coordinator: unknown Used 38 k out · tokens only status unknownnot in agterm or tmux
+ul: Artifacts
+ul: Artifacts
+ul: Pull requests
+ul: Pull requests"
+`;
+
+exports[`GitHub only: nothing visible changes > Lanes reads as before 1`] = `
+"Needs you 4 Jump to tmux: solo-a beta 2m solo-a Blocked on a question or a permission Jump to agterm: coordinator-a alpha 5m coordinator-a Finished a turn you have not seen Mark seenJump to agterm: worker-c alpha 20m Placeholder pull request title Checks failing on #101 Jump to agterm: worker-a alpha 50m worker-a Stale · no activity for 25m All projects 1 working2 needs you1 in review1 stale Project Needs you 2 Working 1 With coordinator 1 In review 1 Done · 24h 1 Idle 1 alpha ~/projects/alpha 1 coordinator · 5 agents 1 working · 1 needs you · 1 in review · 1 stale Jump to agterm: coordinator-a 5m coordinator · Opus 4.7, effort xhigh · 4 workersJump to agterm: worker-a 50m Opus 4.7, effort high · for coordinator-aJump to agterm: worker-b 10m Opus 4.7, effort max · for coordinator-aJump to agterm: worker-c 20m Opus 4.7, effort medium · for coordinator-a · #101 (pull request, opens in a new tab) open · checks failing · closes #7 (issue, opens in a new tab)Show where it runs: worker-d 1h 30m Opus 4.7, effort low · for coordinator-a · #102 (pull request, opens in a new tab) mergedbeta ~/projects/beta 2 agents 1 needs you Jump to tmux: solo-a 2m model unknown, effort high at launchShow where it runs: worker-e 2h 15m status unknown · model unknown · coordinator: unknown · beta
+section: All projects"
+`;
+
+exports[`GitHub only: nothing visible changes > Teams reads as before 1`] = `
+"Needs you 4 Jump to tmux: solo-a beta 2m solo-a Blocked on a question or a permission Jump to agterm: coordinator-a alpha 5m coordinator-a Finished a turn you have not seen Mark seenJump to agterm: worker-c alpha 20m Placeholder pull request title Checks failing on #101 Jump to agterm: worker-a alpha 50m worker-a Stale · no activity for 25m Waiting for your message 1 Show where it runs: worker-e 2h 15m beta beta · status unknown coordinator-a ~/projects/alpha alpha 1 coordinator · 4 workers StateAgentDoingModelPull requestsOut≈ $For Needs you Jump to agterm: coordinator-a coordinator-a Opus 4.7, effort xhigh coordinator · up 2h 0m , output tokens 84 k ≈ 6.25, about $6.25, at API list price, not a bill on a subscription 5mWith coordinator Jump to agterm: worker-b worker-b Opus 4.7, effort max —— 10mIn review Jump to agterm: worker-c Placeholder pull request title Opus 4.7, effort medium #101 (pull request, opens in a new tab) open · checks failing · closes #7 (issue, opens in a new tab) —— 20mWorking Jump to agterm: worker-a worker-a Opus 4.7, effort high , output tokens 21 k ≈ 1.50, about $1.50, at API list price, not a bill on a subscription 50mDone Show where it runs: worker-d Another placeholder title Opus 4.7, effort low #102 (pull request, opens in a new tab) merged , output tokens 160 k ≈ 12.75, about $12.75, at API list price, not a bill on a subscription 1h 30mSolo agents 1 project no coordinator on the board StateAgentDoingModelPull requestsOut≈ $For Needs you Jump to tmux: solo-a betasolo-a model unknown, effort high at launch , output tokens 7 k no price, no price 2mStatus unknown Show where it runs: worker-e betacoordinator: unknownbeta model unknown , output tokens 38 k tokens only, tokens only 2h 15m
+aside: Your queue
+section: coordinator-a · ~/projects/alpha
+section: Solo agents · 1 project"
+`;
+
+exports[`GitHub only: nothing visible changes > the status bar and About read as before 1`] = `
+"About sitboard dev About sitboard Version development build Commit unknown Platform macOS arm64 Runs only on this machine. Nothing is sent anywhere; GitHub is read through your own gh. Update brew upgrade sitboard Copy Website sitboard.comSource github.com/IZZY-Agency/sitboardLicence MIT Open-source licences·An IZZY Agency tool local only claude code 5 livecodex reading… · status unknown for Codex sessionsagterm foundgit foundgithub failing · not logged in to github.com 3 plain shells hidden
+ul: Sources"
+`;
+
+exports[`GitHub only: the hidden words and labels, byte for byte > About 1`] = `
+[
+  "hidden: "About "",
+  "hidden: "About "",
+  "hidden: """,
+  "label: "Sources"",
+  "text: "Runs only on this machine. Nothing is sent anywhere; GitHub is read through your own gh."",
+]
+`;
+
+exports[`GitHub only: the hidden words and labels, byte for byte > Board 1`] = `
+[
+  "hidden: "Jump to tmux:"",
+  "hidden: ", effort "",
+  "hidden: "Used "",
+  "hidden: " (artifact, opens in a new tab)"",
+  "hidden: "Jump to agterm:"",
+  "hidden: ", effort "",
+  "hidden: "Used "",
+  "hidden: " at API list price, not a bill on a subscription"",
+  "hidden: " (artifact, opens in a new tab)"",
+  "hidden: " (artifact, opens in a new tab)"",
+  "hidden: "Jump to agterm:"",
+  "hidden: ", effort "",
+  "hidden: "Used "",
+  "hidden: " at API list price, not a bill on a subscription"",
+  "hidden: "Jump to agterm:"",
+  "hidden: ", effort "",
+  "hidden: "Jump to agterm:"",
+  "hidden: ", effort "",
+  "hidden: " (pull request, opens in a new tab)"",
+  "hidden: " (issue, opens in a new tab)"",
+  "hidden: "Show where it runs:"",
+  "hidden: ", effort "",
+  "hidden: "Used "",
+  "hidden: " at API list price, not a bill on a subscription"",
+  "hidden: " (pull request, opens in a new tab)"",
+  "hidden: "Show where it runs:"",
+  "hidden: "Used "",
+  "label: "Artifacts"",
+  "label: "Artifacts"",
+  "label: "Pull requests"",
+  "label: "Pull requests"",
+  "text: "Blocked, or finished a turn you have not seen."",
+  "text: "Busy right now."",
+  "text: "Finished a turn, waiting for its coordinator."",
+  "text: "Stopped with an open pull request."",
+  "text: "Every pull request it opened is merged or closed."",
+  "text: "Finished a turn, waiting for your next message."",
+]
+`;
+
+exports[`GitHub only: the hidden words and labels, byte for byte > Catch-up 1`] = `
+[
+  "hidden: " on GitHub, opens in a new tab"",
+  "hidden: " on GitHub, opens in a new tab"",
+  "hidden: """,
+  "text: "PR opened"",
+  "text: "Merged"",
+]
+`;
+
+exports[`GitHub only: the hidden words and labels, byte for byte > Lanes 1`] = `
+[
+  "hidden: "Jump to tmux:"",
+  "hidden: "Jump to agterm:"",
+  "hidden: "Jump to agterm:"",
+  "hidden: "Jump to agterm:"",
+  "hidden: "Jump to agterm:"",
+  "hidden: ", effort"",
+  "hidden: "Jump to agterm:"",
+  "hidden: ", effort"",
+  "hidden: "Jump to agterm:"",
+  "hidden: ", effort"",
+  "hidden: "Jump to agterm:"",
+  "hidden: ", effort"",
+  "hidden: " (pull request, opens in a new tab)"",
+  "hidden: " (issue, opens in a new tab)"",
+  "hidden: "Show where it runs:"",
+  "hidden: ", effort"",
+  "hidden: " (pull request, opens in a new tab)"",
+  "hidden: "Jump to tmux:"",
+  "hidden: ", effort"",
+  "hidden: "Show where it runs:"",
+  "label: "All projects"",
+]
+`;
+
+exports[`GitHub only: the hidden words and labels, byte for byte > Teams 1`] = `
+[
+  "hidden: "Jump to tmux:"",
+  "hidden: "Jump to agterm:"",
+  "hidden: "Jump to agterm:"",
+  "hidden: "Jump to agterm:"",
+  "hidden: "Show where it runs:"",
+  "hidden: "Jump to agterm:"",
+  "hidden: ", effort "",
+  "hidden: ", output tokens "",
+  "hidden: ", about $6.25, at API list price, not a bill on a subscription"",
+  "hidden: "Jump to agterm:"",
+  "hidden: ", effort "",
+  "hidden: "Jump to agterm:"",
+  "hidden: ", effort "",
+  "hidden: " (pull request, opens in a new tab)"",
+  "hidden: " (issue, opens in a new tab)"",
+  "hidden: "Jump to agterm:"",
+  "hidden: ", effort "",
+  "hidden: ", output tokens "",
+  "hidden: ", about $1.50, at API list price, not a bill on a subscription"",
+  "hidden: "Show where it runs:"",
+  "hidden: ", effort "",
+  "hidden: " (pull request, opens in a new tab)"",
+  "hidden: ", output tokens "",
+  "hidden: ", about $12.75, at API list price, not a bill on a subscription"",
+  "hidden: "Jump to tmux:"",
+  "hidden: ", effort "",
+  "hidden: ", output tokens "",
+  "hidden: ", no price"",
+  "hidden: "Show where it runs:"",
+  "hidden: ", output tokens "",
+  "hidden: ", tokens only"",
+  "label: "Your queue"",
+  "label: "coordinator-a · ~/projects/alpha"",
+  "label: "Solo agents · 1 project"",
+  "text: "State"",
+  "text: "Agent"",
+  "text: "Doing"",
+  "text: "Model"",
+  "text: "Pull requests"",
+  "text: "Out"",
+  "text: "≈ $"",
+  "text: "For"",
+  "text: "State"",
+  "text: "Agent"",
+  "text: "Doing"",
+  "text: "Model"",
+  "text: "Pull requests"",
+  "text: "Out"",
+  "text: "≈ $"",
+  "text: "For"",
+]
+`;
+
+exports[`GitHub only: the hidden words and labels, byte for byte > an empty Board 1`] = `
+[
+  "text: "Blocked, or finished a turn you have not seen."",
+  "text: "Nobody is waiting for you. An agent lands here when it asks something or finishes a turn you have not seen."",
+  "text: "Busy right now."",
+  "text: "No agent is busy right now."",
+  "text: "Finished a turn, waiting for its coordinator."",
+  "text: "Empty right now. A worker lands here when it finishes a turn and waits for its coordinator."",
+  "text: "Stopped with an open pull request."",
+  "text: "Empty right now. An agent lands here when it stops while one of its pull requests is still open."",
+  "text: "Every pull request it opened is merged or closed."",
+  "text: "Nothing finished in the last 24 hours."",
+  "text: "Finished a turn, waiting for your next message."",
+  "text: "No agent is waiting for your next message."",
+]
+`;

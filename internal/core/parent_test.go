@@ -78,6 +78,33 @@ func TestSpawnFieldsLinkWorkersOnTheBoard(t *testing.T) {
 	}
 }
 
+// A `codex exec` started from a Claude worker's terminal inherits that
+// terminal's id in its environment; the adapter gives a headless Codex
+// session no terminal, so the worker keeps the terminal's name and its
+// coordinator, and the exec is not a worker of anyone.
+func TestHeadlessCodexInAWorkersTerminalIsNotAWorker(t *testing.T) {
+	b := newTestBoard(t)
+	coord := busySession("coord", tNow)
+	coord.Name = "coordinator-a"
+	coord.SpawnedNames = []string{"worker-x"}
+	worker := busySession("w", tNow)
+	worker.Name = "" // matched only by its terminal's name
+	worker.TerminalID = termUUID
+	exec := busySession("e", tNow)
+	exec.Key = model.SessionKey{Tool: model.ToolCodex, ID: "e"}
+	exec.Name, exec.Headless = "Review the change", true
+	for _, s := range []model.SessionFact{coord, worker, exec} {
+		b.applySync(s)
+	}
+	b.applySync(model.TerminalFact{ID: termUUID, Name: "worker-x", HasAgent: true})
+	if c, ok := cardByID(t, b, "claude:w"); !ok || c.Agent.ParentCardID != "claude:coord" {
+		t.Errorf("worker: %v %+v", ok, c.Agent)
+	}
+	if c, ok := cardByID(t, b, "codex:e"); !ok || c.Agent.ParentCardID != "" {
+		t.Errorf("exec: %v %+v", ok, c.Agent)
+	}
+}
+
 // A source is ready when it is not present (nothing to wait for), when it
 // answers on demand (git, GitHub), or once its watcher reported SourceReady.
 func TestSourceReadiness(t *testing.T) {

@@ -30,8 +30,6 @@ func (s *slowRepos) Resolve(_ context.Context, folder string) (model.Repo, error
 	s.mu.Unlock()
 	return model.Repo{Root: folder, MainRoot: folder}, nil
 }
-func (s *slowRepos) Worktrees(context.Context, string) ([]model.Worktree, error) { return nil, nil }
-func (s *slowRepos) LocalBranches(context.Context, string) ([]string, error)     { return nil, nil }
 
 // A start that brings many sessions in many folders runs at most maxResolves
 // git lookups at once.

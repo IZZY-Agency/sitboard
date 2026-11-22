@@ -5,9 +5,10 @@ import Harness from './Harness.svelte';
 import Sheet from './CritterSheet.svelte';
 import { SCENARIOS } from './scenarios';
 import { CATCHUPS } from './catchup';
+import { LEFTOVERS } from './leftovers';
 import '../src/styles/fonts.css';
 import '../src/styles/tokens.css';
 import '../src/styles/base.css';
 
-mount(Harness, { target: document.getElementById('harness')!, props: { scenario: '', scenarios: SCENARIOS, live: false, catchup: CATCHUPS[0], catchups: CATCHUPS } });
+mount(Harness, { target: document.getElementById('harness')!, props: { scenario: '', scenarios: SCENARIOS, live: false, catchup: CATCHUPS[0], catchups: CATCHUPS, leftover: LEFTOVERS[0], leftovers: LEFTOVERS } });
 mount(Sheet, { target: document.getElementById('app')! });

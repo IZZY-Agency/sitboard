@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, setContext, tick } from 'svelte';
+  import { onMount, setContext, tick, untrack } from 'svelte';
   import { fade } from 'svelte/transition';
   import type { Card, GroupingMode, GroupingSetting } from './contract.gen';
   import type { Actions } from './data/actions';
@@ -16,8 +16,12 @@
   import { flash, ms, VIEW_MS } from './motion';
   import { createCatchupClient, type CatchupClient } from './data/catchup';
   import { CatchupState } from './data/catchup.svelte';
+  import { createLeftoversClient, type LeftoversClient } from './data/leftovers';
   import CatchupButton from './components/CatchupButton.svelte';
   import CatchupPanel, { type Refocus } from './components/CatchupPanel.svelte';
+  import SpendButton from './components/SpendButton.svelte';
+  import SpendPanel from './components/SpendPanel.svelte';
+  import { NOT_A_BILL, PENDING_NOTE, todayNote, todaySpoken, todayText, todayTitle } from './data/spend';
   import Header from './components/Header.svelte';
   import StatusBar from './components/StatusBar.svelte';
   import ActionNotice from './components/ActionNotice.svelte';
@@ -34,9 +38,10 @@
     feed,
     actions,
     catchup = createCatchupClient((...a) => fetch(...a)),
+    leftovers = createLeftoversClient((...a) => fetch(...a)),
     tick: every = 10_000,
     permission = browserPermission(),
-  }: { feed: Feed; actions: Actions; catchup?: CatchupClient; tick?: number; permission?: Permission } = $props();
+  }: { feed: Feed; actions: Actions; catchup?: CatchupClient; leftovers?: LeftoversClient; tick?: number; permission?: Permission } = $props();
 
   const board = new BoardState(() => actions);
   const cu = new CatchupState(() => catchup);
@@ -116,7 +121,7 @@
     const n = board.notice;
     if (!n) return '';
     if (n.kind === 'copy')
-      return `${n.why === 'no_agterm' ? 'agterm not found' : 'Not in agterm'}. Folder ${n.folder || 'unknown'}. Session ${n.name || 'unnamed'}.`;
+      return `${n.why === 'no_agterm' ? 'Not in tmux, agterm not found' : 'Not in agterm or tmux'}. Folder ${n.folder || 'unknown'}. Session ${n.name || 'unnamed'}.`;
     return `${n.what} failed: ${n.message}.`;
   });
   const said = $derived(announce || board.said);
@@ -129,6 +134,11 @@
     if (e.key === 'Escape' && board.notice) board.dismiss();
   }
   const ix = $derived(snap ? indexOf(snap) : null);
+  // The catch-up list drops the merge requests of a GitLab host that leaves.
+  $effect(() => {
+    const hosts = ix?.gitlabHosts;
+    if (hosts) untrack(() => cu.setGitlabHosts(hosts));
+  });
   // Header counts stay totals: top-level projects, whatever is selected.
   // The grouping is worked out once per snapshot and shared by everything below.
   const grp = $derived(snap ? groupingOf(snap) : null);
@@ -170,7 +180,7 @@
     panelTop = Math.max(0, Math.round(headerEl?.getBoundingClientRect().bottom ?? 0));
   }
   $effect(() => {
-    if (!catchupOpen) return;
+    if (!catchupOpen && !spendOpen) return;
     measure();
     window.addEventListener('scroll', measure, { passive: true });
     window.addEventListener('resize', measure);
@@ -181,8 +191,36 @@
   });
   const onBoard = $derived(new Set(snap ? snap.cards.map((c) => c.id) : []));
   const showCatchup = $derived(board.conn !== 'unauthorized' && board.conn !== 'outdated');
+  // Leftovers show private paths: a lost key from any poll (the board's or
+  // Catch-up's) or a page older than the server turns them off, and an open
+  // sheet goes at once.
+  const leftoversOn = $derived(showCatchup && cu.status !== 'unauthorized');
+
+  // Spend: today's estimate in the header, and the project × day panel. One
+  // panel is open at a time.
+  const SPEND_ID = 'spend-panel';
+  let spendOpen = $state(false);
+  let spendBtn = $state<HTMLButtonElement>();
+  const spendToday = $derived(snap ? todayText(snap.spend, now) : '');
+  const spendTodaySpoken = $derived(snap ? todaySpoken(snap.spend, now) : '');
+  const spendPending = $derived(snap?.spend.pending ?? false);
+  const spendTodayTitle = $derived.by(() => {
+    const head = (snap ? todayTitle(snap.spend, now) : '') || `Nothing used today. ${NOT_A_BILL}`;
+    return `${head}\n${spendPending ? `${PENDING_NOTE}\n` : ''}Today's use and the last 7 days, by project.`;
+  });
+  async function openSpend() {
+    catchupOpen = false;
+    spendOpen = true;
+    await tick();
+    document.getElementById(SPEND_ID)?.focus();
+  }
+  function closeSpend(refocus: Refocus) {
+    spendOpen = false;
+    if (refocus === 'button') spendBtn?.focus();
+  }
 
   async function openCatchup() {
+    spendOpen = false;
     catchupOpen = true;
     void cu.refresh();
     await tick();
@@ -217,6 +255,19 @@
   <div bind:this={headerEl}>
     <Header {view} onview={setView} agents={snap ? snap.cards.length : null} {projects} conn={board.conn} generatedAt={snap?.generatedAt ?? null} notify={notify.state} onnotify={() => void toggleNotify()}>
       {#snippet catchup()}
+        {#if showCatchup && snap}
+          <SpendButton
+            bind:button={spendBtn}
+            figure={spendToday}
+            spoken={spendTodaySpoken}
+            pending={spendPending}
+            note={snap ? todayNote(snap.spend, now) : ''}
+            title={spendTodayTitle}
+            open={spendOpen}
+            controls={SPEND_ID}
+            onclick={() => (spendOpen ? closeSpend('button') : void openSpend())}
+          />
+        {/if}
         {#if showCatchup}
           <CatchupButton
             bind:button={catchupBtn}
@@ -232,7 +283,10 @@
     </Header>
   </div>
   {#if catchupOpen && showCatchup}
-    <CatchupPanel id={CATCHUP_ID} {cu} {now} {onBoard} toggle={catchupBtn} top={panelTop} onclose={closeCatchup} onshowcard={(id) => void showCard(id)} />
+    <CatchupPanel id={CATCHUP_ID} {cu} {now} {onBoard} gitlabHosts={ix?.gitlabHosts ?? []} toggle={catchupBtn} top={panelTop} onclose={closeCatchup} onshowcard={(id) => void showCard(id)} />
+  {/if}
+  {#if spendOpen && showCatchup && snap}
+    <SpendPanel id={SPEND_ID} spend={snap.spend} {now} toggle={spendBtn} top={panelTop} onclose={closeSpend} />
   {/if}
 
   {#if frozen && snap && board.conn !== 'unauthorized' && board.conn !== 'outdated'}
@@ -282,7 +336,7 @@
     {/if}
   </div>
 
-  <StatusBar snapshot={board.conn === 'unauthorized' ? null : snap} {onauto} />
+  <StatusBar snapshot={board.conn === 'unauthorized' ? null : snap} {onauto} leftovers={leftoversOn ? leftovers : undefined} />
 
   <div class="visually-hidden" role="status" aria-live="polite">{said}</div>
   {#if board.notice}

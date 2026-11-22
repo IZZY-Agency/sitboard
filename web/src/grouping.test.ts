@@ -79,7 +79,7 @@ describe('tiles (the default)', () => {
     expect(qa('.lanes .row:not(.headrow) .pname').map(text)).toEqual(['tool']);
     expect(text(q('.overview .label'))).toBe('tool');
     await click(qa('nav[aria-label="View"] button')[2]); // Teams
-    expect(qa('button.trow')).toHaveLength(1);
+    expect(qa('.trow[data-card]')).toHaveLength(1);
     await click(qa('nav[aria-label="View"] button')[0]);
     await click(tile('tool'));
     expect(cards()).toBe(7);

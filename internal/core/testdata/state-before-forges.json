@@ -1,0 +1,17 @@
+{
+  "version": 2,
+  "seen": {
+    "claude:11111111-2222-3333-4444-555555555555": "2026-11-17T08:00:00Z"
+  },
+  "catchupMarker": "2026-11-17T09:00:00Z",
+  "umbrellas": {
+    "/home/dev/work": "2026-11-17T09:30:00Z"
+  },
+  "grouping": {
+    "/home/dev/side": "never"
+  },
+  "catchupUnread": {
+    "8db35d92f07f0172fcbe5e36d8d90f0f": "2026-11-17T07:00:00Z",
+    "82f467d2c4e984433654e0a37f22a5a1": "2026-11-17T06:00:00Z"
+  }
+}

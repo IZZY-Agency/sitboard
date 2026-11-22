@@ -38,7 +38,7 @@ func kindsAt(c contract.Catchup) []string {
 
 func prAt(n int, state model.PRState, opened, closed time.Time) model.PullRequest {
 	return model.PullRequest{
-		Repo: exRepo, Number: n, Title: fmt.Sprintf("Placeholder %d", n),
+		Repo: model.GitHubRepo(exRepo), Number: n, Title: fmt.Sprintf("Placeholder %d", n),
 		URL:   fmt.Sprintf("https://github.com/example-org/example-repo/pull/%d", n),
 		State: state, Checks: model.ChecksPassing, OpenedAt: opened, ClosedAt: closed,
 	}
@@ -107,7 +107,7 @@ func TestCatchupOldMarkerStopsAtTheWindow(t *testing.T) {
 // name, the project id the board uses and the card's title; never more.
 func TestCatchupItemNamesTheCardAndProject(t *testing.T) {
 	e := newEnv(t)
-	e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Slug: exRepo, Branch: model.Of("main")})
+	e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Remote: model.GitHubRepo(exRepo), Branch: model.Of("main")})
 	s := session("s1", model.StatusFinished, tNow)
 	s.TurnEnds = []time.Time{tNow.Add(-time.Minute)}
 	e.board.applySync(s)
@@ -128,7 +128,7 @@ func TestCatchupItemNamesTheCardAndProject(t *testing.T) {
 // before the marker only as merged. Newest first.
 func TestCatchupListsOpenedAndMergedPullRequests(t *testing.T) {
 	e := newEnv(t)
-	e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Slug: exRepo, Branch: model.Of("main")})
+	e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Remote: model.GitHubRepo(exRepo), Branch: model.Of("main")})
 	e.prs.prs = []model.PullRequest{
 		prAt(1, model.PRStateOpen, tNow.Add(-50*time.Minute), time.Time{}),
 		prAt(2, model.PRStateMerged, tNow.Add(-40*time.Minute), tNow.Add(-10*time.Minute)),
@@ -136,7 +136,7 @@ func TestCatchupListsOpenedAndMergedPullRequests(t *testing.T) {
 		prAt(4, model.PRStateMerged, tNow.Add(-9*24*time.Hour), tNow.Add(-5*time.Minute)),
 	}
 	s := session("s1", model.StatusFinished, tNow)
-	s.CreatedPRs = []model.PRRef{{Repo: exRepo, Number: 1}, {Repo: exRepo, Number: 2}, {Repo: exRepo, Number: 3}, {Repo: exRepo, Number: 4}}
+	s.CreatedPRs = []model.PRRef{{Repo: model.GitHubRepo(exRepo), Number: 1}, {Repo: model.GitHubRepo(exRepo), Number: 2}, {Repo: model.GitHubRepo(exRepo), Number: 3}, {Repo: model.GitHubRepo(exRepo), Number: 4}}
 	e.board.applySync(s)
 	e.board.tick()
 
@@ -160,11 +160,11 @@ func TestCatchupListsOpenedAndMergedPullRequests(t *testing.T) {
 // Two sessions that both list one pull request give one item per kind.
 func TestCatchupListsAPullRequestOnce(t *testing.T) {
 	e := newEnv(t)
-	e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Slug: exRepo, Branch: model.Of("main")})
+	e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Remote: model.GitHubRepo(exRepo), Branch: model.Of("main")})
 	e.prs.prs = []model.PullRequest{prAt(7, model.PRStateOpen, tNow.Add(-time.Hour), time.Time{})}
 	for _, id := range []string{"s1", "s2"} {
 		s := session(id, model.StatusFinished, tNow)
-		s.CreatedPRs = []model.PRRef{{Repo: exRepo, Number: 7}}
+		s.CreatedPRs = []model.PRRef{{Repo: model.GitHubRepo(exRepo), Number: 7}}
 		e.board.applySync(s)
 	}
 	e.board.tick()
@@ -194,10 +194,10 @@ func TestCatchupKeepsWhatAnEndedSessionDid(t *testing.T) {
 // still reaches catch-up, because its pull requests are still looked up.
 func TestCatchupSeesAMergeAfterTheSessionEnded(t *testing.T) {
 	e := newEnv(t)
-	e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Slug: exRepo, Branch: model.Of("main")})
+	e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Remote: model.GitHubRepo(exRepo), Branch: model.Of("main")})
 	e.prs.prs = []model.PullRequest{prAt(9, model.PRStateOpen, tNow.Add(-3*time.Hour), time.Time{})}
 	s := session("s1", model.StatusFinished, tNow.Add(-2*time.Hour))
-	s.CreatedPRs = []model.PRRef{{Repo: exRepo, Number: 9}}
+	s.CreatedPRs = []model.PRRef{{Repo: model.GitHubRepo(exRepo), Number: 9}}
 	e.board.applySync(s)
 	e.board.tick()
 	s.Live, s.Ended, s.EndedAt = model.Of(false), true, tNow.Add(-time.Hour)
@@ -221,16 +221,16 @@ func TestCatchupSeesAMergeAfterTheSessionEnded(t *testing.T) {
 // a pull request already merged is not asked about again.
 func TestEndedSessionsAddNoGitHubCalls(t *testing.T) {
 	e := newEnv(t)
-	e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Slug: exRepo, Branch: model.Of("main")})
+	e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Remote: model.GitHubRepo(exRepo), Branch: model.Of("main")})
 	e.prs.prs = []model.PullRequest{
 		prAt(1, model.PRStateOpen, tNow.Add(-time.Hour), time.Time{}),
 		prAt(2, model.PRStateOpen, tNow.Add(-time.Hour), time.Time{}),
 		prAt(3, model.PRStateMerged, tNow.Add(-time.Hour), tNow.Add(-time.Minute)),
 	}
 	live := session("s1", model.StatusBusy, tNow)
-	live.CreatedPRs = []model.PRRef{{Repo: exRepo, Number: 1}}
+	live.CreatedPRs = []model.PRRef{{Repo: model.GitHubRepo(exRepo), Number: 1}}
 	ended := session("s2", model.StatusFinished, tNow)
-	ended.CreatedPRs = []model.PRRef{{Repo: exRepo, Number: 2}, {Repo: exRepo, Number: 3}}
+	ended.CreatedPRs = []model.PRRef{{Repo: model.GitHubRepo(exRepo), Number: 2}, {Repo: model.GitHubRepo(exRepo), Number: 3}}
 	ended.Live, ended.Ended, ended.EndedAt = model.Of(false), true, tNow.Add(-time.Minute)
 	e.board.applySync(live)
 	e.board.applySync(ended)
@@ -253,10 +253,10 @@ func TestEndedSessionsAddNoGitHubCalls(t *testing.T) {
 // An ended session is looked up for 7 days after it ended, then no more.
 func TestEndedSessionsAreLookedUpForSevenDays(t *testing.T) {
 	e := newEnv(t)
-	e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Slug: exRepo, Branch: model.Of("main")})
+	e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Remote: model.GitHubRepo(exRepo), Branch: model.Of("main")})
 	e.prs.prs = []model.PullRequest{prAt(1, model.PRStateOpen, tNow.Add(-time.Hour), time.Time{})}
 	s := session("s1", model.StatusFinished, tNow)
-	s.CreatedPRs = []model.PRRef{{Repo: exRepo, Number: 1}}
+	s.CreatedPRs = []model.PRRef{{Repo: model.GitHubRepo(exRepo), Number: 1}}
 	s.Live, s.Ended, s.EndedAt = model.Of(false), true, tNow.Add(-time.Minute)
 	e.board.applySync(s)
 	e.board.tick()
@@ -302,13 +302,13 @@ func TestCatchupRespectsRoots(t *testing.T) {
 // The answer has exactly the fields of the contract's golden file.
 func TestCatchupMatchesContractGoldenShape(t *testing.T) {
 	e := newEnv(t)
-	e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Slug: exRepo, Branch: model.Of("main")})
+	e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Remote: model.GitHubRepo(exRepo), Branch: model.Of("main")})
 	e.prs.prs = []model.PullRequest{prAt(1, model.PRStateMerged, tNow.Add(-time.Hour), tNow.Add(-time.Minute))}
 	if err := e.state.SetCatchupMarker(tNow.Add(-2 * time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	s := session("s1", model.StatusFinished, tNow)
-	s.CreatedPRs = []model.PRRef{{Repo: exRepo, Number: 1}}
+	s.CreatedPRs = []model.PRRef{{Repo: model.GitHubRepo(exRepo), Number: 1}}
 	s.Artifacts = []model.ArtifactRef{{URL: "https://claude.ai/artifact/exampleArtifact0001", Title: "Placeholder", PublishedAt: tNow.Add(-time.Minute)}}
 	e.board.applySync(s)
 	e.board.tick()
@@ -524,10 +524,10 @@ func TestCatchupListsPublishedArtifacts(t *testing.T) {
 // older than a turn the owner already marked read; it must still be shown.
 func TestCatchupShowsAMergeGitHubReportedLate(t *testing.T) {
 	e := newEnv(t)
-	e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Slug: exRepo, Branch: model.Of("main")})
+	e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Remote: model.GitHubRepo(exRepo), Branch: model.Of("main")})
 	e.prs.prs = []model.PullRequest{prAt(9, model.PRStateOpen, tNow.Add(-3*time.Hour), time.Time{})}
 	worker := session("w", model.StatusFinished, tNow.Add(-2*time.Hour))
-	worker.CreatedPRs = []model.PRRef{{Repo: exRepo, Number: 9}}
+	worker.CreatedPRs = []model.PRRef{{Repo: model.GitHubRepo(exRepo), Number: 9}}
 	e.board.applySync(worker)
 	e.board.tick() // pull request 9 known as open
 	// The coordinator merges it at now+10s; its own turn ends at now+20s.
@@ -554,10 +554,10 @@ func TestCatchupShowsAMergeGitHubReportedLate(t *testing.T) {
 // reports once it is back is shown, by its own times.
 func TestCatchupShowsWhatGitHubReportsAfterAnOutage(t *testing.T) {
 	e := newEnv(t)
-	e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Slug: exRepo, Branch: model.Of("main")})
+	e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Remote: model.GitHubRepo(exRepo), Branch: model.Of("main")})
 	e.prs.err = errors.New("github: gh failed")
 	w := session("w", model.StatusFinished, tNow)
-	w.CreatedPRs = []model.PRRef{{Repo: exRepo, Number: 4}}
+	w.CreatedPRs = []model.PRRef{{Repo: model.GitHubRepo(exRepo), Number: 4}}
 	e.board.applySync(w)
 	e.clock.Set(tNow.Add(5 * time.Minute))
 	e.board.tick()
@@ -679,11 +679,11 @@ func TestMarkCatchupReadNeverCoversMoreThanTheNewestList(t *testing.T) {
 func TestCatchupCreditsASharedPullRequestStably(t *testing.T) {
 	for range 20 {
 		e := newEnv(t)
-		e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Slug: exRepo, Branch: model.Of("main")})
+		e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Remote: model.GitHubRepo(exRepo), Branch: model.Of("main")})
 		e.prs.prs = []model.PullRequest{prAt(7, model.PRStateOpen, tNow.Add(-time.Hour), time.Time{})}
 		for _, id := range []string{"s9", "s1", "s5", "s3"} {
 			s := session(id, model.StatusFinished, tNow)
-			s.CreatedPRs = []model.PRRef{{Repo: exRepo, Number: 7}}
+			s.CreatedPRs = []model.PRRef{{Repo: model.GitHubRepo(exRepo), Number: 7}}
 			e.board.applySync(s)
 		}
 		e.board.tick()
@@ -729,14 +729,14 @@ func TestCatchupTotalCountsWhatTheCapLeftOut(t *testing.T) {
 // passed on only when it is the one built for its own repo and number.
 func TestCatchupCleansAHostilePullRequest(t *testing.T) {
 	e := newEnv(t)
-	e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Slug: exRepo, Branch: model.Of("main")})
+	e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Remote: model.GitHubRepo(exRepo), Branch: model.Of("main")})
 	bad := prAt(3, model.PRStateOpen, tNow.Add(-time.Hour), time.Time{})
 	bad.Title = "\u202Eevil\x1b[31m title"
 	bad.URL = "javascript:alert(1)"
 	good := prAt(4, model.PRStateOpen, tNow.Add(-2*time.Hour), time.Time{})
 	e.prs.prs = []model.PullRequest{bad, good}
 	s := session("s1", model.StatusFinished, tNow)
-	s.CreatedPRs = []model.PRRef{{Repo: exRepo, Number: 3}, {Repo: exRepo, Number: 4}}
+	s.CreatedPRs = []model.PRRef{{Repo: model.GitHubRepo(exRepo), Number: 3}, {Repo: model.GitHubRepo(exRepo), Number: 4}}
 	e.board.applySync(s)
 	e.board.tick()
 	c := catchup(t, e.board)
@@ -773,7 +773,7 @@ func TestCatchupForgetsLearnedItemsOutsideTheWindow(t *testing.T) {
 // through a lookup (only valid repos are asked, and answers for another repo
 // are dropped); this is the second line.
 func TestPagePRCleansTheRepoName(t *testing.T) {
-	p := pagePR(model.PullRequest{Repo: "\u202Eexample-org/x\x1b[31m", Number: 1, Title: "t"})
+	p := pagePR(model.PullRequest{Repo: model.GitHubRepo("\u202Eexample-org/x\x1b[31m"), Number: 1, Title: "t"})
 	if strings.ContainsAny(p.Repo, "\u202E\x1b") || p.URL != "" {
 		t.Fatalf("passed on %+v", p)
 	}
@@ -783,10 +783,10 @@ func TestPagePRCleansTheRepoName(t *testing.T) {
 // minute: about 1,000 calls in 7 days instead of 10,000.
 func TestEndedOnlyRepoIsAskedEveryTenMinutes(t *testing.T) {
 	e := newEnv(t)
-	e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Slug: exRepo, Branch: model.Of("main")})
+	e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Remote: model.GitHubRepo(exRepo), Branch: model.Of("main")})
 	e.prs.prs = []model.PullRequest{prAt(1, model.PRStateOpen, tNow.Add(-time.Hour), time.Time{})}
 	s := session("s1", model.StatusFinished, tNow)
-	s.CreatedPRs = []model.PRRef{{Repo: exRepo, Number: 1}}
+	s.CreatedPRs = []model.PRRef{{Repo: model.GitHubRepo(exRepo), Number: 1}}
 	s.Live, s.Ended, s.EndedAt = model.Of(false), true, tNow
 	e.board.applySync(s)
 	for m := 0; m <= 25; m++ {
@@ -803,9 +803,9 @@ func TestEndedOnlyRepoIsAskedEveryTenMinutes(t *testing.T) {
 func TestEndedSessionsStopAskingWhatGitHubDidNotFind(t *testing.T) {
 	t.Run("number", func(t *testing.T) {
 		e := newEnv(t)
-		e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Slug: exRepo, Branch: model.Of("main")})
+		e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Remote: model.GitHubRepo(exRepo), Branch: model.Of("main")})
 		s := session("s1", model.StatusFinished, tNow)
-		s.CreatedPRs = []model.PRRef{{Repo: exRepo, Number: 404}}
+		s.CreatedPRs = []model.PRRef{{Repo: model.GitHubRepo(exRepo), Number: 404}}
 		s.Live, s.Ended, s.EndedAt = model.Of(false), true, tNow
 		e.board.applySync(s)
 		e.board.tick()
@@ -817,10 +817,10 @@ func TestEndedSessionsStopAskingWhatGitHubDidNotFind(t *testing.T) {
 	})
 	t.Run("repo", func(t *testing.T) {
 		e := newEnv(t)
-		e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Slug: exRepo, Branch: model.Of("main")})
+		e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Remote: model.GitHubRepo(exRepo), Branch: model.Of("main")})
 		e.prs.err = fmt.Errorf("github: %w", source.ErrRepoNotFound)
 		s := session("s1", model.StatusFinished, tNow)
-		s.CreatedPRs = []model.PRRef{{Repo: exRepo, Number: 1}, {Repo: exRepo, Number: 2}}
+		s.CreatedPRs = []model.PRRef{{Repo: model.GitHubRepo(exRepo), Number: 1}, {Repo: model.GitHubRepo(exRepo), Number: 2}}
 		s.Live, s.Ended, s.EndedAt = model.Of(false), true, tNow
 		e.board.applySync(s)
 		e.board.tick()
@@ -834,9 +834,9 @@ func TestEndedSessionsStopAskingWhatGitHubDidNotFind(t *testing.T) {
 	})
 	t.Run("a live session still asks", func(t *testing.T) {
 		e := newEnv(t)
-		e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Slug: exRepo, Branch: model.Of("main")})
+		e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Remote: model.GitHubRepo(exRepo), Branch: model.Of("main")})
 		s := session("s1", model.StatusFinished, tNow)
-		s.CreatedPRs = []model.PRRef{{Repo: exRepo, Number: 404}}
+		s.CreatedPRs = []model.PRRef{{Repo: model.GitHubRepo(exRepo), Number: 404}}
 		e.board.applySync(s)
 		e.board.tick()
 		e.clock.Set(tNow.Add(githubEvery + time.Second))
@@ -917,14 +917,14 @@ func TestLiveReposAreAskedFirst(t *testing.T) {
 	e := newEnv(t)
 	endedAt := func(id, repo string, at time.Time) model.SessionFact {
 		s := session(id, model.StatusFinished, at)
-		s.CreatedPRs = []model.PRRef{{Repo: repo, Number: 1}}
+		s.CreatedPRs = []model.PRRef{{Repo: model.GitHubRepo(repo), Number: 1}}
 		s.Live, s.Ended, s.EndedAt = model.Of(false), true, at
 		return s
 	}
 	e.board.applySync(endedAt("e1", "example-org/aaa", tNow.Add(-3*time.Hour)))
 	e.board.applySync(endedAt("e2", "example-org/bbb", tNow.Add(-time.Hour)))
 	live := session("l1", model.StatusBusy, tNow)
-	live.CreatedPRs = []model.PRRef{{Repo: "example-org/zzz", Number: 1}}
+	live.CreatedPRs = []model.PRRef{{Repo: model.GitHubRepo("example-org/zzz"), Number: 1}}
 	e.board.applySync(live)
 	e.board.tick()
 	var order []string
@@ -942,7 +942,7 @@ func TestEndedOnlyReposAreCapped(t *testing.T) {
 	e := newEnv(t)
 	for i := range maxEndedRepos + 5 {
 		s := session(fmt.Sprintf("e%02d", i), model.StatusFinished, tNow)
-		s.CreatedPRs = []model.PRRef{{Repo: fmt.Sprintf("example-org/r%02d", i), Number: 1}}
+		s.CreatedPRs = []model.PRRef{{Repo: model.GitHubRepo(fmt.Sprintf("example-org/r%02d", i)), Number: 1}}
 		// The newest have the highest numbers: name order is not age order.
 		s.Live, s.Ended, s.EndedAt = model.Of(false), true, tNow.Add(-time.Duration(maxEndedRepos+5-i)*time.Minute)
 		e.board.applySync(s)
@@ -1019,10 +1019,10 @@ func TestCatchupUnreadSurvivesARestartMidBacklog(t *testing.T) {
 // unread after a restart.
 func TestCatchupLateMergeSurvivesARestart(t *testing.T) {
 	e := newEnv(t)
-	e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Slug: exRepo, Branch: model.Of("main")})
+	e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Remote: model.GitHubRepo(exRepo), Branch: model.Of("main")})
 	e.prs.prs = []model.PullRequest{prAt(9, model.PRStateOpen, tNow.Add(-3*time.Hour), time.Time{})}
 	worker := session("w", model.StatusFinished, tNow.Add(-2*time.Hour))
-	worker.CreatedPRs = []model.PRRef{{Repo: exRepo, Number: 9}}
+	worker.CreatedPRs = []model.PRRef{{Repo: model.GitHubRepo(exRepo), Number: 9}}
 	e.board.applySync(worker)
 	e.board.tick()
 	e.prs.mu.Lock()

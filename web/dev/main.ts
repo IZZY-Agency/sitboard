@@ -5,6 +5,7 @@ import App from '../src/App.svelte';
 import Harness from './Harness.svelte';
 import { initial, SCENARIOS, step, type Scenario } from './scenarios';
 import { CATCHUPS, catchupClient, type CatchupCase } from './catchup';
+import { LEFTOVERS, leftoversClient, leftoversSummary, type LeftoversCase } from './leftovers';
 import { saveSwitch, type Permission } from '../src/data/notify';
 import type { Feed, FeedState } from '../src/data/client';
 import type { Actions } from '../src/data/actions';
@@ -18,7 +19,10 @@ const sc = (SCENARIOS as readonly string[]).includes(params.get('s') ?? '') ? (p
 const liveMode = params.get('live') === '1';
 const cu = (CATCHUPS as readonly string[]).includes(params.get('c') ?? '') ? (params.get('c') as CatchupCase) : 'few';
 
+const lc = (LEFTOVERS as readonly string[]).includes(params.get('l') ?? '') ? (params.get('l') as LeftoversCase) : 'few';
+
 let current = initial(sc);
+if (current) current.leftovers = leftoversSummary(lc, current.projects);
 let push: ((s: FeedState) => void) | null = null;
 
 const feed: Feed = {
@@ -41,8 +45,9 @@ function publish(s: Snapshot) {
 const actions: Actions = {
   async jump(id) {
     const c = current?.cards.find((x) => x.id === id);
-    if (!c?.agent.terminalId) return { ok: false, kind: 'no_terminal' };
+    if (!c || c.agent.jump === 'none') return { ok: false, kind: 'no_terminal' };
     if (params.get('fail') === '1') return { ok: false, kind: 'failed', message: 'sitboard answered 500' };
+    if (params.get('fail') === 'tmux' && c.agent.jump === 'tmux') return { ok: false, kind: 'failed', message: 'no tmux client is attached' };
     return { ok: true };
   },
   // The server forgets the grouping: its parts become top-level projects, and
@@ -96,7 +101,7 @@ const actions: Actions = {
   },
 };
 
-mount(Harness, { target: document.getElementById('harness')!, props: { scenario: sc, scenarios: SCENARIOS, live: liveMode, catchup: cu, catchups: CATCHUPS } });
+mount(Harness, { target: document.getElementById('harness')!, props: { scenario: sc, scenarios: SCENARIOS, live: liveMode, catchup: cu, catchups: CATCHUPS, leftover: lc, leftovers: LEFTOVERS } });
 // ?n= sets the Notify switch's state for pictures: off, asking (click it), on,
 // denied or none. A stand-in for the browser's permission; no notification is
 // ever shown by the harness.
@@ -112,4 +117,4 @@ const permission: Permission | undefined = n
 if (n === 'on') saveSwitch(true);
 else if (n) saveSwitch(false);
 
-mount(App, { target: document.getElementById('app')!, props: { feed, actions, catchup: catchupClient(cu), ...(permission ? { permission } : {}) } });
+mount(App, { target: document.getElementById('app')!, props: { feed, actions, catchup: catchupClient(cu), leftovers: leftoversClient(lc, current?.projects ?? []), ...(permission ? { permission } : {}) } });

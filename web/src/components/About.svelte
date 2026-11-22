@@ -7,6 +7,7 @@
   import Mark from './Mark.svelte';
   import type { Build } from '../contract.gen';
   import { LINKS, MORE_LINKS, UPDATE_COMMAND, commitText, platformText, versionText } from '../data/about';
+  import { privacyLine } from '../data/words';
   import { ms, VIEW_MS } from '../motion';
 
   /** Where focus goes on close: back to the button, or left where it is. */
@@ -15,11 +16,14 @@
   let {
     id,
     build,
+    reads = { github: true, gitlab: false },
     toggle,
     onclose,
   }: {
     id: string;
     build: Build | null;
+    /** The forges the server reads (sourceRead): the privacy line names them. */
+    reads?: { github: boolean; gitlab: boolean };
     toggle: HTMLElement | undefined;
     onclose: (refocus: Refocus) => void;
   } = $props();
@@ -109,7 +113,7 @@
     </dl>
   {/if}
 
-  <p class="privacy">Runs only on this machine. Nothing is sent anywhere; GitHub is read through your own gh.</p>
+  <p class="privacy">{privacyLine(reads)}</p>
 
   <section aria-labelledby="{id}-update">
     <h3 id="{id}-update">Update</h3>

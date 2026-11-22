@@ -4,10 +4,7 @@ import (
 	"cmp"
 	"context"
 	"errors"
-	"regexp"
 	"slices"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/IZZY-Agency/sitboard/internal/contract"
@@ -27,12 +24,16 @@ const (
 	// a small part of GitHub's hourly limit, and keeps a first round short.
 	maxEndedRepos = 20
 	lookupTimeout = 15 * time.Second // the adapter gives up after 10 s; this is a backstop
+	// hostStopGrace bounds how long a stopping Run waits for the GitLab
+	// host checks and probe it called off (their ctx ended) to return; they
+	// apply nothing after the stop. Shorter than sitboard's own wait for Run.
+	hostStopGrace = time.Second
 )
 
 // Run is the core's clock: every 10 s it re-evaluates the time-based rules,
-// and once a minute it asks GitHub about the pull requests of repos with live
-// work. A new pull request ref is looked up at once. Run returns nil when ctx
-// ends.
+// and once a minute it asks GitHub and GitLab about the pull and merge
+// requests of repos with live work. A new ref is looked up at once. Run
+// returns nil when ctx ends.
 func (b *Board) Run(ctx context.Context) error {
 	defer b.markClosed()
 	tick := time.NewTicker(tickEvery)
@@ -42,11 +43,13 @@ func (b *Board) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			b.learnTick() // what arrived since the last tick, before the store closes
+			b.markClosed()
+			b.waitHostChecks(hostStopGrace)
 			return nil
 		case <-tick.C:
 			b.tickCtx(ctx)
 		case <-b.refreshCh:
-			b.refreshGitHub(ctx, false)
+			b.refreshForges(ctx, false)
 		}
 	}
 }
@@ -66,9 +69,48 @@ func (b *Board) markClosed() {
 	b.mu.Unlock()
 }
 
+// waitHostChecks waits for the host checks and probes in flight, at most d.
+// Callers make sure none starts any more (markClosed).
+func (b *Board) waitHostChecks(d time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		b.hostChecks.Wait()
+		close(done)
+	}()
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-done:
+	case <-t.C:
+	}
+}
+
 func (b *Board) tick() {
+	n := b.decided()
 	b.tickCtx(context.Background())
-	b.resolving.Wait()
+	b.settle(n)
+}
+
+// settle waits for the git lookups and GitLab host checks in flight; when a
+// host check answered since decided was n, it runs the refresh that answer
+// asks for, as Run would. Tests only.
+func (b *Board) settle(n int) {
+	for range 4 {
+		b.resolving.Wait()
+		b.hostChecks.Wait()
+		m := b.decided()
+		if m == n {
+			return
+		}
+		n = m
+		b.refreshForges(context.Background(), false)
+	}
+}
+
+func (b *Board) decided() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.glDecided
 }
 
 func (b *Board) tickCtx(ctx context.Context) {
@@ -86,12 +128,13 @@ func (b *Board) tickCtx(ctx context.Context) {
 		}
 		b.resolved = now
 	}
+	b.startLeftoversLocked(ctx, now)
 	b.rebuildLocked()
 	b.mu.Unlock()
 	b.flushSeen()
 	b.flushUmbrellas()
 	b.learnTick()
-	b.refreshGitHub(ctx, true)
+	b.refreshForges(ctx, true)
 }
 
 func (b *Board) kickRefresh() {
@@ -101,51 +144,74 @@ func (b *Board) kickRefresh() {
 	}
 }
 
-// markPendingLocked flags the repo of any pull request ref or Codex branch
-// never asked about, and reports whether a lookup should start now. Callers
-// hold b.mu.
+// markPendingLocked flags the repo of any pull request ref never asked about,
+// of a session lookups ask for, and reports whether a lookup should start
+// now: also when a GitLab ref's host was never asked about (the refresh
+// starts its check). Callers hold b.mu.
 func (b *Board) markPendingLocked(s model.SessionFact) bool {
+	if !b.lookupSessionLocked(s) {
+		return false
+	}
 	kick := false
-	flag := func(repo, ask string) {
-		if !validRepo(repo) || b.asked[ask] || b.pending[repo] {
-			return
-		}
-		b.pending[repo] = true
-		kick = true
-	}
 	for _, ref := range s.CreatedPRs {
-		flag(ref.Repo, askKey(ref.Repo, strconv.Itoa(ref.Number)))
-	}
-	if s.Key.Tool == model.ToolCodex {
-		if r := b.repoLocked(s.Folder); r.Slug != "" && r.Branch.OK {
-			flag(r.Slug, askKey(r.Slug, "branch:"+r.Branch.V))
+		if _, decided := b.glHosts[ref.Repo.Host]; ref.Repo.Forge == model.ForgeGitLab && ref.Repo.Valid() && !decided && !b.gitlabOffLocked() {
+			kick = true
 		}
+		if b.providerFor(ref.Repo) == nil || b.asked[ref] || b.pending[ref.Repo] {
+			continue
+		}
+		b.pending[ref.Repo] = true
+		kick = true
 	}
 	return kick
 }
 
-func askKey(repo, what string) string { return repo + "\x00" + what }
-
-// lookupReq is what to ask GitHub about one repo.
-type lookupReq struct {
-	numbers  []int
-	branches []string
-	live     bool      // a session that has not ended asks about this repo
-	newest   time.Time // when the newest ended session asking about it ended
+// providerFor is the provider that answers for repo's forge, or nil when
+// repo is not Valid, its forge is switched off or has no provider, or it is
+// on a GitLab host lookups may not go to (not one glab is logged in to,
+// gitlab.com included, or GitLab under a subfolder there): its refs are kept
+// but never looked up, and never shown. Callers hold b.mu.
+func (b *Board) providerFor(repo model.ForgeRepo) source.PRProvider {
+	if !repo.Valid() {
+		return nil
+	}
+	switch repo.Forge {
+	case model.ForgeGitHub:
+		if b.opts.PRs != nil && !b.githubOffLocked() {
+			return b.opts.PRs
+		}
+	case model.ForgeGitLab:
+		if !b.gitlabOffLocked() && b.glHosts[repo.Host].ok {
+			return b.opts.GitLab
+		}
+	}
+	return nil
 }
 
-// refreshGitHub looks up pull requests for repos with live work: those due
-// (last asked a minute ago or more) when periodic is set, plus any repo with
-// refs never looked up. Calls to gh run outside the lock.
-func (b *Board) refreshGitHub(ctx context.Context, periodic bool) {
-	if b.opts.PRs == nil {
+// lookupReq is what to ask a forge about one repo.
+type lookupReq struct {
+	p       source.PRProvider // providerFor(repo), taken under b.mu
+	numbers []int
+	live    bool      // a session that has not ended asks about this repo
+	newest  time.Time // when the newest ended session asking about it ended
+}
+
+// refreshForges looks up pull and merge requests for repos with live work:
+// those due (last asked a minute ago or more) when periodic is set, plus any
+// repo with refs never looked up. The checks of GitLab hosts that are due
+// start in the background; their answers ask for another refresh. Calls to
+// gh and glab run outside the lock.
+func (b *Board) refreshForges(ctx context.Context, periodic bool) {
+	if b.opts.PRs == nil && b.opts.GitLab == nil {
 		return
 	}
 	now := b.now()
 	b.mu.Lock()
-	if b.githubOffLocked() {
-		b.mu.Unlock()
-		return
+	b.startHostChecksLocked(ctx)
+	b.startReprobeLocked(ctx)
+	lineChanged := b.refreshGitLabLineLocked()
+	if lineChanged {
+		b.rebuildLocked()
 	}
 	reqs := b.lookupsLocked()
 	for repo, req := range reqs {
@@ -160,14 +226,17 @@ func (b *Board) refreshGitHub(ctx context.Context, periodic bool) {
 		}
 	}
 	b.mu.Unlock()
+	if lineChanged {
+		b.flushSeen()
+	}
 
 	// Repos with live work first, then the ones only ended sessions ask
 	// about, newest first: live cards never wait behind the backlog.
-	repos := make([]string, 0, len(reqs))
+	repos := make([]model.ForgeRepo, 0, len(reqs))
 	for r := range reqs {
 		repos = append(repos, r)
 	}
-	slices.SortFunc(repos, func(x, y string) int {
+	slices.SortFunc(repos, func(x, y model.ForgeRepo) int {
 		a, c := reqs[x], reqs[y]
 		if a.live != c.live {
 			if a.live {
@@ -175,27 +244,58 @@ func (b *Board) refreshGitHub(ctx context.Context, periodic bool) {
 			}
 			return 1
 		}
-		return cmp.Or(c.newest.Compare(a.newest), cmp.Compare(x, y))
+		return cmp.Or(c.newest.Compare(a.newest), cmp.Compare(x.Key(), y.Key()))
 	})
 	for _, repo := range repos {
+		if ctx.Err() != nil {
+			return
+		}
 		req := reqs[repo]
+		b.mu.Lock()
+		allowed := b.providerFor(repo) != nil // a host check may have said no meanwhile
+		st := b.hostStampLocked(repo.Host)
+		b.mu.Unlock()
+		if !allowed {
+			continue
+		}
 		lctx, cancel := context.WithTimeout(ctx, lookupTimeout)
-		found, err := b.opts.PRs.Lookup(lctx, repo, req.numbers, req.branches)
+		found, err := req.p.Lookup(lctx, repo, req.numbers, nil)
 		cancel()
 		b.mu.Lock()
+		if ctx.Err() != nil || b.closed {
+			b.mu.Unlock()
+			return
+		}
+		if repo.Forge == model.ForgeGitLab && !b.hostCurrentLocked(ctx, repo.Host, st) {
+			// The host was purged, switched off or left alone meanwhile:
+			// what this older lookup learned brings none of it back.
+			b.mu.Unlock()
+			continue
+		}
+		if repo.Forge == model.ForgeGitLab && errors.Is(err, source.ErrNotChecked) {
+			// The provider's yes for the host ran out, so it made no call:
+			// the host's background check renews it (startHostChecksLocked),
+			// and its answer asks for the refresh that runs this lookup.
+			b.pending[repo] = true
+			b.mu.Unlock()
+			continue
+		}
 		b.lookedUp[repo] = now
 		delete(b.pending, repo)
 		for _, n := range req.numbers {
-			b.asked[askKey(repo, strconv.Itoa(n))] = true
-		}
-		for _, br := range req.branches {
-			b.asked[askKey(repo, "branch:"+br)] = true
+			b.asked[model.PRRef{Repo: repo, Number: n}] = true
 		}
 		switch {
 		case err == nil:
 			delete(b.goneRepos, repo)
 			b.noteMissingLocked(repo, req.numbers, found)
-			b.storePRsLocked(repo, req, found)
+			b.storePRsLocked(repo, found)
+			b.creditAllPushedLocked()
+		case repo.Forge == model.ForgeGitLab && (errors.Is(err, source.ErrNotLoggedIn) || errors.Is(err, source.ErrUnsupported)):
+			// The login went away (or the host turned out to be a
+			// subfolder install) since its host was decided: no more
+			// lookups there until it is asked about again.
+			b.noteHostLocked(repo.Host, err)
 		case errors.Is(err, source.ErrRepoNotFound):
 			// One such answer is enough: for its ended sessions the repo is
 			// not asked again until sitboard restarts, even when the cause
@@ -203,15 +303,15 @@ func (b *Board) refreshGitHub(ctx context.Context, periodic bool) {
 			// Live sessions still ask.
 			b.goneRepos[repo] = true
 		}
+		b.refreshGitLabLineLocked()
 		b.rebuildLocked()
 		b.mu.Unlock()
 		b.flushSeen()
-		if ctx.Err() != nil {
-			return
-		}
 	}
 }
 
+// githubOffLocked: the GitHub source line says off (--no-github) or missing
+// (no gh). Callers hold b.mu.
 func (b *Board) githubOffLocked() bool {
 	for _, s := range b.sources {
 		if s.Kind == contract.SourceGitHub && (s.State == contract.SourceOff || s.State == contract.SourceMissing) {
@@ -245,24 +345,15 @@ func (b *Board) liveFoldersLocked() []string {
 // final), nor one GitHub did not find, nor any in a repo GitHub did not find;
 // and a repo only ended sessions ask about is asked every endedEvery, not
 // every minute. Repos with nothing to ask are absent.
-func (b *Board) lookupsLocked() map[string]lookupReq {
-	now := b.now()
-	reqs := map[string]lookupReq{}
+func (b *Board) lookupsLocked() map[model.ForgeRepo]lookupReq {
+	reqs := map[model.ForgeRepo]lookupReq{}
 	for _, s := range b.sessions {
-		if !b.inRoots(s.Folder) {
+		if !b.lookupSessionLocked(s) {
 			continue
 		}
-		if s.Ended {
-			endedAt := s.EndedAt
-			if endedAt.IsZero() {
-				endedAt = s.LastActivity
-			}
-			if since(endedAt, now) > max(endedOpenLimit, catchupWindow) {
-				continue
-			}
-		}
 		for _, ref := range s.CreatedPRs {
-			if !validRepo(ref.Repo) || ref.Number <= 0 {
+			p := b.providerFor(ref.Repo)
+			if p == nil || ref.Number <= 0 {
 				continue
 			}
 			if s.Ended {
@@ -271,6 +362,7 @@ func (b *Board) lookupsLocked() map[string]lookupReq {
 				}
 			}
 			r := reqs[ref.Repo]
+			r.p = p
 			if !slices.Contains(r.numbers, ref.Number) {
 				r.numbers = append(r.numbers, ref.Number)
 			}
@@ -280,29 +372,18 @@ func (b *Board) lookupsLocked() map[string]lookupReq {
 			}
 			reqs[ref.Repo] = r
 		}
-		if s.Key.Tool == model.ToolCodex && !s.Ended {
-			if repo := b.repoLocked(s.Folder); validRepo(repo.Slug) && repo.Branch.OK {
-				r := reqs[repo.Slug]
-				if !slices.Contains(r.branches, repo.Branch.V) {
-					r.branches = append(r.branches, repo.Branch.V)
-				}
-				r.live = true
-				reqs[repo.Slug] = r
-			}
-		}
 	}
-	var endedOnly []string
+	var endedOnly []model.ForgeRepo
 	for repo, r := range reqs {
 		slices.Sort(r.numbers)
-		slices.Sort(r.branches)
 		reqs[repo] = r
 		if !r.live {
 			endedOnly = append(endedOnly, repo)
 		}
 	}
 	if len(endedOnly) > maxEndedRepos {
-		slices.SortFunc(endedOnly, func(x, y string) int {
-			return cmp.Or(reqs[y].newest.Compare(reqs[x].newest), cmp.Compare(x, y))
+		slices.SortFunc(endedOnly, func(x, y model.ForgeRepo) int {
+			return cmp.Or(reqs[y].newest.Compare(reqs[x].newest), cmp.Compare(x.Key(), y.Key()))
 		})
 		for _, repo := range endedOnly[maxEndedRepos:] {
 			delete(reqs, repo)
@@ -311,12 +392,29 @@ func (b *Board) lookupsLocked() map[string]lookupReq {
 	return reqs
 }
 
+// lookupSessionLocked says whether s is one whose refs lookups ask about:
+// in the roots, and not ended longer ago than the catch-up still wants it.
+// Callers hold b.mu.
+func (b *Board) lookupSessionLocked(s model.SessionFact) bool {
+	if !b.inRoots(s.Folder) {
+		return false
+	}
+	if !s.Ended {
+		return true
+	}
+	endedAt := s.EndedAt
+	if endedAt.IsZero() {
+		endedAt = s.LastActivity
+	}
+	return since(endedAt, b.now()) <= max(endedOpenLimit, catchupWindow)
+}
+
 // noteMissingLocked records which numbers a successful lookup did not find,
 // so ended sessions stop asking about them. Callers hold b.mu.
-func (b *Board) noteMissingLocked(repo string, numbers []int, found []model.PullRequest) {
+func (b *Board) noteMissingLocked(repo model.ForgeRepo, numbers []int, found []model.PullRequest) {
 	for _, n := range numbers {
 		ref := model.PRRef{Repo: repo, Number: n}
-		if slices.ContainsFunc(found, func(pr model.PullRequest) bool { return pr.Number == n && (pr.Repo == repo || pr.Repo == "") }) {
+		if slices.ContainsFunc(found, func(pr model.PullRequest) bool { return pr.Number == n && (pr.Repo == repo || pr.Repo.IsZero()) }) {
 			delete(b.missingRefs, ref)
 		} else {
 			b.missingRefs[ref] = true
@@ -324,44 +422,19 @@ func (b *Board) noteMissingLocked(repo string, numbers []int, found []model.Pull
 	}
 }
 
-// storePRsLocked records a lookup's answer. Branch matches are replaced for
-// the branches asked about; numbered pull requests are updated one by one.
-func (b *Board) storePRsLocked(repo string, req lookupReq, found []model.PullRequest) {
-	branches := b.branchPRs[repo]
-	if branches == nil {
-		branches = map[string][]model.PullRequest{}
-		b.branchPRs[repo] = branches
-	}
-	for _, br := range req.branches {
-		branches[br] = []model.PullRequest{}
-	}
+// storePRsLocked records a lookup's answer, one pull request at a time.
+func (b *Board) storePRsLocked(repo model.ForgeRepo, found []model.PullRequest) {
 	for _, pr := range found {
-		if pr.Repo == "" {
+		if pr.Repo.IsZero() {
 			pr.Repo = repo
 		}
 		if pr.Repo != repo || pr.Number <= 0 {
 			continue
 		}
 		b.prs[model.PRRef{Repo: pr.Repo, Number: pr.Number}] = pr
-		if slices.Contains(req.branches, pr.HeadBranch) {
-			branches[pr.HeadBranch] = append(branches[pr.HeadBranch], pr)
-		}
 	}
 }
 
 // wallGap is b-a on the wall clock, ignoring monotonic readings, which on
 // macOS do not advance while the machine sleeps.
 func wallGap(a, b time.Time) time.Duration { return b.Round(0).Sub(a.Round(0)) }
-
-// repoRe is what a GitHub "owner/name" must look like before it reaches gh.
-var repoRe = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
-
-// validRepo refuses anything but a plain "owner/name"; repo names come from
-// transcripts and git remotes and are untrusted.
-func validRepo(repo string) bool {
-	if !repoRe.MatchString(repo) {
-		return false
-	}
-	owner, name, _ := strings.Cut(repo, "/")
-	return owner != "." && owner != ".." && name != "." && name != ".."
-}

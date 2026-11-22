@@ -6,8 +6,9 @@
   import { fade, fly } from 'svelte/transition';
   import { cubicOut } from 'svelte/easing';
   import type { CatchupState } from '../data/catchup.svelte';
-  import { FOLD_AT, groupCatchup, rowLink, rowWord, type CatchupRow } from '../data/catchup';
+  import { FOLD_AT, groupCatchup, rowLink, rowWord, visibleCatchupItems, type CatchupRow } from '../data/catchup';
   import { clean } from '../data/text';
+  import { forgeName } from '../data/words';
   import { when } from '../data/time';
   import { ms, VIEW_MS } from '../motion';
 
@@ -20,6 +21,7 @@
     cu,
     now,
     onBoard,
+    gitlabHosts = [],
     toggle,
     top,
     onclose,
@@ -30,6 +32,8 @@
     now: number;
     /** Card ids on the board now: a row links to its card only while it is there. */
     onBoard: ReadonlySet<string>;
+    /** The GitLab hosts a merge request row may link to (Snapshot.gitlabHosts). */
+    gitlabHosts?: readonly string[];
     toggle: HTMLElement | undefined;
     /** Where the panel starts, below the header (px). */
     top: number;
@@ -43,9 +47,11 @@
   let said = $state('');
 
   const data = $derived(cu.data);
-  const groups = $derived(data ? groupCatchup(data.items) : []);
-  const count = $derived(data ? data.items.length : 0);
-  const total = $derived(data ? data.total : 0);
+  // Merge requests of a host the snapshot no longer lists are left out (visibleCatchupItems).
+  const items = $derived(data ? visibleCatchupItems(data.items, gitlabHosts) : []);
+  const groups = $derived(groupCatchup(items));
+  const count = $derived(items.length);
+  const total = $derived(data ? data.total - (data.items.length - items.length) : 0);
   // A marker older than the window says nothing: items go back 7 days at most.
   const since = $derived(data?.marker && Date.parse(data.marker) > now - WINDOW_MS ? when(data.marker, now) : '');
   const shownLine = $derived(total > count ? `newest ${count} of ${total}` : count ? String(count) : '');
@@ -168,7 +174,7 @@
           <h3 id="{id}-{g.projectId}" class="grph"><span class="pname u">{clean(g.name) || 'unknown project'}</span><span class="n">{g.total}</span></h3>
           <ul>
             {#each rows as r (r.key)}
-              {@const link = rowLink(r, onBoard)}
+              {@const link = rowLink(r, onBoard, gitlabHosts)}
               <li class="it" tabindex="-1">
                 <span class="at">{when(r.at, now)}</span>
                 <span class="k k-{r.kind}">{rowWord(r)}</span>
@@ -176,7 +182,7 @@
                 <span class="go">
                   {#if link.kind === 'url'}
                     <a href={link.href} class:ext={!!r.pullRequest} target="_blank" rel="noopener noreferrer"
-                      >{link.text}<span class="visually-hidden">{r.kind === 'artifact_published' ? ' artifact, opens in a new tab' : ' on GitHub, opens in a new tab'}</span></a
+                      >{link.text}<span class="visually-hidden">{r.kind === 'artifact_published' ? ' artifact, opens in a new tab' : ` on ${forgeName(r.pullRequest?.forge ?? 'github')}, opens in a new tab`}</span></a
                     >
                   {:else if link.kind === 'card'}
                     <button type="button" class="card" onclick={() => onshowcard(link.cardId)}>Card<span class="visually-hidden">{`: show ${name(r)} on the board`}</span></button>

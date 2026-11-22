@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/IZZY-Agency/sitboard/internal/contract"
+	"github.com/IZZY-Agency/sitboard/internal/model"
 )
 
 // Board is the derived, read-mostly view the server serves. All methods are
@@ -53,9 +54,10 @@ type Board interface {
 	// nothing changed.
 	SetGrouping(projectID string, mode contract.GroupingMode) error
 
-	// TerminalFor resolves a card to its agterm session id. ok is false when
-	// the card is unknown or has no terminal in the current tree.
-	TerminalFor(cardID string) (terminalID string, ok bool)
+	// JumpTarget resolves a card to where its jump goes: its tmux pane or
+	// its agterm session. ok is false when the card is unknown or has
+	// neither (no tmux pane, no agterm session in the current tree).
+	JumpTarget(cardID string) (target model.FocusTarget, ok bool)
 }
 
 // Errors ForgetGrouping and SetGrouping return for a request they refuse.

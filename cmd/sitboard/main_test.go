@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -16,7 +17,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/IZZY-Agency/sitboard/internal/adapters/claude"
 	"github.com/IZZY-Agency/sitboard/internal/adapters/github"
+	"github.com/IZZY-Agency/sitboard/internal/adapters/gitlab"
+	"github.com/IZZY-Agency/sitboard/internal/adapters/tmux"
 	"github.com/IZZY-Agency/sitboard/internal/contract"
 	"github.com/IZZY-Agency/sitboard/internal/model"
 	"github.com/IZZY-Agency/sitboard/internal/source"
@@ -56,8 +60,6 @@ func (quietRepos) Probe(context.Context) source.Status {
 func (quietRepos) Resolve(_ context.Context, f string) (model.Repo, error) {
 	return model.Repo{Root: f, MainRoot: f}, nil
 }
-func (quietRepos) Worktrees(context.Context, string) ([]model.Worktree, error) { return nil, nil }
-func (quietRepos) LocalBranches(context.Context, string) ([]string, error)     { return nil, nil }
 
 // fakeSources keeps tests off the real machine's agents and agterm.
 func fakeSources(cfg config, _ string) sources {
@@ -65,6 +67,7 @@ func fakeSources(cfg config, _ string) sources {
 		watchers: []source.Watcher{quietWatcher{source.KindClaude}, quietWatcher{source.KindCodex}, quietWatcher{source.KindAgterm}},
 		repos:    quietRepos{},
 		prs:      github.New(github.Options{Off: true}),
+		gitlab:   gitlab.NewSource(gitlab.Options{Off: true}),
 	}
 }
 
@@ -254,6 +257,58 @@ func TestNoGithubFlagTurnsProviderOff(t *testing.T) {
 	if st := src.prs.Probe(context.Background()); st.State != source.StateOff {
 		t.Fatalf("github state %q, want off", st.State)
 	}
+}
+
+// The tmux jump is wired as the program needs it: it raises the agterm
+// session of the tmux client through the agterm jumper, reading the client's
+// agterm id with claude.AgtermIDOf, and the claude watcher keeps a tmux pane
+// only once that tmux adapter confirms it.
+func TestRealSourcesWireTheTmuxJump(t *testing.T) {
+	cfg, err := parseArgs([]string{"--no-github"}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := realSources(cfg, t.TempDir())
+	jumpers, ok := src.jumper.(source.Jumpers)
+	if !ok {
+		t.Fatalf("jumper is %T", src.jumper)
+	}
+	tm, ok := jumpers[model.FocusTmux].(*tmux.Adapter)
+	if !ok {
+		t.Fatalf("tmux jumper is %T", jumpers[model.FocusTmux])
+	}
+	term := jumpers[model.FocusAgterm]
+	o := tm.Options()
+	if o.Raise == nil || o.Raise != term {
+		t.Errorf("tmux raises through %v, want the agterm jumper %v", o.Raise, term)
+	}
+	if fn(o.Alive) != fn(claude.ProcessAlive) {
+		t.Error("tmux does not confirm the session's process with claude.ProcessAlive")
+	}
+	if fn(o.AgtermOf) != fn(claude.AgtermIDOf) {
+		t.Error("tmux does not read the client's agterm id with claude.AgtermIDOf")
+	}
+	var cw interface{ Options() claude.Options }
+	for _, w := range src.watchers {
+		if w.Kind() == source.KindClaude {
+			cw, _ = w.(interface{ Options() claude.Options })
+		}
+	}
+	if cw == nil {
+		t.Fatal("no claude watcher")
+	}
+	if got := cw.Options().TmuxOwns; got == nil || fn(got) != fn(tm.Owns) {
+		t.Error("the claude watcher does not confirm tmux panes with the tmux adapter")
+	}
+}
+
+// fn is a function's code pointer, 0 for nil.
+func fn(f any) uintptr {
+	v := reflect.ValueOf(f)
+	if v.IsNil() {
+		return 0
+	}
+	return v.Pointer()
 }
 
 func TestInterruptShutsDownWithin2s(t *testing.T) {

@@ -35,7 +35,7 @@ const merged = (at: string, n: number): CatchupItem => ({
   agentName: 'docs-intro',
   title: 'Getting started page',
   pullRequest: {
-    repo: 'example-org/example-repo',
+    forge: 'github' as const, host: 'github.com', repo: 'example-org/example-repo',
     number: n,
     title: 'Getting started page',
     url: `https://github.com/example-org/example-repo/pull/${n}`,
@@ -374,5 +374,149 @@ describe('catch-up panel', () => {
     await open();
     expect(panel()!.querySelector('img, b')).toBeNull();
     expect(text(panel()!.querySelector('.ag'))).toBe('<img src=x onerror=alert(1)>');
+  });
+});
+
+describe('merge requests of a host the snapshot no longer lists', () => {
+  const HOST = 'gitlab.example';
+  const mr = (at: string, n: number, host = HOST): CatchupItem => ({
+    at,
+    kind: 'pr_opened',
+    cardId: '',
+    projectId: 'p_000000000003',
+    projectName: 'quay',
+    agentName: 'ci-fixer',
+    title: `Placeholder merge request ${n}`,
+    pullRequest: {
+      forge: 'gitlab' as const, host, repo: 'example-org/example-repo',
+      number: n,
+      title: `Placeholder merge request ${n}`,
+      url: `https://${host}/example-org/example-repo/-/merge_requests/${n}`,
+      state: 'open',
+      checks: 'passing',
+      review: '',
+      draft: false,
+    },
+  });
+
+  function appOn(loads: Array<CatchupLoad | Partial>) {
+    const f = feedOf({ conn: 'live', snapshot: snapshot([onBoardCard], [project(P, 'harbor')], { gitlabHosts: [HOST] }) });
+    const c = client(loads);
+    r = render(App, { feed: f.feed, actions: recordActions().actions, catchup: c.client });
+    return { f, c };
+  }
+  const items = () => [mr('2026-11-17T09:30:00Z', 7), merged('2026-11-17T09:00:00Z', 9)];
+  const body = () => panel()?.textContent ?? '';
+
+  it('drops the row and its title when a snapshot arrives without the host', async () => {
+    const { f } = appOn([{ items: items() }]);
+    await settle();
+    await open();
+    expect(body()).toContain('Placeholder merge request 7');
+    expect(panel()!.querySelector(`a[href="https://${HOST}/example-org/example-repo/-/merge_requests/7"]`)).not.toBeNull();
+
+    f.push({ conn: 'live', snapshot: snapshot([onBoardCard], [project(P, 'harbor')], { gitlabHosts: [] }) });
+    await settle();
+    expect(body()).not.toContain('Placeholder merge request 7');
+    expect(body()).not.toContain('ci-fixer');
+    expect(panel()!.querySelector('a[href*="/-/merge_requests/"]')).toBeNull();
+    // A GitHub row is untouched.
+    expect(body()).toContain('Getting started page');
+  });
+
+  it('keeps them away when the poll that follows fails and the panel keeps its old list', async () => {
+    const { f, c } = appOn([{ items: items() }, { ok: false, kind: 'failed', message: 'sitboard did not answer' }]);
+    await settle();
+    await open(); // this load fails: the list stays
+    expect(c.calls).toEqual(['load', 'load']);
+    expect(body()).toContain('Placeholder merge request 7');
+
+    f.push({ conn: 'live', snapshot: snapshot([onBoardCard], [project(P, 'harbor')], { gitlabHosts: ['other.example'] }) });
+    await settle();
+    expect(body()).not.toContain('Placeholder merge request 7');
+    expect(body()).toContain('Getting started page');
+  });
+
+  const withHosts = (gitlabHosts: string[]) => ({
+    conn: 'live' as const,
+    snapshot: snapshot([onBoardCard], [project(P, 'harbor')], { gitlabHosts }),
+  });
+  const failed: CatchupLoad = { ok: false, kind: 'failed', message: 'sitboard did not answer' };
+
+  it('a host that leaves takes its rows out of the kept list: they do not come back with the host', async () => {
+    // Every load after the first two fails, so the panel only has its kept list.
+    const { f } = appOn([{ items: items() }, { items: items() }, failed]);
+    await settle();
+    await open();
+    expect(body()).toContain('Placeholder merge request 7');
+
+    f.push(withHosts([])); // logged out of the host
+    await settle();
+    expect(body()).not.toContain('Placeholder merge request 7');
+
+    f.push(withHosts([HOST])); // back, maybe under another login, before a fresh list
+    await settle();
+    expect(body()).not.toContain('Placeholder merge request 7');
+    expect(panel()!.querySelector('a[href*="/-/merge_requests/"]')).toBeNull();
+    // The header's count no longer holds the row either.
+    expect(btn()!.getAttribute('aria-label')).toBe('Catch-up, 1 new item');
+    // A GitHub row is untouched.
+    expect(body()).toContain('Getting started page');
+  });
+
+  it('a list asked for before the host came back does not bring its rows back', async () => {
+    // Loads answer only when the test says so.
+    const out: Array<(l: CatchupLoad) => void> = [];
+    const c: CatchupClient = {
+      load: () => new Promise<CatchupLoad>((res) => out.push(res)),
+      markRead: async () => ({ ok: true }),
+    };
+    const ok = (): CatchupLoad => ({ ok: true, catchup: { asOf: AS_OF, total: 2, items: items() } });
+    const f = feedOf(withHosts([HOST]));
+    r = render(App, { feed: f.feed, actions: recordActions().actions, catchup: c });
+    await settle();
+    out[0](ok());
+    await settle();
+    await open(); // a second load goes out and stays out
+    expect(body()).toContain('Placeholder merge request 7');
+    const before = out.length;
+
+    f.push(withHosts([])); // the host leaves while that load is out
+    await settle();
+    const away = out.length;
+    f.push(withHosts([HOST])); // and comes back
+    await settle();
+    // Every list asked for before the host came back answers with the old rows.
+    for (const res of out.slice(before - 1, away)) res(ok());
+    await settle();
+    expect(body()).not.toContain('Placeholder merge request 7');
+    expect(body()).toContain('Getting started page');
+
+    // Only a list asked for while the host is listed again shows its rows.
+    expect(out.length).toBeGreaterThan(away);
+    out[out.length - 1](ok());
+    await settle();
+    expect(body()).toContain('Placeholder merge request 7');
+  });
+
+  it('shows no merge request of a host that was never listed', async () => {
+    appOn([{ items: [mr('2026-11-17T09:30:00Z', 8, 'unknown.example'), merged('2026-11-17T09:00:00Z', 9)] }]);
+    await settle();
+    await open();
+    expect(body()).not.toContain('Placeholder merge request 8');
+    expect(body()).toContain('Getting started page');
+  });
+
+  it('a host listed later shows no row from a list that came while it was not', async () => {
+    const unlisted = () => [mr('2026-11-17T09:30:00Z', 8, 'unknown.example'), merged('2026-11-17T09:00:00Z', 9)];
+    const { f } = appOn([{ items: unlisted() }, { items: unlisted() }, failed]);
+    await settle();
+    await open();
+    expect(body()).not.toContain('Placeholder merge request 8');
+
+    f.push(withHosts([HOST, 'unknown.example'])); // logged in now; no fresh list yet
+    await settle();
+    expect(body()).not.toContain('Placeholder merge request 8');
+    expect(body()).toContain('Getting started page');
   });
 });
