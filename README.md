@@ -11,7 +11,7 @@
 
 # sitboard
 
-A live board of the Claude Code and Codex terminal sessions running on your machine.
+**sitboard** (*situation board*) is a live board of the Claude Code and Codex terminal sessions running on your machine.
 
 <!-- facts:readme-intro paragraph -->
 sitboard is a small command-line tool: it starts a web server on your machine and opens the board in your browser. It answers two questions at a glance: **who does what**, and **who needs me**. It finds the running sessions by itself: nobody creates tasks in it, and the agents need no setup. When it cannot tell something, it says "unknown" instead of guessing.

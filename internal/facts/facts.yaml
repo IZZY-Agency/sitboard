@@ -481,13 +481,13 @@ facts:
 
   - id: hero
     text: >-
-      sitboard is one command. It finds the Claude Code and Codex terminal
-      sessions already running on your machine, in every project, and shows who
-      is working, who is waiting for you, and which pull or merge request came
-      from which agent. Nothing to set up, and nothing leaves your machine but
-      what your own gh and glab ask GitHub and GitLab, and what it reads and
-      writes in files you keep on a network folder. With --no-github and
-      --no-gitlab it runs no gh and no glab.
+      sitboard (situation board) is one command. It finds the Claude Code and
+      Codex terminal sessions already running on your machine, in every project,
+      and shows who is working, who is waiting for you, and which pull or merge
+      request came from which agent. Nothing to set up, and nothing leaves your
+      machine but what your own gh and glab ask GitHub and GitLab, and what it
+      reads and writes in files you keep on a network folder. With --no-github
+      and --no-gitlab it runs no gh and no glab.
     of: [what-it-is, codex-sessions, nothing-leaves, no-traffic-flags]
 
   - id: faq-what
@@ -1526,11 +1526,11 @@ facts:
 
   - id: site-description
     text: >-
-      sitboard is a local tool: one command starts a small server on
-      127.0.0.1 and opens a live board of the Claude Code and Codex terminal
-      sessions running on your machine, across all your projects. See who is
-      working, who needs you, and which pull requests belong to which agent.
-      Free and open source (MIT), by IZZY Agency.
+      sitboard (situation board) is a local tool: one command starts a small
+      server on 127.0.0.1 and opens a live board of the Claude Code and Codex
+      terminal sessions running on your machine, across all your projects. See
+      who is working, who needs you, and which pull requests belong to which
+      agent. Free and open source (MIT), by IZZY Agency.
     of: [what-it-is, local-only, codex-sessions, faq-licence]
 
   - id: site-hero-meta
