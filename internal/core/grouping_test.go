@@ -31,9 +31,8 @@ func newGroupEnv(t *testing.T) *groupEnv {
 	t.Setenv("HOME", home)
 	file := filepath.Join(t.TempDir(), "state.json")
 	e := &groupEnv{home: home, state: file}
-	// The state file prunes umbrellas by the real clock, so this board starts
-	// at the real time.
-	e.testEnv = &testEnv{clock: &fakeClock{t: time.Now().UTC().Truncate(time.Second)}, repos: &fakeRepos{repos: map[string]model.Repo{}}, prs: &fakePRs{}}
+	// The state file prunes umbrellas by the board's clock (see reopen).
+	e.testEnv = &testEnv{clock: &fakeClock{t: tNow}, repos: &fakeRepos{repos: map[string]model.Repo{}}, prs: &fakePRs{}}
 	e.reopen(t)
 	return e
 }
@@ -41,7 +40,7 @@ func newGroupEnv(t *testing.T) *groupEnv {
 // reopen starts a new board on the same state file, as after a restart.
 func (e *groupEnv) reopen(t *testing.T) {
 	t.Helper()
-	st, err := state.Open(e.state)
+	st, err := state.OpenAt(e.state, e.clock.Now)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,9 +1,9 @@
 // Catch-up: what happened since the owner last marked it read. The server
 // lists finished turns, opened and merged pull requests and published
-// artifacts it learned since the marker, newest first; the page loads the
-// list, groups it, and marks it read only when asked, up to the list's asOf.
+// artifacts that are unread, newest first; the page loads the list, groups
+// it, and marks it read only when asked: exactly the items of the list shown.
 
-import { prHref, prKey, prNumber } from './derive';
+import { gitlabMount, prHref, prKey, prNumber } from './derive';
 import { openedWord } from './words';
 import { CatchupKindValues, Paths, type Artifact, type Catchup, type CatchupItem, type CatchupKind, type PullRequest } from '../contract.gen';
 
@@ -12,12 +12,17 @@ export type CatchupLoad =
   | { ok: false; kind: 'unauthorized' } // 401 or 403: this tab lost its key
   | { ok: false; kind: 'failed'; message: string };
 
-export type ReadResult = { ok: true } | { ok: false; kind: 'unauthorized' } | { ok: false; kind: 'failed'; message: string };
+export type ReadResult =
+  | { ok: true }
+  | { ok: false; kind: 'unauthorized' }
+  | { ok: false; kind: 'stale' } // 409: the list shown is not current (sitboard restarted, or it is too old); nothing was marked
+  | { ok: false; kind: 'full' } // 507: sitboard keeps no more marked items for the last 7 days; nothing was marked
+  | { ok: false; kind: 'failed'; message: string };
 
 export interface CatchupClient {
   load(): Promise<CatchupLoad>;
-  /** upTo: the asOf of the list shown; the server moves the marker there. */
-  markRead(upTo: string): Promise<ReadResult>;
+  /** list: the list shown (Catchup.list); the server marks exactly its items read. */
+  markRead(list: string): Promise<ReadResult>;
 }
 
 function validTime(s: unknown): s is string {
@@ -26,13 +31,14 @@ function validTime(s: unknown): s is string {
 
 /**
  * Keeps the items the page can show: a known kind and a readable time. An item
- * a newer server added a kind for is left out rather than shown wrong. A list
- * without a readable asOf is refused: it could not be marked read.
+ * a newer server added a kind for is left out rather than shown wrong, and
+ * then the list has no id: "Caught up" on it would mark the left-out items
+ * read too. A list without a readable asOf or a list id is refused.
  */
 export function readCatchup(raw: unknown): Catchup | null {
   if (!raw || typeof raw !== 'object') return null;
-  const r = raw as { marker?: unknown; asOf?: unknown; total?: unknown; unsaved?: unknown; pending?: unknown; items?: unknown };
-  if (!Array.isArray(r.items) || !validTime(r.asOf)) return null;
+  const r = raw as { marker?: unknown; list?: unknown; asOf?: unknown; total?: unknown; unsaved?: unknown; pending?: unknown; partial?: unknown; items?: unknown };
+  if (!Array.isArray(r.items) || !validTime(r.asOf) || typeof r.list !== 'string' || r.list === '') return null;
   const items = r.items.filter(
     (it): it is CatchupItem =>
       !!it &&
@@ -42,9 +48,10 @@ export function readCatchup(raw: unknown): Catchup | null {
       typeof (it as CatchupItem).projectId === 'string',
   );
   const total = typeof r.total === 'number' && Number.isInteger(r.total) && r.total >= items.length ? r.total : items.length;
-  const out: Catchup = { asOf: r.asOf, total, items };
+  const out: Catchup = { list: items.length === r.items.length ? r.list : '', asOf: r.asOf, total, items };
   if (r.unsaved === true) out.unsaved = true;
   if (r.pending === true) out.pending = true;
+  if (r.partial === true) out.partial = true;
   return validTime(r.marker) ? { marker: r.marker, ...out } : out;
 }
 
@@ -67,20 +74,22 @@ export function createCatchupClient(fetchFn: typeof fetch): CatchupClient {
       }
       return c ? { ok: true, catchup: c } : { ok: false, kind: 'failed', message: 'sitboard sent something unreadable' };
     },
-    async markRead(upTo) {
+    async markRead(list) {
       let res: Response;
       try {
         res = await fetchFn(Paths.catchupRead, {
           method: 'POST',
           credentials: 'same-origin',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ upTo }),
+          body: JSON.stringify({ list }),
         });
       } catch {
         return { ok: false, kind: 'failed', message: 'sitboard did not answer' };
       }
       if (res.ok) return { ok: true };
       if (res.status === 401 || res.status === 403) return { ok: false, kind: 'unauthorized' };
+      if (res.status === 409) return { ok: false, kind: 'stale' };
+      if (res.status === 507) return { ok: false, kind: 'full' };
       if (res.status === 500) return { ok: false, kind: 'failed', message: 'sitboard could not save it' };
       return { ok: false, kind: 'failed', message: `sitboard answered ${res.status}` };
     },
@@ -128,7 +137,9 @@ export function groupCatchup(items: readonly CatchupItem[]): CatchupGroup[] {
     }
     g.total++;
     const who = it.cardId || `name:${it.agentName}`;
-    const what = it.pullRequest ? prKey(it.pullRequest) : it.artifact ? it.artifact.url : `${who}|${it.at}`;
+    // A republished artifact is a new item (the server keys it by its time
+    // too), so each publish keeps its own row: none is marked read unseen.
+    const what = it.pullRequest ? prKey(it.pullRequest) : it.artifact ? `${it.artifact.url}|${it.at}` : `${who}|${it.at}`;
     const key = it.kind === 'turn_finished' ? `turn|${who}` : `${it.kind}|${what}`;
     const row = g.rows.get(key);
     if (!row) {
@@ -174,7 +185,7 @@ export function groupCatchup(items: readonly CatchupItem[]): CatchupGroup[] {
  * also while the next catch-up poll is still to come or has failed.
  */
 export function visibleCatchupItems(items: readonly CatchupItem[], gitlabHosts: readonly string[] = []): readonly CatchupItem[] {
-  const keep = (it: CatchupItem) => it.pullRequest?.forge !== 'gitlab' || gitlabHosts.includes(it.pullRequest.host);
+  const keep = (it: CatchupItem) => it.pullRequest?.forge !== 'gitlab' || gitlabMount(gitlabHosts, it.pullRequest.host) !== null;
   return items.every(keep) ? items : items.filter(keep);
 }
 

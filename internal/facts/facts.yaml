@@ -1,0 +1,1715 @@
+# What sitboard does, reads, sends and shows: the one list README's
+# generated sections and the website's texts are built from.
+#
+# Each fact is one claim in up to three wordings: text (README, and the
+# website's llms.txt), short (the website's privacy page and llms.txt
+# privacy) and brief (the home page and the FAQ, `code` only). A missing
+# short falls back to text, a missing brief to short. "joins: true"
+# continues the previous fact's list item; "sub: true" nests it.
+# "keeps:" lists words (an exception, a condition) that every wording of
+# the fact, and every wording of a fact that names it in "of:", must say:
+# a shorter form cannot drop what the long one qualifies.
+#
+# Anchors tie a fact to the code it rests on (see anchors.go). `go test
+# ./internal/facts` fails when an anchor is gone, when a stated value
+# changed, when a page field is named by no fact, or when the code under a
+# "code:" anchor changed since the fact was last confirmed. Then reread the
+# fact against that code, fix its wording if it is no longer true, and run
+# `make facts-confirm FACTS="<id>"`. After editing this file, `make facts`
+# rewrites README.md and the website's copy.
+
+facts:
+  # ── Intro ──────────────────────────────────────────────────────────────────
+  - id: what-it-is
+    text: >-
+      sitboard is a small command-line tool: it starts a web server on your
+      machine and opens the board in your browser. It answers two questions at
+      a glance: **who does what**, and **who needs me**.
+    anchors:
+      - code: cmd/sitboard.listen
+      - test: cmd/sitboard.TestPrintsTokenisedLinkExactlyOnceOnStart
+
+  - id: finds-by-itself
+    text: >-
+      It finds the running sessions by itself: nobody creates tasks in it, and
+      the agents need no setup.
+    brief: >-
+      sitboard reads what Claude Code and Codex already write on your machine.
+      Agents do not need to know it exists, and there is nothing to add to
+      your projects.
+    anchors:
+      - code: internal/adapters/claude.pickProcFacts
+      - code: internal/adapters/codex.New
+
+  - id: says-unknown
+    text: >-
+      When it cannot tell something, it says "unknown" instead of guessing.
+    anchors:
+      - file: web/src/data/about.ts
+        has: "return text || 'unknown'"
+
+  # ── What it does ───────────────────────────────────────────────────────────
+  - id: card
+    text: >-
+      **A card per session.** Each card shows the session's name or title, its
+      project, status and model (a Claude model in its family's colour: Fable,
+      Opus, Sonnet, Haiku; a Codex model without a family colour) with its
+      effort level (low to max, or the word Codex recorded, such as "ultra";
+      for Claude Code, before the first reply, the level it was started with,
+      marked "at launch"), how long it has been in that state, its output
+      tokens and, for Claude Code, a cost estimate, when known, the pull
+      requests and merge requests it opened with their checks and review, and,
+      on the Board, links to the claude.ai artifacts it published. The pull
+      request, merge request and issue numbers shown on the Board, in Lanes and
+      in Teams link to GitHub or GitLab when sitboard has the repository's
+      whole path (a GitLab path longer than 300 characters is left out) and
+      the link is the one for that forge, host, path and number (for GitLab,
+      on a host sitboard looked merge requests up on); otherwise the number
+      shows without a link.
+    keeps: [without a link]
+    anchors:
+      - code: internal/core.prURL
+      - file: web/src/data/derive.ts
+        has: "gitlabMount(gitlabHosts, it.host)"
+      - code: internal/core.pagePath
+      - value: internal/core.maxText
+        is: "300"
+      - test: internal/core.TestLongGitLabPathIsWholeOrAbsent
+      - code: internal/core.agentEffort
+      - code: internal/core.effortWord
+      - file: web/src/data/derive.ts
+        has: "MODEL_FAMILIES = ['fable', 'opus', 'sonnet', 'haiku']"
+      - file: web/src/components/Card.svelte
+        has: "' at launch'"
+      - test: internal/core.TestCardEffortAndSource
+
+  - id: gitlab-mrs
+    text: >-
+      **GitLab merge requests.** A merge request a session created with `glab
+      mr create`, or with `git push -o merge_request.create`, shows like a pull
+      request: `!12`, with its state, the issues it closes where GitLab gives
+      them, and, for an open request, its draft flag, pipeline and approval
+      ("approved" or "approval needed"). Catch-up lists it as opened and
+      merged. On gitlab.com and self-hosted GitLab, for the hosts your own
+      `glab` is logged in to. Once a merge request is on the board, the page
+      says "pull or merge request". Off with `--no-gitlab`.
+    anchors:
+      - code: internal/adapters/gitlab.mapPipeline
+      - file: web/src/data/words.ts
+        has: approval needed
+      - file: web/src/data/derive.ts
+        has: "pr.forge === 'gitlab' ? '!' : '#'"
+      - test: internal/core.TestGitLabMergeRequestsAreLookedUp
+      - test: internal/core.TestGitLabOffAsksNothing
+
+  - id: mr-ownership
+    text: >-
+      A merge request belongs to the session whose own `glab mr create`
+      created it, or whose own `git push -o merge_request.create` did, when
+      GitLab's creation time falls within two minutes of that push.
+    anchors:
+      - value: internal/core.pushSkew
+        is: 2 * time.Minute
+      - code: internal/core.pushCredited
+      - test: internal/core.TestPushCredited
+
+  - id: codex-sessions
+    text: >-
+      **Codex sessions.** Sessions of the Codex terminal client and of `codex
+      exec` get cards like Claude Code's. A Codex session that waits for your
+      approval shows as blocked only with agterm. Threads of the Codex desktop
+      app and of editor plugins are not shown.
+    brief: >-
+      Claude Code and Codex: sessions of the Codex terminal client and of
+      `codex exec`. Threads of the Codex desktop app and of editor plugins are
+      not shown.
+    anchors:
+      - file: internal/adapters/codex/codex.go
+        has: approval waits show only through agterm
+      - code: internal/adapters/codex.New
+
+  - id: critter
+    text: >-
+      **A critter for every agent.** Each agent gets its own small creature,
+      drawn from its session id, which helps tell agents apart; its eyes,
+      outline and the line under its feet show the state, and the column and
+      words still say it. Critters move only while you can see them, and with
+      reduced motion they stay still.
+    anchors:
+      - file: web/src/data/critter.ts
+        has: "prng(String(id), 'B')"
+      - file: web/src/components/Critter.svelte
+        has: prefersReducedMotion.current
+
+  - id: board-view
+    text: >-
+      **Board** (the default view). One column per state, in this order: Needs
+      you, Working, With coordinator, In review, Done · 24h, Idle.
+    anchors:
+      - code: internal/contract.Columns
+      - value: internal/core.doneWindow
+        is: 24 * time.Hour
+      - test: internal/core.TestColumnTable
+
+  - id: lanes-view
+    text: >-
+      **Lanes.** One row per project, with a "Needs you" strip on top.
+    brief: One row per project, so you can read a project left to right.
+    anchors:
+      - file: web/src/views/Lanes.svelte
+        has: Needs you
+
+  - id: teams-view
+    text: >-
+      **Teams.** Your queue beside one panel per coordinator with its workers,
+      and one panel of solo agents.
+    brief: Each coordinator with the workers it spawned.
+    anchors:
+      - file: web/src/views/Teams.svelte
+        has: Your queue
+
+  - id: project-tiles
+    text: >-
+      **Project tiles or a side rail.** You choose which; they pick the
+      projects every view shows. A project that spans several repositories
+      shows as one entry with its parts. A grouping you do not want can be
+      forgotten once (that folder stays apart until no agent has sat in it for
+      two minutes) or set to never group; a grouping you want to keep can be
+      set to always group. The status bar lists every folder with a setting, to
+      set it back to auto.
+    brief: >-
+      Every project with a live agent, with repositories inside one folder
+      grouped together. From the page, a grouping can be forgotten, or set to
+      always or never group.
+    anchors:
+      - value: internal/core.umbrellaSettle
+        is: 2 * time.Minute
+      - code: internal/core.Board.noteForgottenLocked
+      - test: internal/core.TestForgetLiftsOnceTheFolderIsEmpty
+      - file: web/src/data/view.ts
+        has: "'tiles' | 'rail'"
+
+  - id: catchup
+    text: >-
+      **Catch-up.** A panel with the finished turns, pull and merge requests
+      opened and merged, and artifacts published in the last 7 days that are
+      unread, grouped by project; a list holds at most 1000 of them, and a
+      project with more than five shows four and folds the rest under "Show
+      N more".
+      Pressing "Caught up" marks read the items of the list the panel loaded,
+      folded ones included, and nothing else marks an item read: one
+      beyond those 1000, one only another tab showed, or one sitboard first
+      finds later, even if it happened earlier (such as a session it reads in
+      the background), stays unread until a list holds it and it is marked
+      read, across restarts too while the state file can be saved. A list
+      from before a restart, or one too old after newer lists, marks nothing, and neither does one that would
+      keep more than 20,000 items marked read in the last 7 days; the panel
+      says so. The first time this version opens a state file of sitboard
+      0.4.0 or earlier, it drops that file's catch-up marker, so the items of
+      the last 7 days are unread again, up to 1000 in a list; if it cannot
+      save the file without the marker, that run keeps what it marks read in
+      memory only, and the panel says nothing is saved. Opening the panel
+      marks nothing read. It covers the Claude Code and Codex terminal sessions of
+      the last 7 days, including those that had ended before sitboard started;
+      while those are still being read, the panel says so, and when that read
+      was cut short (it has a time budget and leaves out a file larger than
+      512 MiB) the panel says items may be missing. Not in it: Claude Code
+      sessions whose transcript is gone, `claude -p`, SDK and MCP-server runs,
+      and `codex exec` runs.
+    brief: >-
+      What happened in the last 7 days that you have not caught up on:
+      finished turns, pull and merge requests opened and merged, artifacts
+      published. It includes sessions that ended before sitboard started;
+      `claude -p`, SDK and `codex exec` runs are left out.
+    anchors:
+      - value: internal/core.catchupWindow
+        is: 7 * 24 * time.Hour
+      - value: internal/core.maxCatchupItems
+        is: "1000"
+      - value: internal/state.MaxCatchupRead
+        is: "20000"
+      - value: internal/adapters/codex.catchupFileCap
+        is: 512 << 20
+      - file: internal/state/state.go
+        has: "legacy := present(disk.Marker) || present(disk.Unread)"
+      - file: web/src/components/CatchupPanel.svelte
+        has: items from them may be missing here
+      - code: internal/core.Board.collectLocked
+      - code: internal/core.Board.mayCatchUpLocked
+      - code: internal/adapters/claude.interactive
+      - code: internal/core.Board.MarkCatchupRead
+      - code: internal/core.Board.backfillPendingLocked
+      - file: internal/adapters/codex/codex.go
+        has: 'Headless:     s.meta.Source == "exec"'
+      - file: web/src/components/CatchupPanel.svelte
+        has: Still reading the sessions that ended before sitboard started
+      - test: internal/core.TestCatchupTurnsFollowTheWindow
+
+  - id: tap
+    text: >-
+      **A tap on the shoulder.** The tab's title and icon show how many agents
+      need you, and the icon a "?" when the board is not live. Turn on Notify
+      in the header for a desktop notification when an agent starts needing
+      you; for one agent it says why, for several how many, never which agent
+      or task, and it stays quiet while the board is in front of you. The
+      switch is off until you turn it on, and the choice holds for every tab of
+      that board's address in that browser (sitboard on another port asks
+      again).
+    brief: >-
+      Its title and icon show how many agents need you. Turn on Notify for a
+      desktop notification when one starts needing you; it never names the
+      agent or the task.
+    anchors:
+      - file: web/src/data/nudge.ts
+        has: /badge/lost.svg
+      - file: web/src/data/notify.ts
+        has: agents need you
+      - file: web/src/data/notifier.svelte.ts
+        has: w.document.visibilityState === 'visible' && w.document.hasFocus()
+
+  - id: spend
+    text: >-
+      **Spend.** A Spend button in the header gives today's use and opens a
+      panel with each project's use per day for the last 7 days: output tokens
+      and, for Claude Code, a cost estimate at API list price, from Claude
+      Code's own price table or the total Claude Code recorded, always marked
+      "≈" and never a bill. Codex keeps no price, so its sessions show tokens
+      only.
+    brief: >-
+      Each agent's output tokens and, for Claude Code, a cost estimate at API
+      list price, from Claude Code's own price table or the total Claude Code
+      recorded, marked ≈: an estimate, never a bill. A Spend panel gives each
+      project's use per day for 7 days.
+    anchors:
+      - value: internal/core.spendDays
+        is: "7"
+      - code: internal/core.Board.spendLocked
+      - file: web/src/components/SpendPanel.svelte
+        has: Amounts are ≈ at API list price.
+      - test: internal/core.TestCodexTokensSitBesideTheMoney
+
+  - id: leftovers
+    text: >-
+      **Leftovers.** A quiet "N leftovers" link in the status bar lists merged
+      work still on the machine that sitboard has evidence for: a worktree,
+      branch or branch on GitHub whose pull request merged into the default
+      branch, and idle sessions whose own pull requests all merged at least 24
+      hours ago. Each item links its merged pull request and says what sitboard
+      checked, for example "merged · nothing uncommitted · not in use". Work
+      that still holds something (commits after the merge, uncommitted files, a
+      stash, a process in the folder) is only counted, except a worktree in use
+      only by finished sessions that are themselves listed, shown as "in use by
+      its session" (or "by a finished session"). Files git ignores do not hold
+      a worktree back: it is listed with a warning that says how many it holds
+      (such as `.env` or `node_modules`), unless sitboard could not list every
+      checkout of the repositories on the board, as one could hide among them.
+      It is a list only. GitHub only; off with `--no-github`.
+    brief: >-
+      Merged work still on the machine that sitboard has evidence for (a
+      worktree, a branch, a branch on GitHub, an idle session) is listed with
+      what it checked, such as "merged · nothing uncommitted · not in use". A
+      list only, and GitHub only.
+    anchors:
+      - code: internal/core.sessionLeftover
+      - code: internal/leftover.Scan
+      - code: internal/core.onlyGitHub
+      - file: web/src/data/leftovers.ts
+        has: "in use by ${it.ownSession ? 'its session' : 'a finished session'}"
+      - file: web/src/components/LeftoversSheet.svelte
+        has: git-ignored
+      - code: internal/adapters/gitsrc.resolver.TreeStatus
+      - test: internal/leftover.TestLabCases
+      - test: internal/core.TestLeftoverWorktreeWithItsSession
+      - test: internal/core.TestLeftoversOffWithoutGitHub
+
+  - id: issues
+    text: >-
+      **Issues.** An Issues chip in the header adds up the open issues of the
+      GitHub repositories of the projects on the board that GitHub has
+      answered for, and shows that number when it is above zero. It opens a
+      panel that lists the open issues of the projects you picked, read only,
+      grouped by milestone (with a filter when there is more than one group,
+      issues with no milestone being a group of their own): each issue's number, linked to GitHub, its title, labels and
+      when it was last updated, up to 30 per repository and a link to the
+      rest. Project tiles and rail rows show the open counts GitHub has
+      given for a project's repositories (rail rows when above zero). GitHub only; off with `--no-github`.
+    brief: >-
+      The open GitHub issues of your projects' repositories, read only,
+      grouped by milestone, with a project's count on its tile once GitHub
+      has answered.
+    anchors:
+      - value: internal/model.MaxRepoIssues
+        is: "30"
+      - file: web/src/components/IssuesPanel.svelte
+        has: aria-label="Milestone, counting the issues listed here"
+      - file: web/src/components/IssuesPanel.svelte
+        has: "+{more} more on {forgeName(s.repo.forge)} ↗"
+      - file: web/src/components/ProjectTiles.svelte
+        has: openIssuesText(t.issues)
+      - file: web/src/components/ProjectRail.svelte
+        has: openIssuesText(p.issues)
+      - file: web/src/data/issues.ts
+        has: "export function openIssuesOf(projects: readonly Project[]): number | null {"
+      - file: cmd/sitboard/main.go
+        has: "if l, ok := gh.(source.IssueLister); ok {"
+
+  - id: jump
+    text: >-
+      **A jump to the terminal.** With [agterm](https://github.com/umputun/agterm),
+      one click jumps to the session's terminal, and cards get better titles; a
+      Claude Code session in tmux jumps to its tmux pane instead, with or
+      without agterm, when a tmux client is attached to that pane's server
+      (with none attached, the click says the jump failed and offers to retry).
+      A card with no terminal to jump to shows the session's folder and name
+      to copy instead.
+    brief: >-
+      Click a card to focus its session in agterm, if you use it, or a Claude
+      Code session's tmux pane, when a tmux client is attached (with none, the
+      click says the jump failed and offers to retry). A card with no terminal
+      to jump to shows its folder and name, ready to copy.
+    anchors:
+      - code: internal/core.jumpKind
+      - test: internal/core.TestJumpTargetPrefersTheTmuxPane
+      - file: internal/server/actions.go
+        has: no tmux client is attached
+      - file: web/src/data/store.svelte.ts
+        has: "kind: 'failed', what: `Jump to"
+      - file: web/src/components/ActionNotice.svelte
+        has: "Open it yourself: the folder and the session name, to copy."
+
+  # ── Home page and FAQ only ─────────────────────────────────────────────────
+  - id: views-switch
+    text: >-
+      Switch at any time. Cards move between columns as agents change state:
+      for Claude Code within about a second while sitboard can watch its
+      session folder, otherwise within about ten seconds; within a few seconds
+      for Codex; and, while `gh` and `glab` answer, about once a minute for the
+      state of a live agent's pull and merge requests. Each agent has its own
+      critter, and each Claude model name shows in its family's colour, with
+      the session's effort level beside it.
+    keeps: [ten seconds, while `gh` and `glab` answer]
+    anchors:
+      - file: internal/adapters/claude/claude.go
+        has: "tick: 3 * time.Second, liveTick: 10 * time.Second"
+      - file: web/src/data/derive.ts
+        has: MODEL_FAMILIES
+      - file: web/src/components/ViewSwitcher.svelte
+        has: "label: 'Teams'"
+      - test: internal/adapters/claude.TestStatusChangeEmitsWithinOneSecond
+      - file: internal/adapters/codex/codex.go
+        has: "tick: 2 * time.Second, liveTick: 4 * time.Second"
+      - value: internal/core.githubEvery
+        is: time.Minute
+      - value: internal/core.hostEvery
+        is: time.Minute
+
+  - id: pull-requests-linked
+    text: >-
+      Linked to the agent that opened them, with check status, through your own
+      gh; GitLab merge requests (`!12`) the same way, through your own glab.
+      Their numbers, and those of the issues they close, link to GitHub or
+      GitLab when sitboard has the repository's whole path and the address
+      checks out against it; otherwise the number shows without a link.
+    keeps: [without a link]
+    anchors:
+      - code: internal/core.Board.linkedPRsLocked
+      - code: internal/core.pagePR
+      - code: internal/core.prURL
+      - file: web/src/data/derive.ts
+        has: "gitlabMount(gitlabHosts, it.host)"
+      - code: internal/core.pagePath
+      - test: internal/core.TestLongGitLabPathIsWholeOrAbsent
+
+  - id: artifacts-linked
+    text: >-
+      The claude.ai artifacts an agent published, linked from its card on the
+      Board.
+    anchors:
+      - code: internal/core.cardArtifacts
+
+  - id: needs-you
+    text: >-
+      An agent blocked on a question or a permission goes to the first column.
+      So does an agent with no coordinator that finished a turn you have not
+      seen, until you look, unless one of its pull or merge requests is open
+      (it goes to In review) or the last one closed in the last 24 hours (Done).
+      A worker's finished turn goes to With coordinator, with the same two
+      exceptions. The needs-you queue in Lanes and Teams also lists stale cards
+      and failing checks.
+    keeps: [In review]
+    anchors:
+      - code: internal/core.column
+      - test: internal/core.TestColumnTable
+      - file: web/src/views/Lanes.svelte
+        has: Needs you
+
+  - id: blocked
+    text: Waiting for an answer or a permission, whatever its pull or merge requests.
+    anchors:
+      - code: internal/core.column
+      - test: internal/core.TestColumnTable
+
+  - id: unseen
+    text: >-
+      Finished a turn you have not seen, with no coordinator to report to and
+      no pull or merge request open or closed in the last 24 hours. A worker's
+      finished turn goes to With coordinator, unless one of its pull or merge
+      requests is open (In review) or the last one closed in the last 24 hours
+      (Done).
+    of: [needs-you]
+
+  - id: stale
+    text: >-
+      Not a column: a flag on a busy card that has been silent for longer than
+      `--stale-after` (20 minutes by default).
+    anchors:
+      - test: internal/core.TestStaleThresholdIsConfigurable
+      - file: cmd/sitboard/main.go
+        has: 20*time.Minute
+
+  - id: reaches-out
+    text: >-
+      It runs on your machine, and talks to GitHub and GitLab through your own
+      gh and glab.
+    of: [sends-github, sends-gitlab]
+
+  - id: board-local
+    text: >-
+      The board is a small server on 127.0.0.1, behind a private link it
+      prints when it starts. There is no account and no telemetry.
+    of: [local-only, private-link, no-telemetry]
+
+  - id: hero
+    text: >-
+      sitboard is one command. It finds the Claude Code and Codex terminal
+      sessions already running on your machine, in every project, and shows who
+      is working, who is waiting for you, and which pull or merge request came
+      from which agent. Nothing to set up, and nothing leaves your machine but
+      what your own gh and glab ask GitHub and GitLab, and what it reads and
+      writes in files you keep on a network folder. With --no-github and
+      --no-gitlab it runs no gh and no glab.
+    of: [what-it-is, codex-sessions, nothing-leaves, no-traffic-flags]
+
+  - id: faq-what
+    text: >-
+      sitboard is a local tool that shows the coding agents running on your
+      machine on one live board. Run `sitboard` and it starts a small server on
+      127.0.0.1 and opens the board in your browser: who is working, who needs
+      you, and which pull requests belong to which agent.
+    of: [what-it-is, local-only]
+
+  - id: faq-ownership
+    text: >-
+      A pull request belongs to the session whose own `gh pr create` created
+      it, as recorded in that session's transcript or Codex session file; one
+      that `gh` reports as already existing does not count.
+    anchors:
+      - code: internal/core.Board.linkedPRsLocked
+
+  - id: faq-coordinator
+    text: >-
+      A worker belongs to the coordinator whose own `agtermctl session new`
+      started it, so that link needs agterm. When sitboard cannot tell, the
+      card says unknown instead of guessing.
+    anchors:
+      - file: web/src/data/about.ts
+        has: "return text || 'unknown'"
+
+  - id: faq-systems
+    text: >-
+      macOS first. Linux builds exist, but we have not tested them yet. There
+      is no Windows build.
+    anchors:
+      - file: scripts/release.sh
+        has: linux
+
+  - id: faq-install
+    text: >-
+      With Homebrew: `brew install izzy-agency/tap/sitboard`, and `brew
+      upgrade sitboard` to update. From source, with Go 1.27 and Node 22: clone
+      the repository and run `make build`, which writes one binary with the
+      page built in.
+    anchors:
+      - file: Makefile
+        has: "build: web-build go-build"
+
+  - id: faq-licence
+    text: >-
+      Yes, it is free and open source under the MIT licence, made by IZZY
+      Agency. There is no account to create. `sitboard --licenses` prints its
+      licence and the notices of the third-party components in its binary.
+    anchors:
+      - file: cmd/sitboard/main.go
+        has: '"licenses"'
+
+  - id: faq-control
+    text: >-
+      No. sitboard only shows agents. Its actions are focusing a session in
+      agterm or its tmux pane (or showing its details to copy), marking a card
+      as seen, marking the catch-up read, turning notifications on or off, and
+      forgetting or setting a project grouping; it never types into, stops or
+      changes a session, and it lists leftovers but removes nothing.
+    anchors:
+      - file: internal/server/actions.go
+        has: StatusNoContent
+
+  - id: install-homebrew
+    text: >-
+      macOS and Linux. Signed and notarized on macOS; we have not tested the
+      Linux builds yet.
+    anchors:
+      - file: scripts/notarize.sh
+        has: notarytool
+
+  - id: install-source
+    text: Go 1.27 and Node 22. One binary, the page is built in.
+    anchors:
+      - file: go.mod
+        has: go 1.27
+
+  - id: install-needs
+    text: >-
+      Needs Claude Code or Codex. agterm is optional and adds the one-click
+      jump and better card titles; a Claude Code session in tmux jumps to its
+      pane when a tmux client is attached. glab, logged in, adds GitLab merge
+      requests. Not there yet: leftovers on GitLab, and removing leftovers.
+    of: [jump, gitlab-mrs, not-yet-gitlab-leftovers, not-yet-removal]
+
+  # ── Privacy ────────────────────────────────────────────────────────────────
+  - id: runs-while
+    text: >-
+      sitboard runs on your machine and only while you run it. What it does
+      with data, in short:
+    anchors:
+      - code: cmd/sitboard.listen
+
+  - id: local-only
+    text: >-
+      **Local only.** sitboard listens on `127.0.0.1`, never on your network.
+    short: >-
+      **Local only.** It listens on `127.0.0.1` and nothing else.
+    brief: >-
+      The board is a server on 127.0.0.1 that refuses requests from other
+      sites and hosts.
+    anchors:
+      - code: cmd/sitboard.listen
+      - test: cmd/sitboard.TestListensOnLoopbackOnly
+      - test: internal/server.TestRejectsForeignOrigin
+
+  - id: private-link
+    text: >-
+      **A private link for this run.** It prints a link that carries a secret,
+      new each time sitboard starts; your browser swaps it for a cookie.
+      Requests without it, and requests from other websites, are refused.
+    short: >-
+      **A private link per run.** The board opens on a link with a random
+      token that is new each time sitboard starts and dies when it stops.
+    anchors:
+      - code: cmd/sitboard.newToken
+      - code: internal/server.secure
+      - test: internal/server.TestNoTokenIs401
+      - test: internal/server.TestCrossSiteFetchIsRefused
+
+  - id: nothing-leaves
+    text: >-
+      **Nothing leaves your machine**, except what your own `gh` and `glab`
+      commands send (and what sitboard reads and writes in files you keep on a
+      network folder, such as a `--state` file there):
+    short: >-
+      **Nothing leaves your machine**, except what your own `gh` and `glab`
+      commands send, which you can switch off (and what it reads and writes in
+      files you keep on a network folder, such as a `--state` file there):
+    brief: >-
+      Nothing leaves your machine but what your own `gh` sends to GitHub, what
+      your own `glab` sends to a GitLab host your sessions use, and what
+      sitboard reads and writes in files you keep on a network folder.
+    keeps: [network folder]
+    anchors:
+      - code: internal/adapters/internal/runner.execFunc
+      - code: internal/core.Board.refreshForges
+      - code: cmd/sitboard.listen
+      - code: cmd/sitboard.statePath
+
+  - id: sends-github
+    sub: true
+    text: >-
+      to GitHub, a check that `gh` is logged in, and read-only lookups for pull
+      request state and, for the Issues panel, for the open issues of the
+      repositories of the projects on the board (their owner and name, at most
+      20 to a call and 100 to a look). The first look runs once sitboard
+      knows a repository to ask about, then about every ten minutes; a
+      repository new to the board or the panel reading the list can start
+      one sooner, never within a minute of the latest one's start nor while
+      one is under way. Once GitHub's rate limit stops a look, issue lookups,
+      and pull request and Leftovers lookups for the repositories that look
+      asked about, wait five minutes; one that had already passed that check
+      can still send its request. For Leftovers, these lookups include up to 100 branch
+      names from each clone on the board: its local branches (never-pushed
+      ones included) first, then its origin branches. `gh` runs with your
+      environment and handles its own login: sitboard never asks for a GitHub
+      token, and keeps, logs and serves none (a token in the environment of an
+      agent's process it reads, below, is read past with the rest).
+    short: >-
+      to GitHub, `gh` sends a check that it is logged in and read-only lookups
+      for pull request state and for the open issues of your projects'
+      repositories; for leftovers, these lookups include up to 100
+      branch names from each clone on the board, local ones (never-pushed ones
+      included) first, then origin ones. `gh` runs with your environment and
+      handles its own login: sitboard never asks for a GitHub token, and
+      keeps, logs and serves none.
+    brief: >-
+      `gh` sends a check that it is logged in and read-only lookups (pull
+      requests, open issues), which for leftovers include branch names.
+    anchors:
+      - code: internal/adapters/github.provider.probeNow
+      - code: internal/adapters/github.provider.Evidence
+      - code: internal/adapters/github.provider.OpenIssues
+      - value: internal/adapters/github.issueReposPerCall
+        is: "20"
+      - value: internal/core.issuesEvery
+        is: "10 * time.Minute"
+      - value: internal/core.maxIssueRepos
+        is: "100"
+      - value: internal/contract.IssuesFreshFor
+        is: "time.Minute"
+      - value: internal/adapters/github.rateLimitBackoff
+        is: "5 * time.Minute"
+      - code: internal/core.Board.issuesDueLocked
+      - code: internal/leftover.Names
+      - value: internal/leftover.MaxNames
+        is: "100"
+      - code: internal/adapters/github.env
+      - file: internal/adapters/internal/proc/argsenv_linux.go
+        has: "defer func() { clear(environ); clear(cmdline) }()"
+      - test: internal/leftover.TestNames
+
+  - id: sends-gitlab
+    sub: true
+    text: >-
+      to GitLab, through `glab`'s own login, and only about a GitLab host that
+      a session inside `--roots` points to (the host of a merge request it
+      created or a push of its named, or of its folder's origin when that is
+      not on github.com): `glab auth status`, glab's own login check, which
+      contacts the host when glab has a login stored for it; and read-only
+      lookups for merge request state, only to a host whose login check passed
+      within the last ten minutes (gitlab.com included), which send the
+      project's path or numeric id and the numbers of the merge requests a
+      session created or a push of its named, and ask which issues such a
+      merge request closes. No branch name goes to GitLab. glab is asked
+      about a host by its name without a port, so it goes where its own
+      configuration for that name points.
+    short: >-
+      to GitLab, `glab` talks only about a GitLab host that a session inside
+      `--roots` points to (the host of a merge request it created or a push of
+      its named, or of its folder's origin when that is not on github.com):
+      `glab auth status`, glab's own login check, contacts the host when glab
+      has a login stored for it; lookups go only to a host whose login check
+      passed within the last ten minutes (gitlab.com included) and send the
+      project's path or numeric id and the numbers of the merge requests a
+      session created or a push of its named, and ask which issues such a
+      merge request closes. No branch name goes to GitLab.
+    brief: >-
+      `glab` sends its own login check, which contacts the host when glab has
+      a login stored for it, and, once that check has passed, read-only
+      lookups with a project's path or id and merge request numbers.
+    anchors:
+      - code: internal/core.Board.gitlabDemandLocked
+      - code: internal/core.Board.lookupsLocked
+      - code: internal/core.Board.refreshForges
+      - code: internal/adapters/gitlab.Provider.host
+      - code: internal/adapters/gitlab.Provider.Lookup
+      - code: internal/adapters/gitlab.closesIssuesPath
+      - value: internal/adapters/gitlab.knownFor
+        is: 10 * time.Minute
+      - test: internal/core.TestOutsideRootsAsksNoGitLabHost
+      - test: internal/adapters/gitlab.TestLookupAsksOnlyKnownHosts
+
+  - id: no-traffic-flags
+    text: >-
+      **`--no-github` and `--no-gitlab` together stop all traffic to GitHub
+      and GitLab.** With both, sitboard runs no `gh` and no `glab`, and it
+      opens no network connection of its own. Two things stay: the board's own
+      server on `127.0.0.1`, which only your machine can reach, and the files
+      it reads and writes, which go over the network only when you keep them
+      on a network folder (such as a `--state` file there). With `--no-github`
+      alone, `glab` can still contact the GitLab hosts your sessions use.
+    short: >-
+      With `--no-github` alone, `glab` can still contact the GitLab hosts your
+      sessions use. **`--no-github` and `--no-gitlab` together stop all
+      traffic to GitHub and GitLab**: with both, it runs no `gh` and no
+      `glab` and opens no network connection of its own; the board's server
+      on `127.0.0.1` stays, and so do its files, which go over the network
+      only on a network folder.
+    brief: >-
+      With `--no-github` alone, `glab` can still contact the GitLab hosts your
+      sessions use. With both `--no-github` and `--no-gitlab`, sitboard runs
+      no `gh` and no `glab` and opens no network connection of its own; its
+      files go over the network only if you keep them on a network folder.
+    keeps: [no `gh` and no `glab`, network folder]
+    anchors:
+      - code: internal/core.Board.gitlabOffLocked
+      - code: internal/core.Board.githubOffLocked
+      - code: internal/adapters/gitlab.Provider.Probe
+      - code: cmd/sitboard.listen
+      - test: cmd/sitboard.TestNoGithubFlagTurnsProviderOff
+      - test: internal/core.TestGitLabOffAsksNothing
+
+  - id: glab-runs
+    text: >-
+      **glab.** sitboard runs your own `glab` (found on your `PATH` or in the
+      usual install folders); with glab not installed it runs none. `glab
+      version` runs when sitboard starts (and each minute while it fails);
+      while a session needs a host that is not github.com, `glab auth status`
+      runs for it about once a minute until the check passes, then about every
+      eight minutes. For a host glab is logged in to, sitboard also runs `glab
+      config get --host <host> subfolder`, which reads glab's own config.
+    short: >-
+      **glab.** sitboard runs your own `glab`; with glab not installed it runs
+      none. `glab version` runs when sitboard starts (and each minute while it
+      fails); while a session needs a host that is not github.com, `glab auth
+      status` runs for it about once a minute until the check passes, then
+      about every eight minutes.
+    anchors:
+      - code: internal/adapters/gitlab.findGlab
+      - code: internal/adapters/gitlab.Provider.probeNow
+      - code: internal/core.Board.StartGitLabProbe
+      - value: internal/core.hostEvery
+        is: time.Minute
+      - value: internal/adapters/gitlab.unknownFor
+        is: time.Minute
+      - value: internal/adapters/gitlab.renewAfter
+        is: 8 * time.Minute
+      - test: internal/adapters/gitlab.TestFindGlab
+
+  - id: glab-env
+    joins: true
+    text: >-
+      glab runs in `/` with an environment sitboard builds, not your shell's:
+      `PATH=/usr/bin:/bin`, `HOME`, `USER` and `LOGNAME` from the system's
+      user list, the keyring's `DBUS_SESSION_BUS_ADDRESS` and
+      `XDG_RUNTIME_DIR`, the proxy variables `HTTP_PROXY`, `HTTPS_PROXY` and
+      `NO_PROXY` (and their lowercase forms; `ALL_PROXY` is not passed), so a
+      proxy you set sees which hosts glab talks to, and settings that turn off
+      glab's telemetry, update checks, prompts, debug output and helper
+      downloads. No token, host or config folder from your environment
+      reaches glab. sitboard never reads glab's config file itself, and keeps,
+      logs and serves no token; glab's output is read for its answer and
+      never logged.
+    short: >-
+      glab runs with an environment sitboard builds, not your shell's: no
+      token, host or config folder from your environment; your proxy variables
+      (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` and their lowercase forms; not
+      `ALL_PROXY`) are passed, so a proxy you set sees which hosts glab talks
+      to; telemetry and update checks are off. sitboard never reads glab's
+      config file itself, keeps no token and never logs glab's output.
+    anchors:
+      - code: internal/adapters/gitlab.glabEnv
+      - value: internal/adapters/gitlab.glabPath
+        is: '"/usr/bin:/bin"'
+      - value: internal/adapters/gitlab.glabDir
+        is: '"/"'
+      - code: internal/adapters/gitlab.proxyEnv
+      - code: internal/adapters/gitlab.passEnv
+      - code: internal/adapters/gitlab.quietEnv
+      - value: internal/adapters/gitlab.passProxy
+        is: "true"
+      - test: internal/adapters/gitlab.TestEnvIsBuiltNotInherited
+      - test: internal/adapters/gitlab.TestAccountFromUserListOnly
+
+  - id: reads-claude
+    text: >-
+      **What it reads.** Claude Code's session files, the transcripts of
+      running sessions and, at start, those changed in the last 8 days,
+      including ended sessions, to derive states, times, models, effort levels,
+      token counts, Claude Code's own cost estimates, pull requests, artifacts
+      and names. It keeps only those derived facts, in memory. From
+      `~/.claude.json` it reads only Claude Code's price table
+      (`additionalModelCostsCache`); every other key in that file is read past
+      and not kept.
+    short: >-
+      **What it reads.** Claude Code's session files, the transcripts of
+      running sessions and, at start, those changed in the last 8 days, to
+      derive states, times, models, effort levels, token counts, cost
+      estimates, pull requests, artifacts and names; it keeps only those
+      derived facts, in memory. From `~/.claude.json` it reads only Claude
+      Code's price table; every other key in that file is read past and not
+      kept.
+    brief: >-
+      It reads what Claude Code already writes on your machine: a small file
+      for each live session, and the transcripts of running sessions and, at
+      start, of those changed in the last 8 days, for the pull requests they
+      opened, the artifacts they published, the workers they started, their
+      effort level and their token use.
+    anchors:
+      - value: internal/adapters/claude.spendKeep
+        is: 8 * 24 * time.Hour
+      - code: internal/adapters/claude.readPrices
+      - test: internal/adapters/claude.TestNoTranscriptTextInEmittedFacts
+
+  - id: reads-process
+    joins: true
+    text: >-
+      When it first sees a session in a running `claude` process, it reads the
+      process's arguments and environment (on macOS through the kernel's
+      `kern.procargs2` query, on Linux from `/proc/<pid>/cmdline` and
+      `/proc/<pid>/environ`) and keeps four facts: the agterm session id from
+      `AGTERM_SESSION_ID`, the tmux pane and its server's socket path from
+      `TMUX_PANE` and `TMUX`, the effort level the session was started with,
+      from the `--effort` flag or `CLAUDE_CODE_EFFORT_LEVEL`, as one of the
+      five level words, and whether it was started with `-p` or `--print`, as
+      a yes or no. Every other argument and variable is read past and not
+      kept, logged or served.
+    short: >-
+      When it first sees a session in a running `claude` process, it reads the
+      process's arguments and environment (on macOS from the kernel, on Linux
+      from `/proc`) and keeps four facts: the agterm
+      session id, the tmux pane and its server's socket path, the effort level
+      the session was started with (from Claude Code's effort flag or
+      `CLAUDE_CODE_EFFORT_LEVEL`), and whether it was started with Claude
+      Code's print flag (`-p`). Every other argument and variable is read past
+      and not kept, logged or served.
+    brief: >-
+      From each running Claude Code session's process it keeps four facts: its
+      agterm session id, its tmux pane, the effort level it was started with
+      and whether it was started with `-p`.
+    anchors:
+      - code: internal/adapters/claude.pickProcFacts
+      - code: internal/adapters/claude.pickTmux
+      - code: internal/adapters/claude.launchEffort
+      - code: internal/adapters/claude.printFlag
+      - value: internal/adapters/claude.agtermVar
+        is: '"AGTERM_SESSION_ID"'
+      - value: internal/adapters/claude.effortVar
+        is: '"CLAUDE_CODE_EFFORT_LEVEL"'
+      - test: internal/adapters/claude.TestProcFactsKeepOnlyTheLevel
+
+  - id: reads-tools
+    joins: true
+    text: >-
+      It also asks `git` about each session's folder (repository, branch and
+      remote) and, for Leftovers, about the worktrees, local and origin
+      branches and stashes of the repositories on the board and the local
+      status of the worktrees that could be leftovers and of a main checkout
+      where an idle session sits (read only: no fetch, no lock), every 10
+      minutes, or sooner when the board sees a merge or a listed session
+      changes (at most once a minute); `ps` for when the `claude` and `codex`
+      processes started; `lsof` (on Linux `/proc`) for each of your processes'
+      parent and working folder, kept in memory for that look only; and, with
+      agterm, `agtermctl` for its windows, workspaces, sessions and their
+      events. Stash messages, file names from `git status`, which process
+      works where and commit ids stay in memory: they are not served, written
+      to disk or logged.
+    short: >-
+      It also asks `git` about each session's folder (repository, branch and
+      remote) and, for leftovers, every 10 minutes or sooner, about the
+      worktrees, branches and stashes of the repositories on the board and the
+      local status of the worktrees that could be leftovers and of a main
+      checkout where an idle session sits (read only: no fetch, no lock); `ps`
+      for when the `claude` and `codex` processes started; `lsof` (on Linux
+      `/proc`) for each of your processes' parent and working folder, kept for
+      that look only; and,
+      with agterm, `agtermctl` for its windows, workspaces, sessions and their
+      events. Stash messages, file names from `git status`, which process
+      works where and commit ids stay in memory: they are not served, written
+      to disk or logged.
+    brief: It asks git for each project's repository and branch.
+    anchors:
+      - code: internal/adapters/gitsrc.gitVars
+      - value: internal/core.leftoversEvery
+        is: 10 * time.Minute
+      - value: internal/core.leftoversSoonest
+        is: time.Minute
+      - code: internal/adapters/internal/proc.PSStarts
+      - code: internal/adapters/procs.lister.lsof
+      - code: internal/adapters/procs.lister.Procs
+
+  - id: tmux-reads
+    text: >-
+      **tmux.** For a Claude Code session in tmux, sitboard asks `ps` for the
+      terminal of the session's process, and asks `tmux` once, on that pane's
+      own socket and never starting a server, whether the pane shows that
+      terminal; only then does the card offer the tmux jump. Before talking to
+      a tmux socket it checks that the socket is yours, in a folder of yours
+      that nobody else can write to (a socket directly in a shared folder such
+      as `/tmp` gets no tmux jump), and it runs `tmux` by the absolute path it
+      found at start (in a folder owned by you or root that nobody else can
+      write to), giving it nothing from its environment but `PATH`. It keeps
+      the pane's terminal and the session process's id and start time in
+      memory, never on disk, to check them again when you click. When you
+      jump, it asks `tmux` for that server's panes and clients, and reads the
+      arguments and environment of the tmux client it is about to move,
+      keeping only its agterm session id (none when that client itself runs in
+      tmux). The pane and the socket never reach the page.
+    short: >-
+      **tmux.** For a Claude Code session in tmux, it asks `tmux` once, on that
+      pane's own socket and never starting a server, whether the pane shows the
+      session's terminal; only then does the card offer the tmux jump. It talks
+      only to a socket that is yours, in a folder of yours that nobody else can
+      write to, and runs `tmux` from a folder owned by you or root, with
+      nothing from its environment but `PATH`. When you jump, it reads the
+      arguments and environment of the tmux client it is about to move and
+      keeps only its agterm session id. The pane and the socket stay in memory
+      and never reach the page.
+    anchors:
+      - code: internal/adapters/claude.adapter.ownPane
+      - code: internal/adapters/tmux.Adapter.tmux
+      - code: internal/adapters/tmux.safeSocket
+      - code: internal/adapters/tmux.lookBin
+      - code: internal/adapters/tmux.Adapter.raise
+      - test: internal/adapters/tmux.TestSafeSocketRefusesWhatIsNotTheUsersSocket
+      - test: internal/adapters/tmux.TestTmuxGetsOnlyPATH
+
+  - id: codex-reads
+    text: >-
+      **Codex.** If Codex's folder exists (`~/.codex`, or `$CODEX_HOME`),
+      sitboard reads the rollout files under its `sessions` folder: the first
+      line of the recent ones (by modification time) and of those whose lock
+      is held, to tell which kind of session it is; the rollouts of running and
+      recently active sessions, for states, times, models, effort levels, pull
+      requests, the sessions they started and token counts; and, at start,
+      those of the last 7 days, including sessions that had already ended, for
+      their folder, model and effort, finished turns, pull and merge requests
+      and token counts. It reads Codex's session index for each
+      session's title, and lists the names of Codex's lock files: it asks
+      `lsof` (on Linux `/proc/<pid>/fd`) which process has a session's lock
+      file open, without taking the lock. To find the Codex terminal clients
+      it asks `ps` for the command lines of all your processes and looks only
+      at those of `codex` itself, keeping from each a few facts about the
+      process (its id, user and start time, what kind of Codex client it is,
+      and a folder given with `--cd`); the others are read past. Of a client it
+      confirms as Codex's terminal client it reads the environment, keeping
+      only the agterm session id and whether `CODEX_HOME` is the folder it
+      watches, and asks for its working folder when the command line does not
+      give it; it drops what it read when it cannot confirm the process is
+      still the same one. It never opens Codex's databases, and reading Codex
+      writes nothing in Codex's folder. It keeps only the derived facts, in memory; Codex's prompts,
+      replies and tool output are never kept or shown.
+    short: >-
+      **Codex.** If Codex's folder exists, it reads the first line of Codex's
+      recent session files (by modification time) and of those whose lock is
+      held, the files of running and recently active sessions, for states,
+      times, models, effort levels, pull requests and token counts, and, at
+      start, those of the last 7 days, including sessions that had already
+      ended, for their folder, model and effort, finished turns, pull and
+      merge requests and token counts; Codex's session index for each
+      session's title; and which process holds a session's lock file, without
+      taking the lock. It finds the Codex terminal clients among the command
+      lines of your processes, keeping only those of `codex`; from a terminal
+      client's environment it keeps only the agterm session id and whether
+      `CODEX_HOME` is the folder it watches, and it asks for its working
+      folder when the command line does not give it. It never opens Codex's
+      databases, and reading Codex writes nothing in Codex's folder. Codex's
+      prompts, replies and tool output are never kept or shown.
+    brief: >-
+      For Codex it reads Codex's own session files and session index, and
+      finds its terminal clients among your processes' command lines.
+    anchors:
+      - code: internal/adapters/codex.New
+      - value: internal/adapters/codex.turnWindow
+        is: 7 * 24 * time.Hour
+      - code: internal/adapters/codex.lsofHolders
+      - code: internal/adapters/codex.readEnvInfo
+      - code: internal/adapters/codex.psList
+      - test: internal/adapters/codex.TestNewUsesCodexHome
+      - test: internal/adapters/codex.TestHeldLockFindsARolloutOutsideTheWindow
+
+  - id: writes
+    text: >-
+      **What it writes.** Its own state file, saved through a temporary file
+      beside it, and that file's lock file (creating their folder if needed);
+      at start, to check that the folder can be written, it also creates an
+      empty temporary file there and removes it. The state file
+      (`~/Library/Application Support/sitboard/state.json` on macOS; on Linux
+      `$XDG_STATE_HOME/sitboard/state.json`, by default
+      `~/.local/state/sitboard/state.json`; or the file given with `--state`)
+      keeps which cards you have seen, the folders that group projects, the
+      groupings you forgot, the folders you set to always or never group, when
+      the newest list you marked read with "Caught up" was made, and, for each
+      catch-up item marked read whose own time is in the last 7 days, a hash
+      of the item's identity (not the identity itself) and that time; an item
+      older than 7 days is dropped on the next save. A file of sitboard 0.4.0
+      or earlier loses its catch-up marker and the items it kept as unread
+      the first time this version opens it. While it holds items marked read,
+      the file is written as version 3, which sitboard 0.4.0 and earlier
+      refuse to open; the first save after the last of them is 7 days old
+      writes it as an older version again. A
+      running board that can write the lock file writes its process number and
+      machine name there, and a clean stop empties it; when it can only read
+      the lock file, it writes nothing there and leaves what was in it. With
+      `--no-state` it writes none of these. These are sitboard's own writes:
+      the `gh` and `glab` it runs keep their own files as they always do.
+    short: >-
+      **Two small files of its own**: `state.json` (saved through a temporary
+      file beside it), which keeps which cards you have seen, which folders
+      group projects, which groupings you forgot, which folders you set to
+      always or never group, when the newest list you marked read with "Caught
+      up" was made, and, for each catch-up item marked read whose own time is
+      in the last 7 days, a hash of the item's identity (not the identity
+      itself) and that time; and beside it `state.json.lock`, which
+      keeps one board per state file: a running sitboard that can write it
+      writes only its process number and machine name there, and a clean stop
+      empties it; one that can only read it writes nothing there and leaves
+      what was in it. Both are kept in your user folder
+      (`~/Library/Application Support/sitboard/` on macOS,
+      `~/.local/state/sitboard/` on Linux unless `$XDG_STATE_HOME` says
+      otherwise), unless you give sitboard another file with `--state`, which
+      puts the lock file beside that one. At start it checks that folder can
+      be written with an empty temporary file it removes. With `--no-state` it
+      writes none of these. The `gh` and `glab` it runs keep their own files.
+    keeps: [can only read]
+    anchors:
+      - code: internal/state.document
+      - code: internal/state.CatchupKey
+      - code: internal/state.writeAtomic
+      - code: internal/state.CheckWritable
+      - code: internal/state.Lock
+      - code: internal/state.FileLock.Release
+      - code: cmd/sitboard.stateFile
+      - test: internal/state.TestWriteIsAtomic
+      - test: internal/state.TestLockNamesNoOneWhenTheHolderCannotWrite
+      - test: cmd/sitboard.TestNoStateWritesNothing
+
+  - id: page-gets
+    text: >-
+      **No conversation text, file contents or tool results.** The page gets
+      session names and titles, home-relative folder paths (including the folders you set to
+      always or never group, up to 200, whether or not an agent works in
+      them), repository names with their owner ("owner/name") or GitLab group
+      path, agterm workspace names, pull request and merge request numbers,
+      titles and links with their state, checks, review or approval and draft
+      flag, the numbers and links of the issues they close in their own
+      repository or project, the GitLab status line, the links and titles of
+      the artifacts a session published, and, for Leftovers, the home-relative
+      worktree and clone paths and branch names of merged work still on the
+      machine, counts of held-back items by reason and when that list was
+      made, each card's id (the tool's name and the session's own id, such as
+      `claude:` and Claude Code's session id) and, with agterm, the agterm
+      session id of its terminal, plus derived fields such as states, times,
+      model ids and effort levels, token counts and the estimated cost at API
+      list price, subagent counts, the versions of the tools it reads, and
+      sitboard's own version, commit, operating system and architecture. It
+      never serves the text of prompts and replies, the contents of files or
+      whole tool results. The free text it does serve is in those names and
+      titles, which hold whatever words they were given: a session's name, a
+      pull or merge request's title, an artifact's title as the session's own
+      publish reported it.
+    short: >-
+      **No conversation text, file contents or tool results.** The text of
+      prompts and replies, the contents of files and whole tool results are
+      never served. The page gets names (of sessions, of repositories with
+      their owner or GitLab group, of agterm workspaces), titles (of sessions,
+      pull and merge requests and artifacts), which hold whatever words they
+      were given, home-relative folder paths, pull request, merge request,
+      issue and artifact links, each card's id (the tool and the session's own
+      id) and, with agterm, its terminal's session id, and derived fields such
+      as states, checks, times, model ids, effort levels, token counts,
+      estimated costs, counts and versions; for leftovers, the home-relative
+      paths and branch names of merged work still on the machine.
+    brief: >-
+      The page gets names, titles, folder paths, states, pull and merge request
+      titles and links, the links of the issues they close, and artifact titles
+      and links, never the text of prompts and replies, file contents or whole
+      tool results. A name or a title holds whatever words it was given: an
+      artifact's title, for one, is what the session's publish reported.
+    anchors:
+      - value: internal/state.MaxGroupingSettings
+        is: "200"
+      - field: Agent.name
+      - field: Agent.folder
+      - field: Agent.workspace
+      - field: Agent.terminalId
+      - field: Card.id
+      - code: internal/core.cardArtifacts
+      - code: internal/core.clean
+      - field: Card.title
+      - field: Card.titleSource
+      - field: Project.name
+      - field: Project.path
+      - field: Project.area
+      - field: Project.parentId
+      - field: Project.repo
+      - field: Project.repoForge
+      - field: GroupingSetting.mode
+      - field: GroupingSetting.name
+      - field: GroupingSetting.path
+      - field: GroupingSetting.projectId
+      - field: PullRequest.checks
+      - field: PullRequest.draft
+      - field: PullRequest.forge
+      - field: PullRequest.number
+      - field: PullRequest.repo
+      - field: PullRequest.review
+      - field: PullRequest.state
+      - field: PullRequest.title
+      - field: PullRequest.url
+      - field: Issue.forge
+      - field: Issue.number
+      - field: Issue.repo
+      - field: Issue.url
+      - field: Artifact.title
+      - field: Artifact.url
+      - field: SourceStatus.kind
+      - field: SourceStatus.ready
+      - field: SourceStatus.state
+      - field: SourceStatus.tested
+      - field: SourceStatus.version
+      - field: Leftovers.asOf
+      - field: Leftovers.held
+      - field: Leftovers.items
+      - field: Leftovers.partial
+      - field: Leftovers.state
+      - field: LeftoversSummary.held
+      - field: LeftoversSummary.items
+      - field: LeftoversSummary.partial
+      - field: HeldCount.count
+      - field: HeldCount.reason
+      - field: Leftover.mergedAt
+      - field: Leftover.ownSession
+      - field: Leftover.parts
+      - field: Leftover.projectId
+      - field: Leftover.pullRequest
+      - field: Leftover.waiting
+      - field: LeftoverPart.branch
+      - field: LeftoverPart.cardId
+      - field: LeftoverPart.idleSince
+      - field: LeftoverPart.ignored
+      - field: LeftoverPart.kind
+      - field: LeftoverPart.name
+      - field: LeftoverPart.path
+      - field: CatchupItem.agentName
+      - field: CatchupItem.artifact
+      - field: CatchupItem.at
+      - field: CatchupItem.cardId
+      - field: CatchupItem.kind
+      - field: CatchupItem.projectId
+      - field: CatchupItem.projectName
+      - field: CatchupItem.pullRequest
+      - field: CatchupItem.title
+      - field: Catchup.asOf
+      - field: Catchup.list
+      - field: Catchup.partial
+      - field: Catchup.items
+      - field: Catchup.marker
+      - field: Catchup.pending
+      - field: Catchup.total
+      - field: Catchup.unsaved
+
+  - id: page-derived
+    joins: true
+    text: >-
+      A session's name is the one Claude Code records for it or, when it has
+      none, its agterm terminal's name. A Codex session's name is the title
+      Codex recorded for it, which the model wrote from the conversation (or
+      the one you gave it), cleaned and shortened. A session's title is its
+      open pull or merge request's title or, with agterm, the short title its
+      terminal shows there (for Claude Code, its own summary of the task);
+      without either, it is the session's name, its terminal's name or its
+      folder's name.
+    short: >-
+      A session's title is its open pull or merge request's title or, with
+      agterm, the short title its terminal shows there (for Claude Code, its
+      own summary of the task); without either, the session's name, its
+      terminal's name or its folder's name.
+    anchors:
+      - code: internal/core.title
+      - field: Agent.effort
+      - field: Agent.effortSource
+      - field: Agent.effortWord
+      - field: Agent.jump
+      - field: Agent.lastActivity
+      - field: Agent.live
+      - field: Agent.model
+      - field: Agent.parent
+      - field: Agent.parentCardId
+      - field: Agent.startedAt
+      - field: Agent.status
+      - field: Agent.statusSince
+      - field: Agent.tool
+      - field: Card.agent
+      - field: Card.artifacts
+      - field: Card.attention
+      - field: Card.column
+      - field: Card.issues
+      - field: Card.projectId
+      - field: Card.pullRequests
+      - field: Card.seen
+      - field: Card.spend
+      - field: Card.subagents
+      - field: Counts.inReview
+      - field: Counts.needsYou
+      - field: Counts.stale
+      - field: Counts.working
+      - field: Project.counts
+      - field: Project.id
+      - field: Tokens.cacheRead
+      - field: Tokens.cacheWrite
+      - field: Tokens.input
+      - field: Tokens.output
+      - field: Spend.priced
+      - field: Spend.recorded
+      - field: Spend.tokens
+      - field: Spend.usd
+      - field: SpendSummary.days
+      - field: SpendSummary.pending
+      - field: SpendDay.codex
+      - field: SpendDay.day
+      - field: SpendDay.projects
+      - field: SpendDay.spend
+      - field: ProjectSpend.codex
+      - field: ProjectSpend.name
+      - field: ProjectSpend.path
+      - field: ProjectSpend.projectId
+      - field: ProjectSpend.spend
+      - field: Snapshot.agtermPresent
+      - field: Snapshot.build
+      - field: Snapshot.cards
+      - field: Snapshot.counts
+      - field: Snapshot.generatedAt
+      - field: Snapshot.groupingSettings
+      - field: Snapshot.leftovers
+      - field: Snapshot.plainShells
+      - field: Snapshot.projects
+      - field: Snapshot.seq
+      - field: Snapshot.sources
+      - field: Snapshot.spend
+      - field: Snapshot.version
+      - field: Build.arch
+      - field: Build.commit
+      - field: Build.os
+      - field: Build.version
+
+  - id: page-free-text
+    joins: true
+    text: >-
+      The only free text the page gets from a transcript is an artifact's
+      title (the title its own publish reported) and, when the session's own
+      record has no name (as for a session that has ended), the name Claude
+      Code recorded for it in the transcript (yours, or one it made itself, for
+      example from a plan), both cleaned and shortened.
+    short: >-
+      The only free text the page gets from a transcript is the title of an
+      artifact a session published, as its own publish reported it, and, when
+      the session's own record has no name (as for a session that has ended),
+      the name Claude Code recorded for it in the transcript (yours, or one it
+      made itself, for example from a plan), both cleaned and shortened.
+    anchors:
+      - test: internal/adapters/claude.TestNoTranscriptTextInEmittedFacts
+      - code: internal/core.cardArtifacts
+
+  - id: page-hosts
+    joins: true
+    text: >-
+      The GitLab hostnames of your projects' origins and of the merge
+      requests, and the host named in the GitLab status line, appear on the
+      page. So does the list of the GitLab hosts the page may link to: each
+      with its web port, if the address has one, and the subfolder glab has
+      for it (as in `example.com:8443/gitlab`), which the page's link check
+      requires the project's address to start with.
+    anchors:
+      - field: Project.repoHost
+      - field: PullRequest.host
+      - field: Issue.host
+      - field: Snapshot.gitlabHosts
+      - field: SourceStatus.detail
+
+  - id: page-codex
+    joins: true
+    text: >-
+      From a Codex rollout the page gets only derived fields (model, effort,
+      folder, pull requests, finished turns' times, token counts), no text from the conversation; the
+      only free text from Codex's files is the session's title.
+    short: >-
+      From a Codex rollout the page gets only derived fields (model, effort,
+      folder, pull requests, finished turns' times, token counts); the only free text from Codex's
+      files is a session's title, which Codex recorded for it.
+    anchors:
+      - code: internal/adapters/codex.names.update
+      - code: internal/adapters/codex.tailer.consume
+      - test: internal/adapters/codex.TestNoRolloutTextInEmittedFacts
+
+  - id: page-issues
+    joins: true
+    text: >-
+      For the Issues panel, the page gets the open issues of the repositories
+      of the projects on the board, read only: for each repository its open
+      count and up to 30 issues with their number, title, link, milestone and
+      its due date, up to 5 labels and when each was last updated, plus each
+      project's open count. A title, a milestone and a label hold whatever
+      words they were given on the forge; sitboard cleans them and shortens
+      long ones before serving them. They are
+      kept in memory only, never written anywhere. When an issue look finds
+      the GitHub login gone, they leave the page.
+    short: >-
+      For the Issues panel, the page gets the open issues of your projects'
+      repositories, read only: up to 30 per repository with their number,
+      title, link, milestone, labels and when each was last updated. A title
+      holds whatever words it was given, cleaned and shortened; they are kept
+      in memory only, and they leave the page when an issue look finds the
+      GitHub login gone.
+    brief: >-
+      The Issues panel lists the open issues of your projects' repositories,
+      read only, kept in memory only.
+    anchors:
+      - value: internal/model.MaxRepoIssues
+        is: "30"
+      - value: internal/model.MaxIssueLabels
+        is: "5"
+      - code: internal/core.pageRepoIssues
+      - test: internal/core.TestALostLoginShowsOnTheGitHubLineUntilALookAnswersAgain
+      - field: Snapshot.issues
+      - field: Project.openIssues
+      - field: IssueCount.known
+      - field: IssueCount.open
+      - field: IssuesSummary.state
+      - field: IssuesSummary.asOf
+      - field: IssuesSummary.open
+      - field: IssuesSummary.rev
+      - field: IssuesSummary.purged
+      - field: Issues.state
+      - field: Issues.asOf
+      - field: Issues.repos
+      - field: Issues.rev
+      - field: Issues.freshMs
+      - field: RepoIssues.forge
+      - field: RepoIssues.host
+      - field: RepoIssues.repo
+      - field: RepoIssues.state
+      - field: RepoIssues.open
+      - field: RepoIssues.issues
+      - field: OpenIssue.number
+      - field: OpenIssue.title
+      - field: OpenIssue.url
+      - field: OpenIssue.milestone
+      - field: OpenIssue.milestoneDue
+      - field: OpenIssue.labels
+      - field: OpenIssue.updatedAt
+
+  - id: notifications
+    text: >-
+      **Desktop notifications** are off until you turn them on. The browser
+      shows them from the page, on this machine, and they never name an agent,
+      a project or a task. The switch, and which notifications were already
+      shown or skipped (by card, reason and time), are kept in that browser's
+      storage for the board's address, as are the page's view settings.
+    anchors:
+      - file: web/src/data/notify.ts
+        has: "SWITCH_KEY = 'sitboard.notify'"
+      - file: web/src/data/notify.ts
+        has: agents need you
+
+  - id: no-telemetry
+    text: >-
+      **No telemetry**, no update check, no crash reports.
+    brief: There is no account and no telemetry.
+    anchors:
+      - code: internal/adapters/github.env
+      - code: internal/adapters/gitlab.quietEnv
+
+  # ── Run ────────────────────────────────────────────────────────────────────
+  - id: flags
+    text: >-
+      Flags: `--port`, `--no-open`, `--no-github` (run no `gh`),
+      `--no-gitlab` (run no `glab`; with both, nothing goes to GitHub or
+      GitLab), `--roots` (only agents working under these folders), `--stale-after` (default `20m`), `--state <file>` (use
+      this state file instead of the default one), `--no-state` (keep seen
+      marks, what Catch-up marked read and groupings in memory only), `--version`,
+      `--licenses` (sitboard's licence and the third-party notices).
+    anchors:
+      - code: cmd/sitboard.parseArgs
+
+  - id: one-board
+    text: >-
+      One state file has one board: while sitboard runs, a second sitboard
+      (0.3.0 or later) on the same state file refuses to start. Give a second
+      board its own file with `--state <file>`, or use `--no-state` for a
+      throwaway run that saves nothing. The lock is a `<state file>.lock` file
+      beside the state file. A running board that can write it keeps its
+      process number and machine name there, and a clean stop empties it; one
+      that can only read it writes nothing there and leaves what was in it. On
+      a folder that does not support locks, sitboard warns and runs without
+      the lock.
+    keeps: [can only read]
+    anchors:
+      - code: internal/state.LockFile
+      - code: internal/state.Lock
+      - code: internal/state.FileLock.Release
+      - test: internal/state.TestLockRefusesASecondHolderAndNamesTheFirst
+      - test: internal/state.TestLockUnsupportedFolder
+      - test: internal/state.TestLockNamesNoOneWhenTheHolderCannotWrite
+
+  # ── Requirements ───────────────────────────────────────────────────────────
+  - id: req-agents
+    text: >-
+      [Claude Code](https://claude.com/claude-code),
+      [Codex](https://github.com/openai/codex) or both: sitboard shows their
+      sessions.
+    anchors:
+      - code: internal/adapters/codex.New
+
+  - id: req-gh
+    text: >-
+      Optional: [`gh`](https://cli.github.com), logged in, for pull request
+      state and Leftovers.
+    anchors:
+      - code: internal/adapters/github.provider.probeNow
+
+  - id: req-glab
+    text: >-
+      Optional: [`glab`](https://gitlab.com/gitlab-org/cli) (tested with
+      1.131.0), logged in with `glab auth login` to each GitLab host,
+      gitlab.com included, for GitLab merge requests.
+    anchors:
+      - value: internal/adapters/gitlab.testedVersions
+        is: '[]string{"1.131.0"}'
+
+  - id: req-agterm
+    text: >-
+      Optional: [agterm](https://github.com/umputun/agterm), for the one-click
+      jump to a session's terminal and better card titles.
+    anchors:
+      - code: internal/core.title
+
+  - id: req-tmux
+    text: >-
+      Optional: tmux, for the same one-click jump to a session running in a
+      tmux pane.
+    anchors:
+      - test: internal/core.TestJumpTargetPrefersTheTmuxPane
+
+  # ── Not there yet ──────────────────────────────────────────────────────────
+  - id: not-yet-removal
+    text: "Removing leftovers: sitboard lists them, but removes nothing."
+    anchors:
+      - code: internal/leftover.Scan
+
+  - id: not-yet-gitlab-leftovers
+    text: "GitLab in Leftovers: Leftovers cover GitHub only."
+    anchors:
+      - code: internal/core.onlyGitHub
+
+  - id: not-yet-gitlab-issues
+    text: "GitLab in the Issues panel: it lists GitHub issues only."
+    anchors:
+      - file: cmd/sitboard/main.go
+        has: "if l, ok := gh.(source.IssueLister); ok {"
+
+  - id: not-yet-ce-approval
+    text: Approval on GitLab Community Edition, which has no approval fields.
+    anchors:
+      - file: internal/adapters/gitlab/mr.go
+        has: ApprovalUnknown
+
+  - id: not-yet-codex
+    text: >-
+      In Catch-up: `codex exec` runs. A cost estimate for Codex (Codex keeps
+      no price).
+    anchors:
+      - file: internal/adapters/codex/catchup.go
+        has: 'it.meta.Source == "exec"'
+
+  - id: not-yet-codex-apps
+    text: Threads of the Codex desktop app and of editor plugins.
+    anchors:
+      - code: internal/adapters/codex.New
+
+  # ── The website's own places ───────────────────────────────────────────────
+  - id: site-tagline
+    text: A live board of the coding agents running on your machine.
+    of: [what-it-is]
+
+  - id: site-meta-description
+    text: >-
+      A local board of your Claude Code and Codex agents: who is working, who
+      needs you, which pull request is whose. Free and open source, by IZZY
+      Agency.
+    of: [what-it-is, local-only, codex-sessions, faq-licence]
+
+  - id: site-description
+    text: >-
+      sitboard is a local tool: one command starts a small server on
+      127.0.0.1 and opens a live board of the Claude Code and Codex terminal
+      sessions running on your machine, across all your projects. See who is
+      working, who needs you, and which pull requests belong to which agent.
+      Free and open source (MIT), by IZZY Agency.
+    of: [what-it-is, local-only, codex-sessions, faq-licence]
+
+  - id: site-hero-meta
+    text: no account, no telemetry
+    of: [no-telemetry]
+
+  - id: site-banner-tool
+    text: The sitboard tool itself has no telemetry.
+    of: [no-telemetry]
+
+  - id: site-privacy-meta
+    text: local only, no telemetry
+    of: [local-only, no-telemetry]
+
+  # ── llms.txt: what README leaves out ───────────────────────────────────────
+  - id: llms-columns
+    text: >-
+      Every live agent session gets a card (in-process subagents are counted
+      on their parent's card), in one of six columns: Needs you, Working, With
+      coordinator, In review, Done · 24h, Idle. A blocked agent stays in Needs
+      you and a busy one in Working, whatever its pull or merge requests; a
+      session whose state is unknown is in Idle. Once the agent has stopped:
+      In review while one of its pull or merge requests is open; Done · 24h
+      when none is open and the last one closed in the last 24 hours. A
+      session that has ended leaves the board.
+    keeps: [whatever its pull or merge requests, leaves the board]
+    anchors:
+      - code: internal/core.column
+      - code: internal/core.Board.mayShowLocked
+      - value: internal/core.keepEnded
+        is: "false"
+      - value: internal/core.doneWindow
+        is: 24 * time.Hour
+      - test: internal/core.TestColumnTable
+
+  - id: llms-title
+    text: >-
+      Card title: the newest open pull or merge request's title, else (with
+      agterm) the terminal's own title when it is more than a folder path,
+      else the session's name, else the agterm terminal's name, else the
+      folder name.
+    anchors:
+      - code: internal/core.title
+      - code: internal/core.newestOpenPR
+      - test: internal/core.TestTitlePrecedence
+      - test: internal/core.TestTitleOnlyFromTheNewestOpenPR
+
+  - id: llms-artifacts
+    text: >-
+      Artifacts: Board cards link the claude.ai artifacts their session, or
+      one of its in-process subagents, published, newest first. A rename made
+      later elsewhere is not seen, and a deleted artifact stays listed.
+    anchors:
+      - code: internal/core.cardArtifacts
+      - code: internal/adapters/claude.mergeArtifacts
+      - test: internal/core.TestCardShowsArtifactsNewestFirst
+      - test: internal/adapters/claude.TestSubagentArtifactsMergeIntoTheSession
+
+  - id: llms-effort
+    text: >-
+      Effort: next to the model, the level of the session's latest reply (for
+      Codex, of its latest turn, so it can change before a reply) (low,
+      medium, high, xhigh, max, or a short word Codex recorded, such as
+      "ultra") or, for Claude Code before its first reply, the level it was
+      started with, marked "at launch".
+    anchors:
+      - code: internal/core.agentEffort
+      - code: internal/adapters/codex.tailer.consume
+      - test: internal/core.TestCardEffortAndSource
+
+sections:
+  readme-intro: [what-it-is, finds-by-itself, says-unknown]
+  readme-features: [card, gitlab-mrs, codex-sessions, critter, board-view, lanes-view, teams-view, project-tiles, catchup, issues, tap, spend, leftovers, jump]
+  privacy: [local-only, private-link, nothing-leaves, sends-github, sends-gitlab, no-traffic-flags, glab-runs, glab-env, reads-claude, reads-process, reads-tools, tmux-reads, codex-reads, writes, page-gets, page-derived, page-free-text, page-hosts, page-codex, page-issues, notifications, no-telemetry]
+  site-privacy-intro: [runs-while]
+  site-llms-more: [llms-columns, llms-title, llms-artifacts, llms-effort, needs-you, stale, one-board, says-unknown]
+  site-meta: [site-tagline, site-meta-description, site-description, site-hero-meta, site-banner-tool, site-privacy-meta]
+  readme-run: [flags]
+  readme-lock: [one-board]
+  readme-requirements: [req-agents, req-gh, req-glab, req-agterm, req-tmux]
+  readme-not-yet: [not-yet-removal, not-yet-gitlab-leftovers, not-yet-gitlab-issues, not-yet-ce-approval, not-yet-codex, not-yet-codex-apps]
+
+# The board's columns in the board's order (internal/contract.Columns), with
+# the words the page uses for them; the facts test checks both.
+columns:
+  - {id: needs_you, label: Needs you}
+  - {id: working, label: Working}
+  - {id: with_coordinator, label: With coordinator}
+  - {id: in_review, label: In review}
+  - {id: done, label: Done · 24h}
+  - {id: idle, label: Idle}
+
+home:
+  - id: hero
+    body: [hero]
+    points: []
+  - id: views
+    body: [views-switch]
+    points:
+      - k: Lanes
+        v: [lanes-view]
+      - k: Teams
+        v: [teams-view]
+  - id: found
+    body: [finds-by-itself, reads-process]
+    points:
+      - k: projects
+        v: [project-tiles]
+      - k: pull requests
+        v: [pull-requests-linked]
+      - k: spend
+        v: [spend]
+      - k: leftovers
+        v: [leftovers]
+      - k: issues
+        v: [issues]
+      - k: artifacts
+        v: [artifacts-linked]
+      - k: jump
+        v: [jump]
+  - id: needs
+    body: [needs-you]
+    points:
+      - k: blocked
+        v: [blocked]
+      - k: unseen
+        v: [unseen]
+      - k: stale
+        v: [stale]
+      - k: the tab
+        v: [tap]
+      - k: catch-up
+        v: [catchup]
+  - id: install
+    points:
+      - k: Homebrew
+        v: [install-homebrew]
+      - k: From source
+        v: [install-source]
+      - k: needs
+        v: [install-needs]
+  - id: private
+    title: reaches-out
+    body: [board-local]
+    points:
+      - k: local only
+        v: [local-only]
+      - k: no conversation text
+        v: [page-gets]
+      - k: GitHub and GitLab
+        v: [nothing-leaves, no-traffic-flags]
+
+faq:
+  - q: What is sitboard?
+    a: [faq-what]
+  - q: Who is it for?
+    a:
+      - say: >-
+          People who run several Claude Code or Codex sessions at once, often
+          across several projects. It helps most when a coordinator agent
+          spawns worker agents and you need to see who works for whom and who
+          is waiting for you.
+  - q: How does it find my agents? Do I have to set anything up?
+    a: [reads-claude, reads-process, codex-reads, reads-tools, {say: "There is nothing to set up, in sitboard or in your agents."}]
+  - q: Which agents does it support?
+    a: [codex-sessions]
+  - q: Does it send my code or conversations anywhere?
+    a: [{say: "No."}, local-only, page-gets, no-telemetry, nothing-leaves, sends-github, sends-gitlab, no-traffic-flags]
+  - q: What does “Needs you” mean?
+    a: [needs-you, stale]
+  - q: How does it know which pull request belongs to which agent, and which worker belongs to which coordinator?
+    a: [faq-ownership, mr-ownership, faq-coordinator]
+  - q: Do I need agterm?
+    a: [{say: "No. Without agterm the board works."}, jump, {say: "With agterm, sitboard can also tell which coordinator started which worker."}]
+  - q: Which systems does it run on?
+    a: [faq-systems]
+  - q: How do I install and update it?
+    a: [faq-install]
+  - q: Is it free? What is the licence?
+    a: [faq-licence]
+  - q: Can it control or stop agents?
+    a: [faq-control]

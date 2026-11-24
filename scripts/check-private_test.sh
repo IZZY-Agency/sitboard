@@ -963,6 +963,20 @@ else
   echo "ok   --help prints the usage only"
 fi
 
+# S10. A relative TMPDIR, the scan started in a subfolder: the scanner makes
+# its temporary folder absolute before it moves to the top level, so the scan
+# works and its cleanup finds the folder.
+r10="$(tree_with "plain text")"; mkdir -p "$r10/sub" "$work/r10tmp"
+RUN_ENV=(TMPDIR=../../r10tmp)
+run_case "a tree scan from a subfolder with a relative TMPDIR" 0 "$r10/sub" "$cfg_with_list" ""
+RUN_ENV=()
+if [[ -z "$(ls -A "$work/r10tmp")" ]]; then
+  echo "ok   that scan removed its temporary folder"
+else
+  echo "FAIL that scan left its temporary folder: $(ls -A "$work/r10tmp")"
+  failures=$((failures + 1))
+fi
+
 # S9. Finder metadata is never committed.
 if grep -qxF '.DS_Store' "$here/../.gitignore"; then
   echo "ok   .gitignore has .DS_Store"

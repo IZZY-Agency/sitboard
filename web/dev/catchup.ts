@@ -4,7 +4,7 @@ import type { Catchup, CatchupItem, PullRequest } from '../src/contract.gen';
 import type { CatchupClient } from '../src/data/catchup';
 import { SAMPLE_GITLAB_HOST, SAMPLE_GITLAB_PATH, SAMPLE_MR_TITLES } from './scenarios';
 
-export const CATCHUPS = ['few', 'gitlab', 'many', 'empty', 'nostate', 'unsaved', 'down'] as const;
+export const CATCHUPS = ['few', 'gitlab', 'many', 'empty', 'nostate', 'unsaved', 'partial', 'down', 'stale', 'full'] as const;
 export type CatchupCase = (typeof CATCHUPS)[number];
 
 const MIN = 60_000;
@@ -92,24 +92,37 @@ function many(now: number): CatchupItem[] {
   return out.sort((a, b) => Date.parse(b.at) - Date.parse(a.at)).slice(0, 80);
 }
 
-/** A client that answers like the server: the marker moves to upTo (a list's asOf), never back. */
+/**
+ * A client that answers like the server: "Caught up" on a list marks its
+ * items read. "stale" answers the first "Caught up" as the server does for a
+ * list made before a restart (409), "full" every one as at the cap (507).
+ */
 export function catchupClient(c: CatchupCase): CatchupClient {
   const now = Date.now();
   let marker: string | undefined =
     c === 'nostate' || c === 'unsaved' ? undefined : c === 'many' ? at(now, 3 * 24 * HOUR) : c === 'empty' ? at(now, 20 * MIN) : at(now, 100 * MIN);
+  let seq = 0;
+  let refusedOnce = false;
   let items = c === 'many' ? many(now) : c === 'empty' ? [] : c === 'gitlab' ? withGitLab(now) : c === 'nostate' || c === 'unsaved' ? [...few(now), turn(gone, now, 2 * 24 * HOUR)] : few(now);
   return {
     async load() {
       await new Promise((r) => setTimeout(r, 150));
       if (c === 'down') return { ok: false, kind: 'failed', message: 'sitboard did not answer' };
       const asOf = new Date().toISOString();
-      const out: Catchup = marker ? { marker, asOf, total: items.length, items } : { asOf, total: items.length, items };
+      const list = `dev-${++seq}`;
+      const out: Catchup = marker ? { marker, list, asOf, total: items.length, items } : { list, asOf, total: items.length, items };
       if (c === 'unsaved') out.unsaved = true;
+      if (c === 'partial') out.partial = true;
       return { ok: true, catchup: structuredClone(out) };
     },
-    async markRead(upTo) {
+    async markRead() {
       await new Promise((r) => setTimeout(r, 150));
-      if (!marker || Date.parse(upTo) > Date.parse(marker)) marker = upTo;
+      if (c === 'full') return { ok: false, kind: 'full' };
+      if (c === 'stale' && !refusedOnce) {
+        refusedOnce = true;
+        return { ok: false, kind: 'stale' };
+      }
+      marker = new Date().toISOString();
       // Every item here was in the list shown, so all of them are read now.
       items = [];
       return { ok: true };

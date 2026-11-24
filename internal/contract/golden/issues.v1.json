@@ -1,0 +1,66 @@
+{
+  "state": "ready",
+  "asOf": "2026-11-17T10:00:00Z",
+  "repos": [
+    {
+      "forge": "github",
+      "host": "github.com",
+      "repo": "example-org/example-repo",
+      "state": "ok",
+      "open": 12,
+      "issues": [
+        {
+          "number": 48,
+          "title": "Placeholder issue: export misses the last page",
+          "url": "https://github.com/example-org/example-repo/issues/48",
+          "milestone": "0.5.0",
+          "milestoneDue": "2026-12-01T00:00:00Z",
+          "labels": [
+            "bug"
+          ],
+          "updatedAt": "2026-11-17T08:00:00Z"
+        },
+        {
+          "number": 45,
+          "title": "Placeholder issue: cache image sizes",
+          "url": "https://github.com/example-org/example-repo/issues/45",
+          "milestone": "0.5.0",
+          "milestoneDue": "2026-12-01T00:00:00Z",
+          "labels": [
+            "enhancement"
+          ],
+          "updatedAt": "2026-11-16T09:00:00Z"
+        },
+        {
+          "number": 33,
+          "title": "Placeholder issue: setup guide",
+          "url": "https://github.com/example-org/example-repo/issues/33",
+          "milestone": "Later",
+          "labels": [],
+          "updatedAt": "2026-11-11T09:00:00Z"
+        },
+        {
+          "number": 5,
+          "title": "Placeholder issue with no milestone",
+          "url": "https://github.com/example-org/example-repo/issues/5",
+          "milestone": "",
+          "labels": [
+            "docs",
+            "good first issue"
+          ],
+          "updatedAt": "2026-11-05T09:00:00Z"
+        }
+      ]
+    },
+    {
+      "forge": "gitlab",
+      "host": "gitlab.example.com",
+      "repo": "example-group/example-project",
+      "state": "pending",
+      "open": 0,
+      "issues": []
+    }
+  ],
+  "rev": 4,
+  "freshMs": 42000
+}

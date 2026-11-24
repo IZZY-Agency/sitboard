@@ -60,6 +60,7 @@ export function project(id: string, name: string, counts: Partial<Project['count
     parentId: '',
     area: 'projects',
     counts: { working: 0, needsYou: 0, inReview: 0, stale: 0, ...counts },
+    openIssues: { known: false, open: 0 },
   };
 }
 
@@ -79,6 +80,7 @@ export function snapshot(cards: Card[], projects: Project[], over: Partial<Snaps
     leftovers: { items: 0, held: 0, partial: false },
     spend: { days: [], pending: false },
     gitlabHosts: [],
+    issues: { state: 'off', open: 0, rev: 0 },
     ...over,
   };
 }

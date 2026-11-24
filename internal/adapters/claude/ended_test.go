@@ -729,6 +729,41 @@ func TestHeadlessIsOneRule(t *testing.T) {
 	}
 }
 
+// A claude -p run started in another session's terminal inherits its
+// AGTERM_SESSION_ID (the test process 4242 has one). The arguments say -p, so
+// no fact of the run, the first included, has a terminal.
+func TestPrintFlagRunHasNoTerminalFromTheFirstFact(t *testing.T) {
+	e := newEnv(t)
+	e.printFlag = true
+	e.setProc(4242, procStart)
+	e.record(4242, nil)
+	c := run(t, e.adapter())
+	c.wait(t, 2*time.Second, "the run", session(coordID, func(f model.SessionFact) bool { return f.Live.V }))
+	n := 0
+	for _, x := range c.all() {
+		if f, ok := x.(model.SessionFact); ok && f.Key.ID == coordID {
+			n++
+			if f.TerminalID != "" || !f.Headless {
+				t.Fatalf("fact %d: terminal %q, headless %v", n, f.TerminalID, f.Headless)
+			}
+		}
+	}
+}
+
+// An SDK run has no -p; its transcript's entrypoint says it is headless, and
+// from then on its facts have no terminal.
+func TestSDKRunHasNoTerminalOnceItsTranscriptIsRead(t *testing.T) {
+	e := newEnv(t)
+	e.setProc(4242, procStart)
+	e.record(4242, nil)
+	tr := e.transcript(alphaF, coordID, "coordinator.jsonl")
+	appendFile(t, tr, []byte(line(`{"type":"user","entrypoint":"sdk-ts","sessionId":%q,"cwd":%q}`, coordID, alphaF)))
+	c := run(t, e.adapter())
+	c.wait(t, 2*time.Second, "the run without a terminal", session(coordID, func(f model.SessionFact) bool {
+		return f.Model.OK && f.Headless && f.Live.V && f.TerminalID == ""
+	}))
+}
+
 // Review of #82, 4: a tail with no whole line (one line longer than the
 // cap) says nothing about how the session was started: it is not counted.
 func TestTailWithNothingReadableIsNotCounted(t *testing.T) {

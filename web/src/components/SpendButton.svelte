@@ -15,8 +15,8 @@
     onclick,
     button = $bindable(),
   }: {
-    /** Today's figure, "≈ $63" or "1.2 M out"; "" when nothing was used today. */
-    figure: string;
+    /** Today's figure in its parts, ["≈ $63.00 + unpriced", "Codex 12 k out"]; empty when nothing was used today. */
+    figure: string[];
     /** The same figure as a screen reader says it ("about $63.00, at API list price", "1.2 M output tokens, no price"); "" when nothing was used today. */
     spoken: string;
     /** Older sessions are still being read: the figure can still grow. */
@@ -31,7 +31,7 @@
     button?: HTMLButtonElement;
   } = $props();
   const label = $derived(
-    (spoken ? `Spend today ${spoken}` : figure ? 'Spend today' : 'Spend, nothing used today') + (pending ? ', still reading older sessions' : ''),
+    (spoken ? `Spend today ${spoken}` : figure.length ? 'Spend today' : 'Spend, nothing used today') + (pending ? ', still reading older sessions' : ''),
   );
 </script>
 
@@ -47,14 +47,20 @@
   {title}
   {onclick}
 >
-  Spend{#if figure}<span class="t" aria-hidden="true">today</span><span class="n" aria-hidden="true">{figure}</span>{/if}
+  <span class="w">Spend{#if figure.length}<span class="t" aria-hidden="true">today</span>{/if}</span>{#if figure.length}<span class="n" aria-hidden="true"
+      >{#each figure as part, i (i)}{#if i}{' '}{/if}<span class="p">{part}{i < figure.length - 1 ? ' ·' : ''}</span>{/each}</span
+    >{/if}
 </button>
 
 <style>
+  /* The button never grows past its row: at phone width the figure wraps
+     between its parts (the money first, Codex's tokens after), never inside
+     one, so the money total stays whole and in view. */
   .spend {
     display: inline-flex;
     align-items: center;
     gap: 8px;
+    max-width: 100%;
     min-height: 44px;
     padding: 0 12px;
     border: 1px solid var(--border);
@@ -81,15 +87,25 @@
     border-color: var(--amber);
     color: var(--bg);
   }
+  .w {
+    display: inline-flex;
+    gap: 8px;
+  }
   .t {
     font-weight: 400;
   }
   .n {
+    min-width: 0;
+    white-space: normal;
+    text-align: left;
     font-weight: 400;
     letter-spacing: 0.02em;
     text-transform: none;
     font-variant-numeric: tabular-nums;
     text-decoration: underline dotted;
     text-underline-offset: 3px;
+  }
+  .p {
+    white-space: nowrap;
   }
 </style>

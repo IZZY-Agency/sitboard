@@ -18,6 +18,7 @@ function snap(seq: number, version = CONTRACT_VERSION): Snapshot {
     build: { version: 'dev', commit: 'unknown', os: 'darwin', arch: 'arm64' },
     spend: { days: [], pending: false },
     gitlabHosts: [],
+    issues: { state: 'off', open: 0, rev: 0 },
   };
 }
 

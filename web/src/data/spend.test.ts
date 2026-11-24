@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Spend, SpendSummary, Tokens } from '../contract.gen';
-import { addSpend, cellText, codexText, todaySpoken, dayLabel, fmtTokens, fmtUSD, hasSpend, localDay, moneyText, spendTable, spendTitle, spokenText, todayText, tokenCount, tokensText } from './spend';
+import { addSpend, cellText, codexText, todayParts, todaySpoken, dayLabel, fmtTokens, fmtUSD, hasSpend, localDay, moneyText, spendTable, spendTitle, spokenText, todayText, tokenCount, tokensText } from './spend';
 
 const sp = (output: number, usd: number, priced = true, recorded = false): Spend => ({
   tokens: { input: 10, output, cacheRead: 1000, cacheWrite: 100 },
@@ -90,6 +90,17 @@ describe('spend figures', () => {
     sum.days[0].spend.usd = 0;
     expect(todayText(sum, NOW)).toBe('500 out · no price');
     expect(todayText({ days: [{ day: day(-1), spend: sp(1, 1), codex: none, projects: [] }], pending: false }, NOW)).toBe('');
+  });
+
+  it("splits today's figure into parts for the header button, money first", () => {
+    const codex: Tokens = { input: 0, output: 12_000, cacheRead: 0, cacheWrite: 0 };
+    const sum: SpendSummary = { days: [{ day: day(0), spend: sp(500, 15.48, false), codex, projects: [] }], pending: false };
+    expect(todayParts(sum, NOW)).toEqual(['≈ $15.48 + unpriced', 'Codex 12 k out']);
+    expect(todayText(sum, NOW)).toBe('≈ $15.48 + unpriced · Codex 12 k out');
+    sum.pending = true;
+    expect(todayParts(sum, NOW)).toEqual(['≈ $15.48 + unpriced', 'Codex 12 k out …']);
+    expect(todayParts({ days: [], pending: true }, NOW)).toEqual(['…']);
+    expect(todayParts({ days: [], pending: false }, NOW)).toEqual([]);
   });
 
   it('labels days', () => {

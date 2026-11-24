@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -40,7 +41,9 @@ func (c *fakeClock) Set(t time.Time) {
 // fakeRepos knows a fixed set of repos by folder prefix. It never changes anything.
 type fakeRepos struct {
 	mu    sync.Mutex
-	repos map[string]model.Repo // folder -> repo
+	repos map[string]model.Repo    // folder -> repo
+	fail  map[string]bool          // folder -> git gives no answer
+	hold  map[string]chan struct{} // folder -> the answer waits until the channel closes
 	calls int
 }
 
@@ -50,8 +53,17 @@ func (f *fakeRepos) Probe(context.Context) source.Status {
 
 func (f *fakeRepos) Resolve(_ context.Context, folder string) (model.Repo, error) {
 	f.mu.Lock()
+	wait := f.hold[folder]
+	f.mu.Unlock()
+	if wait != nil {
+		<-wait
+	}
+	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
+	if f.fail[folder] {
+		return model.Repo{}, errors.New("git gave no answer")
+	}
 	if r, ok := f.repos[folder]; ok {
 		return r, nil
 	}
@@ -159,12 +171,13 @@ type testEnv struct {
 func newEnv(t *testing.T) *testEnv {
 	t.Helper()
 	t.Setenv("HOME", testHome)
-	st, err := state.Open(filepath.Join(t.TempDir(), "state.json"))
+	clock := &fakeClock{t: tNow}
+	st, err := state.OpenAt(filepath.Join(t.TempDir(), "state.json"), clock.Now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	e := &testEnv{
-		clock: &fakeClock{t: tNow},
+		clock: clock,
 		repos: &fakeRepos{repos: map[string]model.Repo{}},
 		prs:   &fakePRs{},
 		state: st,

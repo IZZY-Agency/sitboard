@@ -230,7 +230,9 @@ func TestInventorySlug(t *testing.T) {
 		{"elsewhere", "", [][]string{{"remote.origin.url", "git@example.com:example-org/app.git"}}},
 		{"gitlab.com", "", [][]string{{"remote.origin.url", "https://gitlab.com/example-group/sub/app.git"}}},
 		{"gitlab ssh port", "", [][]string{{"remote.origin.url", "ssh://git@example.com:2222/example-group/app.git"}}},
-		{"web port refused", "", [][]string{{"remote.origin.url", "https://gitlab.example.com:8443/example-group/app.git"}}},
+		{"web port kept", "", [][]string{{"remote.origin.url", "https://gitlab.example.com:8443/example-group/app.git"}}},
+		{"web port 443 written out", "", [][]string{{"remote.origin.url", "https://gitlab.example.com:443/example-group/app.git"}}},
+		{"subfolder in the path", "", [][]string{{"remote.origin.url", "https://example.com/gitlab/example-group/app.git"}}},
 		{"github three parts", "", [][]string{{"remote.origin.url", "https://github.com/example-org/app/extra.git"}}},
 		{"local path", "", [][]string{{"remote.origin.url", "/srv/git/app.git"}}},
 		{"two addresses", "", [][]string{{"remote.origin.url", "git@github.com:example-org/app.git"},
@@ -253,6 +255,9 @@ func TestInventorySlug(t *testing.T) {
 		"elsewhere":                  "gitlab:example.com/example-org/app",
 		"gitlab.com":                 "gitlab:gitlab.com/example-group/sub/app",
 		"gitlab ssh port":            "gitlab:example.com/example-group/app",
+		"web port kept":              "gitlab:gitlab.example.com:8443/example-group/app",
+		"web port 443 written out":   "gitlab:gitlab.example.com/example-group/app", // https's own port is no port
+		"subfolder in the path":      "gitlab:example.com/gitlab/example-group/app",
 		"rewritten away from GitHub": "gitlab:example.com/example-org/app",
 	}
 	for _, c := range cases {
@@ -279,6 +284,11 @@ func TestInventorySlug(t *testing.T) {
 			}
 			if got.Remote.Key() != want {
 				t.Errorf("resolve remote %q, want %q", got.Remote.Key(), want)
+			}
+			// Only an ssh, git or scp-like GitLab address is bare.
+			wantBare := c.name == "elsewhere" || c.name == "gitlab ssh port"
+			if got.RemoteBare != wantBare {
+				t.Errorf("bare %v, want %v", got.RemoteBare, wantBare)
 			}
 			if inv.Origin.Forge != model.ForgeGitHub && !inv.Origin.IsZero() {
 				t.Errorf("inventory origin %+v: GitHub only", inv.Origin)
@@ -513,17 +523,18 @@ func TestInventoryOfAPartialCloneIsAnError(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			repo := newRepo(t)
-			if _, err := NewInventory(Options{}).Inventory(context.Background(), repo); err != nil {
-				t.Fatalf("plain repo: %v", err)
+			if inv, err := NewInventory(Options{}).Inventory(context.Background(), repo); err != nil || !inv.WorktreesListed {
+				t.Fatalf("plain repo: %v, listed %v", err, inv.WorktreesListed)
 			}
 			git(t, repo, "config", cfg[0], cfg[1])
 			inv, err := NewInventory(Options{}).Inventory(context.Background(), repo)
 			if err == nil {
 				t.Fatalf("read as %+v", inv)
 			}
-			// Its checkouts are still given: one may sit inside another.
-			if len(inv.Worktrees) != 1 || inv.Worktrees[0].Path != repo {
-				t.Fatalf("worktrees %+v", inv.Worktrees)
+			// Its checkouts are still given, all of them: one may sit inside
+			// another.
+			if len(inv.Worktrees) != 1 || inv.Worktrees[0].Path != repo || !inv.WorktreesListed {
+				t.Fatalf("worktrees %+v, listed %v", inv.Worktrees, inv.WorktreesListed)
 			}
 		})
 	}
@@ -650,6 +661,52 @@ func TestParseWorktrees(t *testing.T) {
 	}
 }
 
+// An origin with several addresses, one on GitHub, is unclear in the
+// inventory too.
+func TestInventoryOfAnUnclearOrigin(t *testing.T) {
+	repo := newRepo(t)
+	git(t, repo, "remote", "add", "origin", "https://gitlab.example.com/example-group/beta.git")
+	git(t, repo, "remote", "set-url", "--add", "origin", "https://github.com/example-org/beta.git")
+	inv, err := NewInventory(Options{}).Inventory(context.Background(), repo)
+	if err != nil || !inv.OriginUnclear || !inv.Origin.IsZero() {
+		t.Fatalf("%v: origin %+v, unclear %v", err, inv.Origin, inv.OriginUnclear)
+	}
+}
+
+// A GitHub origin read before a later read fails is still given, and every
+// git call runs with signatures not shown (no verifier is run).
+func TestInventoryKeepsTheOriginWhenTheStashesFail(t *testing.T) {
+	var calls [][]string
+	r := &resolver{bin: "git", timeout: callTimeout, run: func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		calls = append(calls, args)
+		switch {
+		case slices.Contains(args, "rev-parse"):
+			return []byte("/r\n/r/.git\n/r/.git\n"), nil
+		case slices.Contains(args, "config"):
+			return nil, &runner.ExitError{Code: 1}
+		case slices.Contains(args, "worktree"):
+			return []byte("worktree /r\x00HEAD " + strings.Repeat("a", 40) + "\x00branch refs/heads/main\x00\x00"), nil
+		case slices.Contains(args, "for-each-ref"):
+			return nil, nil
+		case slices.Contains(args, "remote"):
+			return []byte("https://github.com/example-org/beta.git\n"), nil
+		case slices.Contains(args, "stash"):
+			return nil, &runner.ExitError{Code: 128}
+		}
+		t.Fatalf("unexpected git %v", args)
+		return nil, nil
+	}}
+	inv, err := r.Inventory(context.Background(), "/r")
+	if err == nil || inv.Origin != model.GitHubRepo("example-org/beta") {
+		t.Fatalf("%v: origin %+v", err, inv.Origin)
+	}
+	for _, a := range calls {
+		if i := slices.Index(a, "log.showSignature=false"); i < 1 || a[i-1] != "-c" {
+			t.Errorf("git %v shows signatures", a)
+		}
+	}
+}
+
 // A worktree listing cut short makes the inventory an error.
 func TestInventoryWithACutWorktreeListIsAnError(t *testing.T) {
 	r := &resolver{bin: "git", timeout: callTimeout, run: func(_ context.Context, _ string, args ...string) ([]byte, error) {
@@ -664,20 +721,100 @@ func TestInventoryWithACutWorktreeListIsAnError(t *testing.T) {
 		t.Fatalf("unexpected git %v", args)
 		return nil, nil
 	}}
-	if inv, err := r.Inventory(context.Background(), "/r"); err == nil {
+	if inv, err := r.Inventory(context.Background(), "/r"); err == nil || inv.WorktreesListed {
 		t.Fatalf("read as %+v", inv)
 	}
 }
 
-// A worktree whose path holds a newline is never read as another path: the
-// inventory of its repo is an error.
+// A worktree whose path holds a newline is never read as another path: it is
+// listed exactly, on its own branch, the listing is whole, and git is never
+// run in it.
 func TestInventoryWithANewlineInAWorktreePath(t *testing.T) {
 	repo := newRepo(t)
 	base := filepath.Join(filepath.Dir(repo), filepath.Base(repo)+"-w")
 	git(t, repo, "worktree", "add", "-q", "-b", "other", base)
 	git(t, repo, "worktree", "add", "-q", "-b", "feat", base+"\nx") // read by lines: base, on feat
-	if inv, err := NewInventory(Options{}).Inventory(context.Background(), repo); err == nil {
-		t.Fatalf("read as %+v", inv.Worktrees)
+	g := NewInventory(Options{})
+	inv, err := g.Inventory(context.Background(), repo)
+	if err != nil || !inv.WorktreesListed {
+		t.Fatalf("inventory: %v, listed %v", err, inv.WorktreesListed)
+	}
+	on := map[string]string{}
+	for _, w := range inv.Worktrees {
+		on[w.Path] = w.Branch.V
+	}
+	if len(on) != 3 || on[base] != "other" || on[base+"\nx"] != "feat" {
+		t.Fatalf("worktrees %q", on)
+	}
+	if _, err := g.TreeStatus(context.Background(), base+"\nx"); err == nil {
+		t.Fatal("status read in a path with a newline")
+	}
+}
+
+// Only git's own answer that a folder is in no repository makes it one
+// outside: any other failure, or an answer that is not the one asked for,
+// is an error (the folder may be in any repo).
+func TestResolveTellsNoRepoFromNoAnswer(t *testing.T) {
+	dir := t.TempDir()
+	plain := &runner.ExitError{Code: 128, Stderr: []byte("fatal: not a git repository (or any of the parent directories): .git\n")}
+	for name, c := range map[string]struct {
+		revParse  []byte
+		revErr    error
+		headErr   error
+		originErr error
+		outside   bool
+	}{
+		"head unreadable": {revParse: []byte(dir + "\n" + dir + "/.git\n"), headErr: &runner.ExitError{Code: 128}},
+		"no repo":         {revErr: plain, outside: true},
+		"broken pointer":  {revErr: &runner.ExitError{Code: 128, Stderr: []byte("fatal: gitfile does not point to a valid repository: " + dir + "/.git\n")}},
+		"not owned":       {revErr: &runner.ExitError{Code: 128, Stderr: []byte("fatal: detected dubious ownership in repository at '" + dir + "'\n")}},
+		"other exit":      {revErr: &runner.ExitError{Code: 1, Stderr: plain.Stderr}},
+		"one line":        {revParse: []byte(dir + "\n")},
+		"relative":        {revParse: []byte(dir + "\n.git\n")},
+		"origin unread":   {revParse: []byte(dir + "\n" + dir + "/.git\n"), originErr: &runner.ExitError{Code: 128, Stderr: []byte("fatal: bad config line 1\n")}},
+		"origin missing":  {revParse: []byte(dir + "\n" + dir + "/.git\n"), originErr: &runner.ExitError{Code: 2}, outside: false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := &resolver{bin: "git", timeout: callTimeout, run: func(_ context.Context, _ string, args ...string) ([]byte, error) {
+				switch {
+				case slices.Contains(args, "rev-parse"):
+					return c.revParse, c.revErr
+				case slices.Contains(args, "symbolic-ref"):
+					if c.headErr != nil {
+						return nil, c.headErr
+					}
+					return []byte("refs/heads/main\n"), nil
+				case slices.Contains(args, "remote"):
+					return nil, c.originErr
+				}
+				return nil, &runner.ExitError{Code: 1}
+			}}
+			repo, err := r.Resolve(context.Background(), dir)
+			switch {
+			case name == "origin missing":
+				if err != nil || repo.Root != dir || !repo.Remote.IsZero() || !repo.Branch.OK {
+					t.Fatalf("got %+v, %v", repo, err)
+				}
+			case c.outside:
+				if err != nil || repo.Root != dir || repo.MainRoot != dir || repo.Branch.OK {
+					t.Fatalf("got %+v, %v", repo, err)
+				}
+			case err == nil:
+				t.Fatalf("read as %+v", repo)
+			}
+		})
+	}
+}
+
+// A real folder whose .git points nowhere is no answer, not a folder outside
+// a repo.
+func TestResolveOfABrokenGitPointerIsAnError(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".git"), []byte("gitdir: "+filepath.Join(dir, "gone")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if repo, err := New(Options{}).Resolve(context.Background(), dir); err == nil {
+		t.Fatalf("read as %+v", repo)
 	}
 }
 

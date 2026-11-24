@@ -42,7 +42,6 @@ func (b *Board) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			b.learnTick() // what arrived since the last tick, before the store closes
 			b.markClosed()
 			b.waitHostChecks(hostStopGrace)
 			return nil
@@ -50,6 +49,10 @@ func (b *Board) Run(ctx context.Context) error {
 			b.tickCtx(ctx)
 		case <-b.refreshCh:
 			b.refreshForges(ctx, false)
+		case <-b.issuesCh:
+			b.mu.Lock()
+			b.startIssuesLocked(ctx, b.now())
+			b.mu.Unlock()
 		}
 	}
 }
@@ -129,11 +132,11 @@ func (b *Board) tickCtx(ctx context.Context) {
 		b.resolved = now
 	}
 	b.startLeftoversLocked(ctx, now)
+	b.startIssuesLocked(ctx, now)
 	b.rebuildLocked()
 	b.mu.Unlock()
 	b.flushSeen()
 	b.flushUmbrellas()
-	b.learnTick()
 	b.refreshForges(ctx, true)
 }
 
@@ -169,7 +172,7 @@ func (b *Board) markPendingLocked(s model.SessionFact) bool {
 // providerFor is the provider that answers for repo's forge, or nil when
 // repo is not Valid, its forge is switched off or has no provider, or it is
 // on a GitLab host lookups may not go to (not one glab is logged in to,
-// gitlab.com included, or GitLab under a subfolder there): its refs are kept
+// gitlab.com included): its refs are kept
 // but never looked up, and never shown. Callers hold b.mu.
 func (b *Board) providerFor(repo model.ForgeRepo) source.PRProvider {
 	if !repo.Valid() {
@@ -285,15 +288,34 @@ func (b *Board) refreshForges(ctx context.Context, periodic bool) {
 		for _, n := range req.numbers {
 			b.asked[model.PRRef{Repo: repo, Number: n}] = true
 		}
+		var partial *source.PartialLookup
 		switch {
 		case err == nil:
 			delete(b.goneRepos, repo)
 			b.noteMissingLocked(repo, req.numbers, found)
 			b.storePRsLocked(repo, found)
 			b.creditAllPushedLocked()
-		case repo.Forge == model.ForgeGitLab && (errors.Is(err, source.ErrNotLoggedIn) || errors.Is(err, source.ErrUnsupported)):
-			// The login went away (or the host turned out to be a
-			// subfolder install) since its host was decided: no more
+		case errors.As(err, &partial):
+			// Some numbers were settled, some not: what was placed is kept,
+			// a number GitLab placed elsewhere loses its old copy (and is
+			// asked again, not marked missing), one it did not place stays
+			// as it was and is asked again; the rest do not exist.
+			delete(b.goneRepos, repo)
+			settled := slices.DeleteFunc(slices.Clone(req.numbers), func(n int) bool {
+				return slices.Contains(partial.Wrong, n) || slices.Contains(partial.Unverified, n)
+			})
+			b.noteMissingLocked(repo, settled, found)
+			b.storePRsLocked(repo, found)
+			for _, n := range partial.Wrong {
+				ref := model.PRRef{Repo: repo, Number: n}
+				if slices.Contains(req.numbers, n) {
+					delete(b.prs, ref)
+					delete(b.missingRefs, ref)
+				}
+			}
+			b.creditAllPushedLocked()
+		case repo.Forge == model.ForgeGitLab && errors.Is(err, source.ErrNotLoggedIn):
+			// The login went away since its host was decided: no more
 			// lookups there until it is asked about again.
 			b.noteHostLocked(repo.Host, err)
 		case errors.Is(err, source.ErrRepoNotFound):
@@ -302,6 +324,11 @@ func (b *Board) refreshForges(ctx context.Context, periodic bool) {
 			// passes (a token not yet authorised for the organisation).
 			// Live sessions still ask.
 			b.goneRepos[repo] = true
+			// Its issue rows go too, as a purge: the login no longer sees it.
+			if _, listed := b.issues[issueKey(repo)]; listed {
+				delete(b.issues, issueKey(repo))
+				b.issuesPurgedLocked(now)
+			}
 		}
 		b.refreshGitLabLineLocked()
 		b.rebuildLocked()
@@ -418,6 +445,12 @@ func (b *Board) noteMissingLocked(repo model.ForgeRepo, numbers []int, found []m
 			delete(b.missingRefs, ref)
 		} else {
 			b.missingRefs[ref] = true
+			if repo.Forge == model.ForgeGitLab {
+				// A GitLab lookup that answered without the merge request (it
+				// is gone, or its address is no longer the one shown) leaves
+				// no old copy behind to keep its link and its approval.
+				delete(b.prs, ref)
+			}
 		}
 	}
 }

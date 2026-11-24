@@ -202,9 +202,21 @@ func TestMRRefsHostRule(t *testing.T) {
 		"remote:   https://github.com/example-org/example-repo/-/merge_requests/2",
 		"https://github.com/example-org/example-repo/pull/3",
 		"https://example.com/example-org/example-repo/-/merge_requests/4",
+		"https://github.com:8443/example-org/example-repo/-/merge_requests/8",
+		"https://example.com:443/example-org/example-repo/-/merge_requests/9",
+		"https://example.com:0/example-org/example-repo/-/merge_requests/10",
+		"https://example.com:8443/example-org/example-repo/-/merge_requests/11",
+		"https://example.com/gitlab/example-org/example-repo/-/merge_requests/12",
 	}, "\n")
 	got := MergeRequests(out, MRCreation{Glab: true, Push: true})
-	if want := []MergeRequest{mr("example.com", "example-org/example-repo", 4, false)}; !slices.Equal(got, want) {
+	// A web port stays on the host and a subfolder in the path: the core
+	// asks glab by the host name and the adapter checks the rest.
+	if want := []MergeRequest{
+		mr("example.com", "example-org/example-repo", 4, false),
+		mr("example.com", "example-org/example-repo", 9, false), // https's own port written out is no port
+		mr("example.com:8443", "example-org/example-repo", 11, false),
+		mr("example.com", "gitlab/example-org/example-repo", 12, false),
+	}; !slices.Equal(got, want) {
 		t.Fatalf("MergeRequests = %+v, want %+v", got, want)
 	}
 	gl := "https://example.com/example-org/example-repo/-/merge_requests/5\nremote:   https://example.com/example-org/example-repo/-/merge_requests/6\nhttps://example.com/example-org/example-repo/pull/7\n"

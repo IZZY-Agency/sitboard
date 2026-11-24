@@ -18,6 +18,9 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0
 export GIT_ASKPASS=/usr/bin/false SSH_ASKPASS=/usr/bin/false GIT_ALLOW_PROTOCOL=file
 export HOMEBREW_NO_AUTO_UPDATE=1
 unset PUBLISH_TEST_TARGET PUBLISH_TEST_REMOTE PUBLISH_IDENT TAP_TEST_ASSETS_DIR TAP_TEST_REMOTE
+# CI and the real export run `make check PRIVATE_FLAGS=--no-denylist`, which
+# reaches this script's environment: the cases set the flag themselves.
+unset PRIVATE_FLAGS PUBLISH_GATES_ONLY PUBLISH_TEST_INTERRUPT_AFTER
 unset SIGN_IDENTITY NOTARY_PROFILE COMMIT PACKAGE_ALLOW_DIRTY PACKAGE_DEV REQUIRE_SIGNATURE EXPECTED_TEAM_ID
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -218,6 +221,17 @@ expect "a deny-list word in the export stops it" 1 "the public tree failed check
 p="$(make_private p2b)"; t="$(make_target p2b)"
 expect "no deny-list: the export fails closed" 1 "deny-list missing, run scripts/make-denylist.sh" \
   env XDG_CONFIG_HOME="$work/no-cfg" PUBLISH_TEST_TARGET=1 bash "$p/scripts/publish.sh" "$t"
+expect "PRIVATE_FLAGS=--no-denylist cannot weaken a real export: still fails closed" 1 "deny-list missing, run scripts/make-denylist.sh" \
+  env XDG_CONFIG_HOME="$work/no-cfg" PRIVATE_FLAGS=--no-denylist PUBLISH_TEST_TARGET=1 bash "$p/scripts/publish.sh" "$t"
+gates() { env PUBLISH_GATES_ONLY=1 PRIVATE_FLAGS= "$@"; }   # gates() [VAR=value ...] bash <publish.sh>: no target, the deny-list on unless a case says otherwise
+expect "gates-only with PRIVATE_FLAGS=--no-denylist runs without a deny-list" 0 "gates passed" \
+  gates XDG_CONFIG_HOME="$work/no-cfg" PRIVATE_FLAGS=--no-denylist bash "$p/scripts/publish.sh"
+expect "gates-only without a deny-list and without the flag fails closed" 1 "deny-list missing" \
+  gates XDG_CONFIG_HOME="$work/no-cfg" bash "$p/scripts/publish.sh"
+for fl in --help --history "--no-denylist --help" "--text /dev/null"; do
+  expect "gates-only refuses PRIVATE_FLAGS='$fl' (the scanner could exit 0 unscanned)" 1 "PRIVATE_FLAGS may be empty or --no-denylist" \
+    gates PRIVATE_FLAGS="$fl" bash "$p/scripts/publish.sh"
+done
 
 # P3. The build gate: the export must pass make check from a clean clone.
 # Here the Makefile needs a file the allowlist leaves out.
@@ -331,9 +345,177 @@ expect "a docs folder below a path that is not UTF-8 is refused" 1 "inside a .cl
 p="$(make_private p5-big)"; t="$(make_target p5-big)"
 head -c 1100000 /dev/zero | tr '\0' 'a' > "$p/web/src/big.json"; commit_all "$p"
 expect "export refuses a file over the size cap" 1 "more than 1048576" rehearse "$p/scripts/publish.sh" "$t"
+# PUBLISH_GATES_ONLY=1 (make check's export-gates): no target; the gates run on
+# the staged files and stop. The exported Makefile of this stand-in cannot pass
+# make check, so a full export fails at the clean copy while gates-only passes,
+# and gates-only still stops before the build if its early exit ever moves.
+p="$(make_private p5-go)"; t="$(make_target p5-go)"
+printf 'RELEASE_VERSION := %s\n\ncheck:\n\t@echo broken; exit 1\n\nbuild:\n\t@echo built\n' "$V" > "$p/Makefile"
+commit_all "$p"
+expect "a full export of the stand-in fails at the clean copy's make check" 1 "does not pass make check" rehearse "$p/scripts/publish.sh" "$t"
+before="$(state "$t")"
+expect "gates-only passes the same tree without building the clean copy" 0 "gates passed" gates bash "$p/scripts/publish.sh"
+[ "$(state "$t")" = "$before" ] && ok "gates-only does not touch a checkout beside it" || bad "gates-only changed the checkout" "$(state "$t")"
+expect "gates-only takes no target" 2 "takes no arguments" gates bash "$p/scripts/publish.sh" "$t"
+expect "gates-only takes no rehearsal switch" 1 "no rehearsal switch" gates PUBLISH_TEST_REMOTE="$t" bash "$p/scripts/publish.sh"
+[ -z "$(git -C "$t" ls-files)" ] && ok "the checkout beside it is still empty" || bad "files in the checkout" "$(git -C "$t" ls-files)"
+# git may not fetch: the environment git runs in says so (a git that reports it).
+shim="$work/shim"; mkdir -p "$shim"
+real_git="$(command -v git)"
+printf '#!/bin/sh\necho "$GIT_NO_LAZY_FETCH $GIT_ALLOW_PROTOCOL" >> "%s/git-env"\nexec "%s" "$@"\n' "$shim" "$real_git" > "$shim/git"
+chmod +x "$shim/git"
+gates PATH="$shim:$PATH" bash "$p/scripts/publish.sh" >/dev/null 2>&1 || true
+[ -s "$shim/git-env" ] && ! grep -qvx '1 none' "$shim/git-env" && ok "gates-only runs git with lazy fetch off and no transport" \
+  || bad "git ran with an environment that could fetch" "$(sort -u "$shim/git-env" 2>/dev/null)"
+# a scanner that cannot finish is not a clean result (also for a real export)
+gshim="$work/gshim"; mkdir -p "$gshim"
+real_grep="$(command -v grep)"
+printf '#!/bin/sh\ncase "$*" in *-rIonE*) exit 2 ;; esac\nexec "%s" "$@"\n' "$real_grep" > "$gshim/grep"
+chmod +x "$gshim/grep"
+expect "gates-only: a pointer scan that errors is not clean" 1 "searching the staged tree failed" gates PATH="$gshim:$PATH" bash "$p/scripts/publish.sh"
+p="$(make_private p5-go3)"; t="$(make_target p5-go3)"
+expect "a real export: a pointer scan that errors is not clean" 1 "searching the staged tree failed" env PATH="$gshim:$PATH" PUBLISH_TEST_TARGET=1 bash "$p/scripts/publish.sh" "$t"
+p="$(make_private p5-go1)"
+echo x > "$p/internal/zz.xyz"; commit_all "$p"
+expect "gates-only refuses a file kind the export does not allow" 1 "not a kind of file" gates bash "$p/scripts/publish.sh"
+p="$(make_private p5-go2)"
+printf 'package x\n// see %s/notes/a.md\n' "$dd" > "$p/internal/zz.go"; commit_all "$p"
+expect "gates-only refuses a pointer to a docs/ file" 1 "points at docs/ files" gates bash "$p/scripts/publish.sh"
+p="$(make_private p5-go4)"
+echo "// about $deny_word" >> "$p/cmd/sitboard/main.go"; commit_all "$p"
+expect "gates-only refuses a deny-list match in the export (privacy gate ran)" 1 "the public tree failed check-private" gates bash "$p/scripts/publish.sh"
+[[ "$LAST_OUT" != *orblaxian* ]] && ok "gates-only never prints the word" || bad "gates-only printed the word" "$LAST_OUT"
+printf 'exit 0\n' > "$p/scripts/check-private.sh"   # the worktree's scanner says clean; the committed one decides
+expect "gates-only runs the committed scanner, not the worktree's" 1 "the public tree failed check-private" gates bash "$p/scripts/publish.sh"
+# the staged copy of .gitignore and of the scanner decide, not the worktree's
+p="$(make_private p5-go5)"
+echo 'internal/zz.json' >> "$p/.gitignore"; echo '{}' > "$p/internal/zz.json"; git -C "$p" add -f internal/zz.json; commit_all "$p"
+: > "$p/.gitignore"   # the worktree no longer ignores it; the committed rules do
+expect "gates-only judges the committed ignore rules, not the worktree's" 1 "ignores" gates bash "$p/scripts/publish.sh"
 p="$(make_private p5-ign)"; t="$(make_target p5-ign)"
 echo '{}' > "$p/internal/server/dist/app.json"; git -C "$p" add -f internal/server/dist/app.json; commit_all "$p"
 expect "export refuses a tracked file that .gitignore ignores" 1 "that .gitignore ignores" rehearse "$p/scripts/publish.sh" "$t"
+
+# Each search, and the reading of its result, fails closed on its own: an
+# error in the website-folder scan (the second one), or in the sed that reads
+# a result, is not a clean answer either.
+p="$(make_private p5-go7)"
+gshim2="$work/gshim2"; mkdir -p "$gshim2"
+printf '%s\n' '#!/bin/sh' 'case "$*" in *-rIonE*"|/)*"*) exit 2 ;; esac' "exec \"$real_grep\" \"\$@\"" > "$gshim2/grep"
+chmod +x "$gshim2/grep"
+expect "gates-only: a website-folder scan that errors is not clean" 1 "searching the staged tree failed" gates PATH="$gshim2:$PATH" bash "$p/scripts/publish.sh"
+sshim="$work/sshim"; mkdir -p "$sshim"
+printf '%s\n' '#!/bin/sh' 'case "$1" in "s|^\./||") exit 1 ;; esac' "exec \"$(command -v sed)\" \"\$@\"" > "$sshim/sed"
+chmod +x "$sshim/sed"
+expect "gates-only: a search result that cannot be read is not clean" 1 "could not read the search result" gates PATH="$sshim:$PATH" bash "$p/scripts/publish.sh"
+# A gates-only run judges the staged snapshot alone: an ignore rule or a
+# scanner deletion only in the worktree does not refuse it; a staged snapshot
+# without the scanner does.
+p="$(make_private p5-go6)"
+echo 'cmd/sitboard/main.go' >> "$p/.gitignore"; rm "$p/scripts/check-private.sh"
+expect "gates-only is not refused by an unstaged ignore rule or an unstaged scanner deletion" 0 "gates passed" gates bash "$p/scripts/publish.sh"
+git -C "$p" rm -q --cached scripts/check-private.sh
+expect "gates-only refuses a staged snapshot without the scanner" 1 "the staged snapshot has no scripts/check-private.sh" gates bash "$p/scripts/publish.sh"
+# A partial clone: an exported blob that is not local fails the gate, and git
+# does not fetch it on demand (git would fetch over file:// in these tests).
+p="$(make_private p5-pc)"
+pcb="$work/pc.git"; git clone -q --bare "$p" "$pcb"
+git -C "$pcb" config uploadpack.allowFilter true; git -C "$pcb" config uploadpack.allowAnySHA1InWant true
+pc="$work/pc"; git clone -q --filter=blob:none "file://$pcb" "$pc"
+printf 'package x\n' > "$p/internal/zz2.go"; commit_all "$p"; git -C "$p" push -q "$pcb" main
+git -C "$pc" fetch -q origin
+pcblob="$(git -C "$pc" rev-parse origin/main:internal/zz2.go)"
+GIT_NO_LAZY_FETCH=1 git -C "$pc" reset -q --soft origin/main && GIT_NO_LAZY_FETCH=1 git -C "$pc" read-tree origin/main
+if GIT_NO_LAZY_FETCH=1 git -C "$pc" cat-file -e "$pcblob" 2>/dev/null; then
+  bad "the partial clone has the new blob locally (the case cannot run)" ""
+else
+  expect "gates-only: an exported blob missing from a partial clone fails the gate" 1 "could not read the size of internal/zz2.go" \
+    gates bash "$pc/scripts/publish.sh"
+  GIT_NO_LAZY_FETCH=1 git -C "$pc" cat-file -e "$pcblob" 2>/dev/null && bad "gates-only fetched the missing blob" "" \
+    || ok "gates-only fetched nothing into the partial clone"
+fi
+# A SIGTERM during a gates-only run removes its scratch folder, and the
+# scanner's temporary folder with it (TMPDIR inside the scratch folder), even
+# when the whole process group is signalled and the scanner dies at once.
+# No case depends on timing: each stand-in blocks at its ready point until
+# the test has sent the signal (for up to an hour, so a lost signal cannot hang
+# the suite forever; the test always sends it, after at most 120 s).
+# wait_for <file>: until it exists (at most about 120 s).
+wait_for() { local i; for i in $(seq 1200); do [ -e "$1" ] && return 0; sleep 0.1; done; return 1; }
+p="$(make_private p5-sig)"
+sigshim="$work/sigshim"; mkdir -p "$sigshim" "$work/sgtmp"
+# a grep that, for the pointer scan, says it is there and waits for the go
+printf '%s\n' '#!/bin/sh' "case \"\$*\" in *-rIonE*) touch \"$work/sig-scan\"; i=0; while [ ! -e \"$work/sig-go\" ] && [ \$i -lt 36000 ]; do sleep 0.1; i=\$((i + 1)); done ;; esac" \
+  "exec \"$real_grep\" \"\$@\"" > "$sigshim/grep"
+chmod +x "$sigshim/grep"
+# (env, not the gates function: a backgrounded function is a subshell, and
+# $! would be that subshell, not publish.sh)
+env PUBLISH_GATES_ONLY=1 PRIVATE_FLAGS= TMPDIR="$work/sgtmp" PATH="$sigshim:$PATH" bash "$p/scripts/publish.sh" >/dev/null 2>&1 & sigpid=$!
+wait_for "$work/sig-scan"; inflight="$(ls -A "$work/sgtmp")"; kill -TERM "$sigpid"
+touch "$work/sig-go"   # bash runs the trap once the grep it waits for returns
+wait "$sigpid" 2>/dev/null; rc=$?
+[ -n "$inflight" ] && [ "$rc" = 143 ] && [ -z "$(ls -A "$work/sgtmp")" ] && ok "a SIGTERM during gates-only exits 143 and leaves no scratch folder" \
+  || bad "a SIGTERM during gates-only" "exit $rc, want 143; during the run: ${inflight:-nothing}; left in TMPDIR: $(ls -A "$work/sgtmp")"
+p="$(make_private p5-sig2)"
+# a stand-in scanner that makes its folder as the real one does, then waits
+# until the signal ends it
+printf '%s\n' '#!/usr/bin/env bash' 'd="$(mktemp -d "${TMPDIR:-/tmp}/check-private.XXXXXX")" || exit 2' 'trap '"'"'rm -rf "$d"'"'"' EXIT' \
+  "touch \"$work/sig-cp\"" 'i=0; while [ $i -lt 36000 ]; do sleep 0.1; i=$((i + 1)); done' > "$p/scripts/check-private.sh"
+commit_all "$p"
+mkdir -p "$work/sgtmp2"
+perl -e 'setpgrp(0, 0); exec { $ARGV[0] } @ARGV or die "exec $ARGV[0]: $!\n"' \
+  env PUBLISH_GATES_ONLY=1 PRIVATE_FLAGS= TMPDIR="$work/sgtmp2" bash "$p/scripts/publish.sh" >/dev/null 2>&1 & sigpid=$!
+wait_for "$work/sig-cp"; inflight="$(ls -A "$work"/sgtmp2/*/tmp 2>/dev/null)"; kill -TERM -- "-$sigpid"; wait "$sigpid" 2>/dev/null; rc=$?
+[ -n "$inflight" ] && [ "$rc" = 143 ] && [ -z "$(ls -A "$work/sgtmp2")" ] && ok "a SIGTERM to the group during the scan leaves neither scratch folder" \
+  || bad "a SIGTERM to the group during the scan" "exit $rc, want 143; scanner folder during the run: ${inflight:-none}; left in TMPDIR: $(ls -A "$work/sgtmp2")"
+# and the real scanner does make its temporary folder inside the scratch folder
+mshim="$work/mshim"; mkdir -p "$mshim"
+printf '%s\n' '#!/bin/sh' "printf '%s\\n' \"\$*\" >> \"$work/mktemp-calls\"" "exec \"$(command -v mktemp)\" \"\$@\"" > "$mshim/mktemp"
+chmod +x "$mshim/mktemp"
+p="$(make_private p5-sig3)"
+expect "gates-only with a mktemp that logs" 0 "gates passed" gates PATH="$mshim:$PATH" bash "$p/scripts/publish.sh"
+grep -Eq '^-d /.*/publish\.[^/]+/tmp/check-private\.XXXXXX$' "$work/mktemp-calls" && ok "the scanner's temporary folder is inside publish.sh's scratch folder" \
+  || bad "the scanner's temporary folder is outside the scratch folder" "$(cat "$work/mktemp-calls" 2>/dev/null)"
+
+# An exported path with a control character is refused up front (every list
+# of paths is one per line). The path lives in the index only.
+p="$(make_private p5-nl)"; t="$(make_target p5-nl)"
+blob="$(echo 'export const z = 3;' | git -C "$p" hash-object -w --stdin)"
+git -C "$p" update-index --add --cacheinfo "100644,$blob,web/a"$'\n'"b.ts"
+git -C "$p" -c user.name=test -c user.email=test@example.com -c commit.gpgsign=false commit -q -m 'a path with a newline'
+expect "a real export refuses a path with a newline" 1 "a control character in the path" rehearse "$p/scripts/publish.sh" "$t"
+[ -z "$(git -C "$t" ls-files)" ] && ok "the refused newline path left the target empty" || bad "files in the target" "$(git -C "$t" ls-files)"
+expect "gates-only refuses a path with a newline" 1 "a control character in the path" gates bash "$p/scripts/publish.sh"
+# The traps are set before the scratch folder exists: a setup step that fails
+# right after it was made leaves nothing behind.
+p="$(make_private p5-mk)"
+mkshim="$work/mkshim"; mkdir -p "$mkshim" "$work/t19"
+printf '%s\n' '#!/bin/sh' 'case "$*" in */publish.*/tmp) exit 1 ;; esac' "exec \"$(command -v mkdir)\" \"\$@\"" > "$mkshim/mkdir"
+chmod +x "$mkshim/mkdir"
+expect "gates-only: a failed scratch setup fails" 1 "could not create a scratch folder" gates TMPDIR="$work/t19" PATH="$mkshim:$PATH" bash "$p/scripts/publish.sh"
+[ -z "$(ls -A "$work/t19")" ] && ok "the failed setup left no scratch folder" || bad "the failed setup left a scratch folder" "$(ls -A "$work/t19")"
+# A relative TMPDIR is made absolute against the caller's folder.
+mkdir -p "$work/t19r"
+expect "gates-only with a relative TMPDIR" 0 "gates passed" bash -c 'cd "$1" && env PUBLISH_GATES_ONLY=1 PRIVATE_FLAGS= TMPDIR=t19r bash "$2"' _ "$work" "$p/scripts/publish.sh"
+[ -z "$(ls -A "$work/t19r")" ] && ok "the relative TMPDIR run cleaned up after itself" || bad "the relative TMPDIR run left files" "$(ls -A "$work/t19r")"
+# Gates-only reads RELEASE_VERSION from the staged Makefile, not HEAD's.
+p="$(make_private p5-ver)"
+sed -i.bak "s/^RELEASE_VERSION := .*/RELEASE_VERSION := next/" "$p/Makefile"; rm -f "$p/Makefile.bak"; commit_all "$p"
+sed -i.bak "s/^RELEASE_VERSION := .*/RELEASE_VERSION := $V/" "$p/Makefile"; rm -f "$p/Makefile.bak"; git -C "$p" add Makefile
+expect "gates-only accepts a staged version over a bad committed one" 0 "gates passed" gates bash "$p/scripts/publish.sh"
+commit_all "$p"
+sed -i.bak "s/^RELEASE_VERSION := .*/RELEASE_VERSION := next/" "$p/Makefile"; rm -f "$p/Makefile.bak"; git -C "$p" add Makefile
+expect "gates-only refuses a bad staged version over a good committed one" 1 "RELEASE_VERSION in the Makefile is 'next'" gates bash "$p/scripts/publish.sh"
+
+# A signal that arrives while the scratch folder is being made (here: right
+# after mktemp made it, before its name is in hand) still removes it.
+p="$(make_private p5-mt)"
+mtshim="$work/mtshim"; mkdir -p "$mtshim" "$work/mttmp"
+printf '%s\n' '#!/bin/sh' "case \"\$*\" in */publish.XXXXXX) out=\"\$(\"$(command -v mktemp)\" \"\$@\")\" || exit 1; printf '%s\\n' \"\$out\"; kill -TERM \"\$PPID\"; exit 0 ;; esac" \
+  "exec \"$(command -v mktemp)\" \"\$@\"" > "$mtshim/mktemp"
+chmod +x "$mtshim/mktemp"
+expect "a SIGTERM while the scratch folder is made exits 143" 143 "-" gates TMPDIR="$work/mttmp" PATH="$mtshim:$PATH" bash "$p/scripts/publish.sh"
+[ -z "$(ls -A "$work/mttmp")" ] && ok "and leaves no scratch folder" || bad "a SIGTERM while the scratch folder is made left it" "$(ls -A "$work/mttmp")"
 
 # P1b. The banner is exported by its exact name: another picture in .github is
 # refused even when someone adds it to the allowlist.
@@ -469,6 +651,112 @@ before="$(state "$t")"
 expect "a refused export in a commit rehearsal" 1 "the public tree failed check-private" \
   env PUBLISH_TEST_REMOTE="$b6t" PUBLISH_IDENT="$IDENT" bash "$p/scripts/publish.sh" "$t" --update "x"
 [[ "$(state "$t")" == "$before" ]] && ok "a refused export leaves the target's refs and objects as they were" || bad "refused export changed the target" "$(git -C "$t" for-each-ref)"
+# The clean copy's make check runs export-gates, as the real Makefile does:
+# the outer run's rehearsal switches must not reach that nested publish.sh, or
+# a commit rehearsal and an interruption rehearsal would both stop at the
+# clean copy instead of reaching the write.
+nested_mk='RELEASE_VERSION := %s\n\ncheck:\n\tPUBLISH_GATES_ONLY=1 PRIVATE_FLAGS="$(PRIVATE_FLAGS)" bash scripts/publish.sh\n\nbuild:\n\t@echo built\n'
+p="$(make_private p6n)"; t="$(make_remote_target p6n)"
+printf "$nested_mk" "$V" > "$p/Makefile"; commit_all "$p"
+expect "a commit rehearsal whose clean copy runs export-gates commits" 0 "-" \
+  env PUBLISH_TEST_REMOTE="$work/bare-p6n.git" PUBLISH_IDENT="$IDENT" bash "$p/scripts/publish.sh" "$t" --update "Tooling"
+[[ "$(git -C "$t" log -1 --format=%s 2>/dev/null)" == Tooling ]] && ok "the nested-gates commit rehearsal made its commit" \
+  || bad "the nested-gates commit rehearsal made no commit" "$LAST_OUT"
+p="$(make_private p6n2)"; t="$(seeded_target p6n2)"
+printf "$nested_mk" "$V" > "$p/Makefile"; commit_all "$p"
+before="$(state "$t")"
+expect "an interruption rehearsal whose clean copy runs export-gates reaches the write" 130 "put back as it was" \
+  with_sigint env PUBLISH_TEST_INTERRUPT_AFTER=3 PUBLISH_TEST_TARGET=1 bash "$p/scripts/publish.sh" "$t"
+[[ "$(state "$t")" == "$before" ]] && ok "that interrupted write left the target as it was" || bad "that interrupted write changed the target" "$(git -C "$t" status --short | head)"
+# A rollback that cannot restore the target's index says so, keeps the list
+# of written files and the scratch folder, and does not claim success.
+p="$(make_private p6r)"; t="$(seeded_target "p6r with space")"   # recover.sh must quote the path
+before="$(state "$t")"
+rshim="$work/rshim"; mkdir -p "$rshim" "$work/rtmp"
+printf '%s\n' '#!/bin/sh' 'case " $* " in *" read-tree "*) case " $* " in *" --empty "*) ;; *) exit 1 ;; esac ;; esac' \
+  "exec \"$real_git\" \"\$@\"" > "$rshim/git"
+chmod +x "$rshim/git"
+expect "a rollback that fails says the target could not be put back" 130 "could NOT be put back" \
+  with_sigint env PATH="$rshim:$PATH" TMPDIR="$work/rtmp" PUBLISH_TEST_INTERRUPT_AFTER=3 PUBLISH_TEST_TARGET=1 bash "$p/scripts/publish.sh" "$t"
+kept="$(ls "$work"/rtmp/*/written 2>/dev/null)"
+[[ "$LAST_OUT" != *"put back as it was"* && -s "$kept" ]] && ok "the failed rollback claims nothing and keeps the list of written files" \
+  || bad "the failed rollback" "kept: ${kept:-nothing}
+$LAST_OUT"
+rec="$(ls "$work"/rtmp/*/recover.sh 2>/dev/null)"
+[[ "$LAST_OUT" == *"finish by hand: bash '"*"/recover.sh'"* && -n "$rec" ]] && bash "$rec" >/dev/null 2>&1 && [[ "$(state "$t")" == "$before" ]] \
+  && ok "recover.sh, as printed, puts back a target whose path has a space" || bad "recover.sh after a failed read-tree" "recover: ${rec:-none}
+$(git -C "$t" status --short | head)"
+# A rollback that cannot remove a file it may have written says so and leaves
+# recover.sh, which (run as printed, without the failing rm) puts it all back.
+p="$(make_private p6rm)"; t="$(seeded_target p6rm)"
+before="$(state "$t")"
+rmshim="$work/rmshim"; mkdir -p "$rmshim" "$work/rmtmp"
+# (.gitignore is among the first files written, so it is really there)
+printf '%s\n' '#!/bin/sh' 'case "$*" in */.gitignore) exit 1 ;; esac' "exec \"$(command -v rm)\" \"\$@\"" > "$rmshim/rm"
+chmod +x "$rmshim/rm"
+expect "a rollback whose removal fails says the target could not be put back" 130 "could NOT be put back" \
+  with_sigint env PATH="$rmshim:$PATH" TMPDIR="$work/rmtmp" PUBLISH_TEST_INTERRUPT_AFTER=3 PUBLISH_TEST_TARGET=1 bash "$p/scripts/publish.sh" "$t"
+rec="$(ls "$work"/rmtmp/*/recover.sh 2>/dev/null)"
+[[ "$LAST_OUT" != *"put back as it was"* && -n "$rec" ]] && bash "$rec" >/dev/null 2>&1 && [[ "$(state "$t")" == "$before" ]] \
+  && ok "recover.sh puts the target back after a failed removal" || bad "recover.sh after a failed removal" "recover: ${rec:-none}
+$(git -C "$t" status --short | head)"
+# The rollback removes only paths the write began, and none through a link: a
+# folder on the way that became a link to somewhere else is refused, and the
+# file behind it stays. (The shims act on the target's paths and its restore
+# only, not on the scratch stage or the clean copy.)
+p="$(make_private p6ln)"; t="$(seeded_target p6ln)"
+mkdir -p "$work/decoy-wf"; echo 'outside' > "$work/decoy-wf/ci.yml"
+chshim="$work/chshim"; mkdir -p "$chshim" "$work/lntmp"
+printf '%s\n' '#!/bin/sh' "case \"\$2\" in \"$t/.github/workflows/ci.yml\") d=\"\${2%/ci.yml}\"; \"$(command -v rm)\" -rf \"\$d\"; ln -s \"$work/decoy-wf\" \"\$d\"; exit 1 ;; esac" \
+  "exec \"$(command -v chmod)\" \"\$@\"" > "$chshim/chmod"
+chmod +x "$chshim/chmod"
+expect "a rollback refuses to remove through a link" 1 "could NOT be put back" \
+  env PATH="$chshim:$PATH" TMPDIR="$work/lntmp" PUBLISH_TEST_TARGET=1 bash "$p/scripts/publish.sh" "$t"
+[ -f "$work/decoy-wf/ci.yml" ] && ok "the file behind the link is untouched" || bad "the rollback removed a file outside the target" "$LAST_OUT"
+# A restore that fails part-way (an old link already back) is retried by
+# recover.sh without replaying the removal, and recover.sh ignores the git
+# environment of the shell it runs in.
+p="$(make_private p6pc)"; t="$(seeded_target p6pc)"
+mkdir -p "$work/decoy-cmd/sitboard"; echo 'outside' > "$work/decoy-cmd/sitboard/main.go"
+ln -s "$work/decoy-cmd" "$t/cmd"; commit_all "$t" "a link"
+before="$(state "$t")"
+cishim="$work/cishim"; mkdir -p "$cishim" "$work/citmp"
+printf '%s\n' '#!/bin/sh' "case \" \$* \" in *\" checkout-index -a -f \"*) \"$real_git\" \"\$@\"; exit 1 ;; esac" "exec \"$real_git\" \"\$@\"" > "$cishim/git"
+chmod +x "$cishim/git"
+expect "a restore that fails after putting an old link back" 130 "could NOT be put back" \
+  with_sigint env PATH="$cishim:$PATH" TMPDIR="$work/citmp" PUBLISH_TEST_INTERRUPT_AFTER=10 PUBLISH_TEST_TARGET=1 bash "$p/scripts/publish.sh" "$t"
+[ -L "$t/cmd" ] && ok "(the old link is back before the failure)" || bad "the partial restore did not put the link back" "$(ls -la "$t")"
+other="$work/other-checkout"; git init -q -b main "$other"; echo keep > "$other/keep.txt"; commit_all "$other" "other"
+before_other="$(state "$other")"
+rec="$(ls "$work"/citmp/*/recover.sh 2>/dev/null)"
+expect "recover.sh retries the restore alone, whatever GIT_DIR and GIT_WORK_TREE say" 0 "the target was put back" \
+  env GIT_DIR="$other/.git" GIT_WORK_TREE="$other" bash "${rec:-/nonexistent}"
+[[ "$(state "$t")" == "$before" && "$(state "$other")" == "$before_other" && -f "$work/decoy-cmd/sitboard/main.go" ]] \
+  && ok "the target is back, the other checkout and the file behind the link untouched" \
+  || bad "recover.sh after a partial restore" "$(git -C "$t" status --short | head)"
+# recover.sh refuses a target that is no longer the same checkout.
+p="$(make_private p6id)"; t="$(seeded_target p6id)"
+mkdir -p "$work/idtmp"
+expect "a failed rollback for the identity case" 130 "could NOT be put back" \
+  with_sigint env PATH="$rshim:$PATH" TMPDIR="$work/idtmp" PUBLISH_TEST_INTERRUPT_AFTER=3 PUBLISH_TEST_TARGET=1 bash "$p/scripts/publish.sh" "$t"
+mv "$t" "$t.moved"; git clone -q "$t.moved" "$t"
+before="$(state "$t")"
+rec="$(ls "$work"/idtmp/*/recover.sh 2>/dev/null)"
+expect "recover.sh refuses a checkout that was replaced at the same path" 1 "is not the checkout publish.sh wrote to" bash "${rec:-/nonexistent}"
+[[ "$(state "$t")" == "$before" ]] && ok "the replacement checkout is untouched" || bad "recover.sh changed the replacement" "$(git -C "$t" status --short | head)"
+# Every scanner and the clean copy keep their temporary folders inside the
+# scratch folder, in a commit rehearsal too (tree, message and history scans).
+p="$(make_private p6tmp)"; t="$(make_remote_target p6tmp)"
+printf 'RELEASE_VERSION := %s\n\ncheck:\n\t@echo "clean copy TMPDIR=$$TMPDIR"\n\nbuild:\n\t@echo built\n' "$V" > "$p/Makefile"; commit_all "$p"
+: > "$work/mktemp-calls"
+expect "a commit rehearsal with a mktemp that logs" 0 "-" \
+  env PATH="$mshim:$PATH" PUBLISH_TEST_REMOTE="$work/bare-p6tmp.git" PUBLISH_IDENT="$IDENT" bash "$p/scripts/publish.sh" "$t" --update "Tooling"
+cp_calls="$(grep -c 'check-private' "$work/mktemp-calls")"
+cp_inside="$(grep -cE '^-d /.*/publish\.[^/]+/tmp/check-private\.XXXXXX$' "$work/mktemp-calls")"
+[[ "$cp_calls" -ge 3 && "$cp_calls" == "$cp_inside" ]] && ok "the tree, message and history scans all keep their folders in the scratch folder" \
+  || bad "a scanner's folder is outside the scratch folder" "$(cat "$work/mktemp-calls")"
+[[ "$LAST_OUT" =~ clean\ copy\ TMPDIR=/[^[:space:]]*/publish\.[^/[:space:]]+/tmp ]] && ok "the clean copy's TMPDIR is inside the scratch folder" \
+  || bad "the clean copy's TMPDIR" "$LAST_OUT"
 
 # P7 (review 4, 5). The target is never the private repository, inside it,
 # around it, a worktree or clone of it, or a checkout with uncommitted work,

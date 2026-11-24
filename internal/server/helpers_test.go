@@ -9,7 +9,6 @@ import (
 	"sync"
 	"testing"
 	"testing/fstest"
-	"time"
 
 	"github.com/IZZY-Agency/sitboard/internal/app"
 	"github.com/IZZY-Agency/sitboard/internal/contract"
@@ -35,7 +34,8 @@ type fakeBoard struct {
 	tmux      map[string]model.TmuxPane // card id -> tmux pane, wins over terminals
 	seen      []string
 	catchup   int
-	upTo      time.Time
+	list      string                     // the list MarkCatchupRead was given
+	markErr   error                      // what MarkCatchupRead returns
 	groupings map[string]bool            // project id -> it has parts
 	forgotten []string                   // project ids ForgetGrouping accepted
 	forgetErr error                      // what ForgetGrouping returns for a grouping
@@ -107,6 +107,10 @@ func (f *fakeBoard) Leftovers(context.Context) (contract.Leftovers, error) {
 	return contract.Leftovers{Items: []contract.Leftover{}}, nil
 }
 
+func (f *fakeBoard) Issues(context.Context) (contract.Issues, error) {
+	return contract.Issues{State: contract.IssuesReady, Repos: []contract.RepoIssues{}}, nil
+}
+
 func (f *fakeBoard) MarkSeen(id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -114,12 +118,12 @@ func (f *fakeBoard) MarkSeen(id string) error {
 	return nil
 }
 
-func (f *fakeBoard) MarkCatchupRead(upTo time.Time) error {
+func (f *fakeBoard) MarkCatchupRead(list string) error {
 	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.catchup++
-	f.upTo = upTo
-	f.mu.Unlock()
-	return nil
+	f.list = list
+	return f.markErr
 }
 
 func (f *fakeBoard) ForgetGrouping(id string) error {

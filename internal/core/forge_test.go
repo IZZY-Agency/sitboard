@@ -33,8 +33,8 @@ func shiftTimes(v any, d time.Duration) any {
 
 // stateBeforeForges copies testdata/state-before-forges.json (a state file in
 // the shape the build before forges wrote, fixed catch-up keys included) into
-// a temp dir with its times moved to be relative to anchor. state.Open prunes
-// by the real clock, so the times follow it; the keys do not move.
+// a temp dir with its times moved to be relative to anchor. the store prunes
+// by the clock it is opened with, so the times follow the anchor; the keys do not move.
 func stateBeforeForges(t *testing.T, anchor time.Time) string {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join("testdata", "state-before-forges.json"))
@@ -57,28 +57,20 @@ func stateBeforeForges(t *testing.T, anchor time.Time) string {
 	return file
 }
 
-// A state file from before forges holds read marks that are hashes of
-// "pr_opened|owner/name#n", the path as written. Opened from the file as the
-// old build wrote it, a GitHub pull request must still meet its mark: the
-// item saved as unread stays unread, and after a write and a reopen the
-// marker, every hash (byte for byte) and the other settings are all still
-// there. Times are relative to a clock the store and the board share.
-func TestCatchupSavedGitHubMarkStillMatches(t *testing.T) {
-	const (
-		mixed     = "Example-Org/Example-Repo"
-		openedKey = "8db35d92f07f0172fcbe5e36d8d90f0f" // pr_opened|Example-Org/Example-Repo#9
-		otherKey  = "82f467d2c4e984433654e0a37f22a5a1" // an item this board never meets
-	)
-	if state.CatchupKey("pr_opened|"+mixed+"#9") != openedKey {
-		t.Fatal("the fixture's key is not the one the identity hashes to")
-	}
-	anchor := time.Now().UTC().Truncate(time.Second)
+// A state file from before forges, with a catch-up marker and unread items
+// (hashes of "pr_opened|owner/name#n"), opens with its other settings; its
+// marker and unread items are dropped, so the GitHub pull request is unread,
+// with its forge, and stays so after a write and a reopen. Times are relative
+// to a clock the store and the board share.
+func TestCatchupFileBeforeForgesOpens(t *testing.T) {
+	const mixed = "Example-Org/Example-Repo"
+	anchor := tNow
 	file := stateBeforeForges(t, anchor)
-	st, err := state.Open(file)
+	e := newEnv(t)
+	st, err := state.OpenAt(file, e.clock.Now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	e := newEnv(t)
 	e.state = st
 	e.clock.Set(anchor.Add(time.Minute))
 	b := e.restart(t)
@@ -93,7 +85,7 @@ func TestCatchupSavedGitHubMarkStillMatches(t *testing.T) {
 	b.tick()
 	got := catchup(t, b)
 	if len(got.Items) != 1 || got.Items[0].Kind != contract.CatchupPROpened {
-		t.Fatalf("saved as unread before forges, now %v", kindsAt(got))
+		t.Fatalf("listed %v", kindsAt(got))
 	}
 	if p := got.Items[0].PullRequest; p == nil || p.Forge != contract.ForgeGitHub || p.Host != model.GitHubHost {
 		t.Fatalf("catch-up pull request %+v", got.Items[0].PullRequest)
@@ -103,17 +95,12 @@ func TestCatchupSavedGitHubMarkStillMatches(t *testing.T) {
 	if err := st.SetSeen("claude:99999999-8888-7777-6666-555555555555", anchor); err != nil {
 		t.Fatal(err)
 	}
-	back, err := state.Open(file)
+	back, err := state.OpenAt(file, e.clock.Now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantMarker := anchor.Add(-time.Hour)
-	if !back.CatchupMarker().Equal(wantMarker) {
-		t.Errorf("marker %v, want %v", back.CatchupMarker(), wantMarker)
-	}
-	unread := back.CatchupUnread()
-	if len(unread) != 2 || !unread[openedKey].Equal(anchor.Add(-3*time.Hour)) || !unread[otherKey].Equal(anchor.Add(-4*time.Hour)) {
-		t.Errorf("unread marks %v: want both fixture hashes, unchanged", unread)
+	if data, _ := os.ReadFile(file); strings.Contains(string(data), "catchupMarker") || strings.Contains(string(data), "catchupUnread") {
+		t.Errorf("the old catch-up marker or unread items were kept: %s", data)
 	}
 	if _, ok := back.SeenAt("claude:11111111-2222-3333-4444-555555555555"); !ok {
 		t.Error("a seen mark is lost")
@@ -160,16 +147,18 @@ func TestGitLabRefsAreNeverAskedOfGitHub(t *testing.T) {
 // the address built for them, its host is listed, and its closing issues are
 // GitLab's.
 func TestGitLabMergeRequestOnTheCard(t *testing.T) {
-	e, _ := newGitLabEnv(t)
+	e, glab := newGitLabEnv(t)
 	gl := model.GitLabRepo("gitlab.example.com", "example-group/example-project")
 	e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Remote: gl, Branch: model.Of("main")})
 	w := session("w", model.StatusFinished, tNow)
 	w.CreatedPRs = []model.PRRef{{Repo: gl, Number: 12}}
-	e.board.mu.Lock()
-	e.board.prs[model.PRRef{Repo: gl, Number: 12}] = model.PullRequest{
+	mr := model.PullRequest{
 		Repo: gl, Number: 12, Title: "t", URL: model.ChangeRequestURL(gl, 12),
 		State: model.PRStateOpen, ClosingIssues: []int{3}, OpenedAt: tNow.Add(-time.Hour),
 	}
+	glab.prs = []model.PullRequest{mr} // the lookup the host check starts finds it
+	e.board.mu.Lock()
+	e.board.prs[model.PRRef{Repo: gl, Number: 12}] = mr
 	e.board.mu.Unlock()
 	e.board.applySync(w)
 	e.board.tick() // the host check that lets the remote show
@@ -216,7 +205,8 @@ func TestGitLabLinkMustBeTheBuiltOne(t *testing.T) {
 	}
 }
 
-// Leftovers has evidence from GitHub only: a GitLab repo is never looked at.
+// Leftovers has evidence from GitHub only: nothing of a GitLab repo is
+// looked at but its checkouts.
 func TestLeftoversSkipGitLabRepos(t *testing.T) {
 	e, _ := newGitLabEnv(t)
 	gl := model.GitLabRepo("gitlab.example.com", "example-group/example-project")
@@ -226,7 +216,7 @@ func TestLeftoversSkipGitLabRepos(t *testing.T) {
 	b.mu.Lock()
 	repos, _, _ := b.leftoverInputsLocked()
 	b.mu.Unlock()
-	if len(repos) != 0 {
+	if len(repos) != 1 || !repos[0].checkoutsOnly {
 		t.Fatalf("GitLab repo looked at: %+v", repos)
 	}
 }
@@ -308,7 +298,7 @@ func TestLongGitLabPathIsWholeOrAbsent(t *testing.T) {
 		n    int
 		show bool
 	}{{300, true}, {301, false}, {900, false}} {
-		e, _ := newGitLabEnv(t)
+		e, glab := newGitLabEnv(t)
 		gl := model.GitLabRepo(host, pathOf(tc.n, "a"))
 		if !gl.Valid() {
 			t.Fatalf("a %d-character path must be a valid GitLab path", tc.n)
@@ -316,11 +306,13 @@ func TestLongGitLabPathIsWholeOrAbsent(t *testing.T) {
 		e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Remote: gl, Branch: model.Of("main")})
 		w := session("w", model.StatusFinished, tNow)
 		w.CreatedPRs = []model.PRRef{{Repo: gl, Number: 12}}
-		e.board.mu.Lock()
-		e.board.prs[model.PRRef{Repo: gl, Number: 12}] = model.PullRequest{
+		mr := model.PullRequest{
 			Repo: gl, Number: 12, Title: "t", URL: model.ChangeRequestURL(gl, 12),
 			State: model.PRStateOpen, ClosingIssues: []int{3}, OpenedAt: tNow.Add(-time.Hour),
 		}
+		glab.prs = []model.PullRequest{mr}
+		e.board.mu.Lock()
+		e.board.prs[model.PRRef{Repo: gl, Number: 12}] = mr
 		e.board.mu.Unlock()
 		e.board.applySync(w)
 		e.board.tick()

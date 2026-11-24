@@ -74,7 +74,9 @@ func (r *resolver) gitWith(ctx context.Context, quiet bool, dir string, args ...
 	if run == nil {
 		run = runner.ExecWithout(r.timeout, quiet, parentGitVar, gitVars...)
 	}
-	full := append([]string{"-c", "core.fsmonitor=false", "-C", dir}, args...)
+	// log.showSignature off: no listing (the stash list among them) runs a
+	// signature verifier, which could be set up to look keys up online.
+	full := append([]string{"-c", "core.fsmonitor=false", "-c", "log.showSignature=false", "-C", dir}, args...)
 	return run(ctx, r.bin, full...)
 }
 
@@ -113,6 +115,15 @@ func (r *resolver) Probe(ctx context.Context) source.Status {
 	return st
 }
 
+// notARepo: git answered that the folder is in no repository, the message
+// it gives when its search for a .git found none (LC_ALL=C). Any other
+// failure (a broken .git pointer, a repo it refuses to read, no answer) is
+// no such answer.
+func notARepo(err error) bool {
+	var ee *runner.ExitError
+	return errors.As(err, &ee) && ee.Code == 128 && bytes.HasPrefix(ee.Stderr, []byte("fatal: not a git repository (or any "))
+}
+
 // exitCode returns the exit code of a git that ran and failed, or -1.
 func exitCode(err error) int {
 	var ee *runner.ExitError
@@ -145,14 +156,14 @@ func (r *resolver) Resolve(ctx context.Context, folder string) (model.Repo, erro
 
 	out, err := r.git(ctx, folder, "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir")
 	if err != nil {
-		if exitCode(err) > 0 { // not a work tree (outside a repo, or inside .git)
+		if notARepo(err) {
 			return outside, nil
 		}
-		return model.Repo{}, err
+		return model.Repo{}, err // any other failure: git cannot tell
 	}
 	lines := splitLines(out)
-	if len(lines) != 2 {
-		return outside, nil
+	if len(lines) != 2 || !filepath.IsAbs(lines[0]) || !filepath.IsAbs(lines[1]) {
+		return model.Repo{}, errors.New("gitsrc: an unexpected rev-parse answer")
 	}
 	repo := model.Repo{Root: lines[0], MainRoot: lines[0]}
 	if common := lines[1]; filepath.Base(common) == ".git" {
@@ -165,17 +176,15 @@ func (r *resolver) Resolve(ctx context.Context, folder string) (model.Repo, erro
 		if b, ok := strings.CutPrefix(strings.TrimSpace(string(out)), "refs/heads/"); ok && b != "" {
 			repo.Branch = model.Of(b)
 		}
-	case exitCode(err) > 0: // detached HEAD: branch unknown
+	case exitCode(err) == 1: // detached HEAD: branch unknown
 	default:
 		return model.Repo{}, err
 	}
 
-	repo.Remote, repo.OriginUnclear, err = r.origin(ctx, repo.Root)
-	switch {
-	case err == nil:
-	case exitCode(err) > 0: // origin unreadable: no remote, as with none
-		repo.Remote, repo.OriginUnclear = model.ForgeRepo{}, false
-	default:
+	// No origin is an answer (git says there is none); an origin git cannot
+	// read is not: the folder's repo is not known.
+	repo.Remote, repo.RemoteBare, repo.OriginUnclear, err = r.origin(ctx, repo.Root)
+	if err != nil {
 		return model.Repo{}, err
 	}
 	return repo, nil
@@ -207,6 +216,17 @@ func (r *resolver) Inventory(ctx context.Context, root string) (model.RepoInvent
 	if inv.Worktrees, err = parseWorktrees(out); err != nil {
 		return inv, err
 	}
+	// Every worktree git has registered must be one the listing gave, on
+	// what the listing says: git leaves out one whose gitdir file it cannot
+	// read, and that one may have any branch checked out.
+	if err := accountFor(inv.CommonDir, inv.Worktrees); err != nil {
+		return inv, err
+	}
+	// Every checkout is known now, whatever fails below. One on a path git
+	// could only be given as another one (a newline in it) is listed as it
+	// is, read from the -z listing: it still counts where it sits, and no
+	// git call is made in it (TreeStatus refuses it), so it is never offered.
+	inv.WorktreesListed = true
 	// A partial clone fetches what it lacks when asked about it: not one to
 	// read.
 	out, err = r.git(ctx, root, "config", "--get-regexp", `^remote\..*\.promisor$|^extensions\.partialclone$`)
@@ -216,17 +236,8 @@ func (r *resolver) Inventory(ctx context.Context, root string) (model.RepoInvent
 	case err != nil && exitCode(err) != 1: // 1: none set
 		return inv, err
 	}
-	// Every worktree git has registered must be one the listing gave, on
-	// what the listing says: git leaves out one whose gitdir file it cannot
-	// read, and that one may have any branch checked out.
-	if err := accountFor(inv.CommonDir, inv.Worktrees); err != nil {
-		return inv, err
-	}
 	for i := range inv.Worktrees {
 		w := &inv.Worktrees[i]
-		if !validDir(w.Path) {
-			return inv, errBadFolder // a path git could only be given as another one
-		}
 		// A merge, rebase, bisect... under way: the worktree holds it, and
 		// a rebase or bisect goes back to its branch at the end (a rebase
 		// with --update-refs to the branches it queued, too).
@@ -265,10 +276,11 @@ func (r *resolver) Inventory(ctx context.Context, root string) (model.RepoInvent
 			inv.Branches[i].Symbolic = true
 		}
 	}
-	origin, _, err := r.origin(ctx, root)
+	origin, _, unclear, err := r.origin(ctx, root)
 	if err != nil {
 		return inv, err
 	}
+	inv.OriginUnclear = unclear
 	if origin.Forge == model.ForgeGitHub { // Leftovers is GitHub only
 		inv.Origin = origin
 	}
@@ -299,13 +311,13 @@ func (r *resolver) Inventory(ctx context.Context, root string) (model.RepoInvent
 // there is no origin, more than one address, or none of these. unclear: more
 // than one address, one of them on GitHub (a GitHub repo whose name is
 // unknown).
-func (r *resolver) origin(ctx context.Context, root string) (remote model.ForgeRepo, unclear bool, err error) {
+func (r *resolver) origin(ctx context.Context, root string) (remote model.ForgeRepo, bare, unclear bool, err error) {
 	out, err := r.git(ctx, root, "remote", "get-url", "--all", "origin")
 	if err != nil {
 		if exitCode(err) == 2 { // 2: no such remote
-			return model.ForgeRepo{}, false, nil
+			return model.ForgeRepo{}, false, false, nil
 		}
-		return model.ForgeRepo{}, false, err
+		return model.ForgeRepo{}, false, false, err
 	}
 	var urls []string
 	for _, l := range strings.Split(string(out), "\n") {
@@ -314,16 +326,16 @@ func (r *resolver) origin(ctx context.Context, root string) (remote model.ForgeR
 		}
 	}
 	if len(urls) != 1 {
-		return model.ForgeRepo{}, slices.ContainsFunc(urls, func(u string) bool { return slugFromURL(u) != "" }), nil
+		return model.ForgeRepo{}, false, slices.ContainsFunc(urls, func(u string) bool { return slugFromURL(u) != "" }), nil
 	}
 	if slug := slugFromURL(urls[0]); slug != "" {
-		return model.GitHubRepo(slug), false, nil
+		return model.GitHubRepo(slug), false, false, nil
 	}
 	// github.com keeps its stricter two-part rule above.
-	if host, path, ok := gitlab.ParseRemote(urls[0]); ok && host != model.GitHubHost {
-		return model.GitLabRepo(host, path), false, nil
+	if host, path, bare, ok := gitlab.ParseRemote(urls[0]); ok && model.GitLabHostname(host) != model.GitHubHost {
+		return model.GitLabRepo(host, path), bare, false, nil
 	}
-	return model.ForgeRepo{}, false, nil
+	return model.ForgeRepo{}, false, false, nil
 }
 
 // operation reads the files git keeps in a worktree's own git folder for an

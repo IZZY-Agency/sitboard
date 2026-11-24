@@ -1,18 +1,23 @@
 // Package state keeps what only the owner knows: which cards were seen, the
-// catch-up marker, the umbrella folders that group projects, the folders
-// whose grouping the owner forgot, and the folders the owner set to always or
-// never group. Seen keys are card ids (contract.CardID),
+// catch-up items marked read, the umbrella folders that group projects, the
+// folders whose grouping the owner forgot, and the folders the owner set to
+// always or never group. Seen keys are card ids (contract.CardID),
 // so "seen" survives restarts. Folder paths are local only: they never leave
 // this file.
 //
-// Catch-up items still unread although they happened before the marker
-// ("catchupUnread") are kept as a hash of each item's identity, not the
-// identity itself, and the item's own time. Someone who can read the file and
-// guesses a repository can tell which of its pull requests are unread; the
-// file already names sessions and folders. There is no salt: one kept in this
-// same file would protect nothing against whoever reads it. Older builds drop
-// the key on their next write; that only makes those items count as read, so
-// the file version is not raised for it.
+// Acknowledged catch-up items ("catchupRead": those a list marked read
+// showed) are kept as a hash of each item's identity, not the identity
+// itself, and the item's own time, with "catchupMarkedAt", when the newest
+// list marked read was made. Someone who can read the file and guesses a
+// repository can tell which of its pull requests were marked read; the file
+// already names sessions and folders. There is no salt: one kept in this same
+// file would protect nothing against whoever reads it. While the file holds
+// one it is written as version 3, which older builds refuse to open ("written
+// by a newer sitboard"): they would drop the key.
+//
+// The catch-up marker and unread items sitboard 0.4.0 kept ("catchupMarker",
+// "catchupUnread") are dropped at the first open by this build, and the drop
+// saved at once (see Open).
 //
 // A file from before umbrellas existed has no "umbrellas" key, and a file
 // written by 0.1.0 has no "forgotten" key; both load as is. The file version
@@ -55,11 +60,11 @@ import (
 	"time"
 )
 
-// MaxCatchupUnread caps the catch-up items kept as unread although they
-// happened before the marker. Past it the oldest are dropped: each of those
-// counts as read after the next restart, as if it had been in a list marked
-// read.
-const MaxCatchupUnread = 1000
+// MaxCatchupRead caps the acknowledged catch-up items kept (20 full lists in
+// the 7 days). The board refuses an acknowledgement that would pass it, so
+// nothing it holds is ever dropped for room: past it the store drops the
+// oldest, each of which would only be listed again.
+const MaxCatchupRead = 20000
 
 // CatchupKey is how a catch-up item's identity is kept in the state file: the
 // first 16 bytes of its SHA-256, in hex.
@@ -97,17 +102,23 @@ type Store interface {
 	// seen, whatever SeenAt says.
 	SeenAt(cardID string) (time.Time, bool)
 	SetSeen(cardID string, at time.Time) error
-	CatchupMarker() time.Time
-	SetCatchupMarker(at time.Time) error
-	// CatchupUnread returns a copy of the catch-up items that are still
-	// unread although they happened before the marker (learned late): key ->
-	// the item's own time. A key is a hash of the item's identity
-	// (CatchupKey), not the identity itself.
-	CatchupUnread() map[string]time.Time
-	// SetCatchup saves the marker and the unread items in one write. Items
-	// older than SeenRetention are dropped; past MaxCatchupUnread, the oldest.
-	// After Close it changes nothing and returns ErrClosed.
-	SetCatchup(marker time.Time, unread map[string]time.Time) error
+	// CatchupRead returns a copy of the acknowledged catch-up items: those a
+	// list marked read ("Caught up") showed. Key -> the item's own time; the
+	// key is a hash of the item's identity (CatchupKey), not the identity
+	// itself.
+	CatchupRead() map[string]time.Time
+	// CatchupMarkedAt is when the newest list marked read was made (for the
+	// page's "since" line only; zero when none was).
+	CatchupMarkedAt() time.Time
+	// SetCatchupRead saves the acknowledged items and CatchupMarkedAt in one
+	// write. Items older
+	// than SeenRetention are dropped; past MaxCatchupRead, the oldest (the
+	// caller refuses an acknowledgement that would pass it). After Close it
+	// changes nothing and returns ErrClosed.
+	SetCatchupRead(read map[string]time.Time, markedAt time.Time) error
+	// InMemory is whether this store keeps nothing past this run: Memory
+	// (--no-state), or a file that could not be written at open (see Open).
+	InMemory() bool
 
 	// Umbrellas returns a copy of the remembered umbrella folders (absolute
 	// path -> last seen), without those older than UmbrellaRetention.
@@ -165,8 +176,11 @@ type Store interface {
 }
 
 // fileVersion is the newest file version this build reads. It writes
-// versionPlain when the file holds no grouping setting, and fileVersion when
-// it holds one.
+// versionPlain when the file holds no grouping setting and no catch-up
+// acknowledgement, versionGrouping when it holds a grouping setting and no
+// acknowledgement, and fileVersion while it holds an acknowledgement
+// ("catchupRead"): older builds would drop it on their next write, so they
+// must refuse the file instead (0.4.0: "written by a newer sitboard").
 //
 // This build reads a version 2 file's "grouping" leniently: a mode it does
 // not know is dropped with a log line, and the next write saves the file
@@ -175,8 +189,9 @@ type Store interface {
 // holds one; otherwise this build, run after it (a downgrade), drops that
 // setting silently.
 const (
-	fileVersion  = 2
-	versionPlain = 1
+	fileVersion     = 3
+	versionGrouping = 2
+	versionPlain    = 1
 )
 
 // The values of a grouping setting. A folder with no setting is on auto:
@@ -201,16 +216,15 @@ var ErrClosed = errors.New("state: sitboard is stopping; the change was not save
 var ErrTooManySettings = errors.New("state: too many folders have a grouping setting")
 
 type document struct {
-	Version       int                  `json:"version"`
-	Seen          map[string]time.Time `json:"seen"`
-	CatchupMarker time.Time            `json:"catchupMarker,omitzero"`
-	Umbrellas     map[string]time.Time `json:"umbrellas,omitempty"`
-	Forgotten     map[string]time.Time `json:"forgotten,omitempty"`
-	Grouping      map[string]string    `json:"grouping,omitempty"`
-	// CatchupUnread: older builds do not know it and drop it on their next
-	// write. That loses only these marks (those items then count as read),
-	// so it is no reason for a version that older builds would refuse.
-	CatchupUnread map[string]time.Time `json:"catchupUnread,omitempty"`
+	Version   int                  `json:"version"`
+	Seen      map[string]time.Time `json:"seen"`
+	Umbrellas map[string]time.Time `json:"umbrellas,omitempty"`
+	Forgotten map[string]time.Time `json:"forgotten,omitempty"`
+	Grouping  map[string]string    `json:"grouping,omitempty"`
+	// CatchupRead: older builds ignore it and drop it on their next write;
+	// those items then count as unread, nothing is lost.
+	CatchupRead     map[string]time.Time `json:"catchupRead,omitempty"`
+	CatchupMarkedAt time.Time            `json:"catchupMarkedAt,omitzero"`
 }
 
 type fileStore struct {
@@ -234,6 +248,10 @@ type fileStore struct {
 // drop its newer fields on the next write.
 func Open(file string) (Store, error) { return openAt(file, time.Now) }
 
+// OpenAt is Open with its clock, for tests that run on a fake one: what the
+// store prunes it prunes against that clock, never the machine's.
+func OpenAt(file string, clock func() time.Time) (Store, error) { return openAt(file, clock) }
+
 // openAt is Open with its clock: groupings are pruned against it at load.
 func openAt(file string, clock func() time.Time) (Store, error) {
 	s := &fileStore{path: file, now: clock, warnf: log.Printf, doc: document{Version: versionPlain, Seen: map[string]time.Time{}}}
@@ -256,7 +274,9 @@ func openAt(file string, clock func() time.Time) (Store, error) {
 		Version   json.RawMessage `json:"version"`
 		Forgotten json.RawMessage `json:"forgotten"`
 		Grouping  json.RawMessage `json:"grouping"`
+		Marker    json.RawMessage `json:"catchupMarker"`
 		Unread    json.RawMessage `json:"catchupUnread"`
+		Read      json.RawMessage `json:"catchupRead"`
 	}
 	if err := json.Unmarshal(data, &disk); err != nil {
 		return nil, fmt.Errorf("state: %s is not a valid state file (move it aside to start fresh): %w", file, err)
@@ -278,7 +298,11 @@ func openAt(file string, clock func() time.Time) (Store, error) {
 	// refused file logs nothing about its contents.
 	doc.Forgotten = readForgotten(disk.Forgotten)
 	doc.Grouping = readGrouping(disk.Grouping)
-	doc.CatchupUnread = readCatchupUnread(disk.Unread, s.now())
+	doc.CatchupRead = readCatchupSet(disk.Read, s.now())
+	// The catch-up marker and unread items an older build (0.4.0) left are
+	// dropped at the first open, whatever they hold, and the drop saved at
+	// once: what the marker covered is unread again, never read on a guess.
+	legacy := present(disk.Marker) || present(disk.Unread)
 	if doc.Seen == nil {
 		doc.Seen = map[string]time.Time{}
 	}
@@ -309,8 +333,20 @@ func openAt(file string, clock func() time.Time) (Store, error) {
 	}
 	doc.Version = versionOf(doc)
 	s.doc = doc
+	if legacy {
+		// A failed save would leave the marker in the file for the next start
+		// to drop again; this run keeps everything in memory instead, so an
+		// item marked read is never taken as saved (InMemory).
+		if err := s.commit(doc); err != nil {
+			s.warnf("state: could not save the state file without its old catch-up marker; this run keeps its changes in memory only: %v", err)
+			s.path = ""
+		}
+	}
 	return s, nil
 }
+
+// present is whether an optional key is in the file with a value.
+func present(raw json.RawMessage) bool { return len(raw) > 0 && string(raw) != "null" }
 
 // readVersion decodes the "version" key: a whole number from 1 up, written
 // plainly, as every sitboard writes it. A version above fileVersion is left
@@ -394,8 +430,11 @@ func readForgotten(raw json.RawMessage) map[string]time.Time {
 
 // Memory returns a store that never reads or writes a file: it starts empty and
 // keeps everything for the life of the process only.
-func Memory() Store {
-	return &fileStore{now: time.Now, warnf: log.Printf, doc: document{Version: versionPlain, Seen: map[string]time.Time{}}}
+func Memory() Store { return MemoryAt(time.Now) }
+
+// MemoryAt is Memory with its clock, for tests (see OpenAt).
+func MemoryAt(clock func() time.Time) Store {
+	return &fileStore{now: clock, warnf: log.Printf, doc: document{Version: versionPlain, Seen: map[string]time.Time{}}}
 }
 
 // Resolve gives the file that is really read and written: symbolic links in
@@ -538,16 +577,16 @@ func readGrouping(raw json.RawMessage) map[string]string {
 	return out
 }
 
-// readCatchupUnread decodes the optional "catchupUnread" key leniently, like
+// readCatchupSet decodes the optional "catchupRead" key leniently, like
 // "forgotten": an entry that is not a key and a time is dropped with one log
 // line that names no key, and the rest of the file is kept.
-func readCatchupUnread(raw json.RawMessage, now time.Time) map[string]time.Time {
-	if len(raw) == 0 || string(raw) == "null" {
+func readCatchupSet(raw json.RawMessage, now time.Time) map[string]time.Time {
+	if !present(raw) {
 		return nil
 	}
 	var entries map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &entries); err != nil {
-		log.Printf("state: the unread catch-up items in the state file are not readable; dropped them")
+		log.Printf("state: the read catch-up items in the state file are not readable; dropped them")
 		return nil
 	}
 	out := make(map[string]time.Time, len(entries))
@@ -561,24 +600,24 @@ func readCatchupUnread(raw json.RawMessage, now time.Time) map[string]time.Time 
 		out[k] = at
 	}
 	if bad > 0 {
-		log.Printf("state: dropped %d unreadable unread catch-up item(s) from the state file", bad)
+		log.Printf("state: dropped %d unreadable read catch-up item(s) from the state file", bad)
 	}
-	return pruneUnread(out, now)
+	return pruneCatchup(out, now, MaxCatchupRead)
 }
 
-// pruneUnread drops items older than SeenRetention and, past
-// MaxCatchupUnread, the oldest. It returns a new map (nil when empty).
-func pruneUnread(m map[string]time.Time, now time.Time) map[string]time.Time {
+// pruneCatchup drops items older than SeenRetention (none with a zero now)
+// and, past limit, the oldest. It returns a new map (nil when empty).
+func pruneCatchup(m map[string]time.Time, now time.Time, limit int) map[string]time.Time {
 	cutoff := now.Add(-SeenRetention)
 	keys := make([]string, 0, len(m))
 	for k, at := range m {
-		if at.After(cutoff) {
+		if now.IsZero() || at.After(cutoff) {
 			keys = append(keys, k)
 		}
 	}
 	slices.SortFunc(keys, func(a, b string) int { return cmp.Or(m[b].Compare(m[a]), cmp.Compare(a, b)) })
-	if len(keys) > MaxCatchupUnread {
-		keys = keys[:MaxCatchupUnread]
+	if len(keys) > limit {
+		keys = keys[:limit]
 	}
 	if len(keys) == 0 {
 		return nil
@@ -594,8 +633,11 @@ func pruneUnread(m map[string]time.Time, now time.Time) map[string]time.Time {
 // grouping setting, so older builds refuse it instead of dropping the
 // setting; 1 otherwise.
 func versionOf(doc document) int {
-	if len(doc.Grouping) > 0 {
+	switch {
+	case len(doc.CatchupRead) > 0:
 		return fileVersion
+	case len(doc.Grouping) > 0:
+		return versionGrouping
 	}
 	return versionPlain
 }
@@ -616,35 +658,33 @@ func (s *fileStore) SetSeen(cardID string, at time.Time) error {
 	return s.commit(next)
 }
 
-func (s *fileStore) CatchupMarker() time.Time {
+func (s *fileStore) InMemory() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.doc.CatchupMarker
+	return s.path == ""
 }
 
-func (s *fileStore) SetCatchupMarker(at time.Time) error {
+func (s *fileStore) CatchupRead() map[string]time.Time {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	next := s.doc
-	next.CatchupMarker = at.UTC()
-	return s.commit(next)
+	return pruneCatchup(s.doc.CatchupRead, s.now(), MaxCatchupRead)
 }
 
-func (s *fileStore) CatchupUnread() map[string]time.Time {
+func (s *fileStore) CatchupMarkedAt() time.Time {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return pruneUnread(s.doc.CatchupUnread, s.now())
+	return s.doc.CatchupMarkedAt
 }
 
-func (s *fileStore) SetCatchup(marker time.Time, unread map[string]time.Time) error {
+func (s *fileStore) SetCatchupRead(read map[string]time.Time, markedAt time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed && s.path != "" {
 		return ErrClosed // not saved: the caller must not take it as saved
 	}
 	next := s.doc
-	next.CatchupMarker = marker.UTC()
-	next.CatchupUnread = maps.Clone(unread)
+	next.CatchupRead = maps.Clone(read)
+	next.CatchupMarkedAt = markedAt.UTC()
 	return s.commit(next)
 }
 
@@ -875,7 +915,7 @@ func (s *fileStore) commit(next document) error {
 	}
 	next.Umbrellas = PruneUmbrellas(next.Umbrellas, s.now())
 	next.Forgotten = PruneUmbrellas(next.Forgotten, s.now())
-	next.CatchupUnread = pruneUnread(next.CatchupUnread, s.now())
+	next.CatchupRead = pruneCatchup(next.CatchupRead, s.now(), MaxCatchupRead)
 	next.Version = versionOf(next) // an empty "grouping" is left out (omitempty)
 	data, err := json.MarshalIndent(next, "", "  ")
 	if err != nil {

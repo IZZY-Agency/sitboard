@@ -334,7 +334,13 @@ type SourceReady struct{ Kind string }
 // BackfillDone says a watcher has read the sessions that had ended before
 // sitboard started (Kind as in SourceReady). Until it comes, catch-up may
 // still grow with items from earlier sessions.
-type BackfillDone struct{ Kind string }
+//
+// Cut: that read stopped at a bound (its time budget, or a file past the
+// size it reads), so some of those sessions were not read.
+type BackfillDone struct {
+	Kind string
+	Cut  bool
+}
 
 // Batch is facts taken together, in order: the board applies them all and
 // rebuilds once. A watcher publishes the sessions it read at start this way,
@@ -380,6 +386,10 @@ type Repo struct {
 	// Remote is the repository on a forge that origin's one fetch address
 	// names; zero when none, several, or on no forge sitboard knows.
 	Remote ForgeRepo
+	// RemoteBare: Remote is on GitLab and came from an ssh, git or scp-like
+	// address, whose path has no GitLab subfolder in front (the core adds
+	// the host's) and whose port, if any, was git's, not the web one.
+	RemoteBare bool
 	// OriginUnclear: origin has more than one fetch address, one of them on
 	// GitHub. Remote is zero: which GitHub repository it is cannot be told.
 	OriginUnclear bool
@@ -430,14 +440,23 @@ type Stash struct {
 // stashes, read in one round of read-only calls.
 type RepoInventory struct {
 	Worktrees []Worktree
-	Branches  []Branch // local branches
-	Remote    []Branch // branches under refs/remotes/origin/, without the prefix; HEAD left out
-	Stashes   []Stash
+	// WorktreesListed: Worktrees holds every checkout git has registered,
+	// each on a folder that can be named. It matters only beside an error:
+	// without it, a checkout of this repo may sit anywhere, inside a
+	// worktree of another repo too.
+	WorktreesListed bool
+	Branches        []Branch // local branches
+	Remote          []Branch // branches under refs/remotes/origin/, without the prefix; HEAD left out
+	Stashes         []Stash
 	// CommonDir is the repo's shared git folder, absolute.
 	CommonDir string
 	// Origin is origin's one fetch address as a GitHub repository; zero
 	// otherwise (none, several, or elsewhere). Leftovers is GitHub only.
 	Origin ForgeRepo
+	// OriginUnclear: origin has more than one address, one of them on
+	// GitHub (as model.Repo.OriginUnclear). Read before the stashes: it holds
+	// beside a later error too, as Origin does.
+	OriginUnclear bool
 }
 
 // TreeStatus is what git says about one worktree: where it found it, what

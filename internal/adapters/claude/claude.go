@@ -163,16 +163,17 @@ func readSmall(path string) ([]byte, error) {
 
 // sess is what the adapter knows about one session.
 type sess struct {
-	rec        record
-	recFile    string
-	live       model.Known[bool]
-	ended      bool
-	endedAt    time.Time
-	termID     string
-	tmux       model.TmuxPane
-	launch     string // the effort level the process was started with, "" when none
-	termKey    string // pid and process start the process facts were read for
-	transcript string // "" until found
+	rec         record
+	recFile     string
+	live        model.Known[bool]
+	ended       bool
+	endedAt     time.Time
+	termID      string
+	argHeadless bool // the process was started with -p / --print
+	tmux        model.TmuxPane
+	launch      string // the effort level the process was started with, "" when none
+	termKey     string // pid and process start the process facts were read for
+	transcript  string // "" until found
 	// others: the session's transcripts in other project folders, older:
 	// it was resumed in another folder, and goes on in a transcript of the
 	// same name there. Their use is the session's too.
@@ -389,6 +390,7 @@ func (r *registry) rescan(ctx context.Context) {
 			if key := strconv.Itoa(rec.PID) + "|" + rec.ProcStart; key != s.termKey {
 				p := a.proc(rec.PID)
 				s.termKey, s.termID, s.tmux, s.launch = key, p.TermID, a.ownPane(ctx, rec.PID, starts[rec.PID], p.Tmux), p.LaunchEffort
+				s.argHeadless = p.Headless
 			}
 			if first, seen := r.firsts[s.termKey]; !seen {
 				r.firsts[s.termKey] = firstSession{pid: rec.PID, procStart: rec.ProcStart, id: id}
@@ -693,7 +695,14 @@ func (r *registry) fact(id string, s *sess) model.SessionFact {
 		Spend:       s.pricedSpend(r.a.prices.table(r.a.now())),
 		WorkerHint:  workerHint(s.d),
 		Backfill:    s.found,
-		Headless:    !interactive(s.d.Entrypoint),
+		Headless:    s.argHeadless || !interactive(s.d.Entrypoint),
+	}
+	if f.Headless {
+		// A claude -p run started from another session's terminal inherits
+		// that terminal's AGTERM_SESSION_ID; it is not what runs there. Told
+		// from the process's arguments (-p), so from the first fact on, or
+		// from the transcript's entrypoint (an SDK run) once it is read.
+		f.TerminalID = ""
 	}
 	if f.Folder == "" {
 		f.Folder, _ = validFolder(rec.Cwd)

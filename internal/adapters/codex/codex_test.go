@@ -3,6 +3,7 @@ package codex
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -1008,5 +1009,37 @@ func TestResumedSessionInAnOldFolderEndsAndStays(t *testing.T) {
 	}
 	if !f.EndedAt.Equal(fixedNow.Add(-30 * time.Minute)) {
 		t.Errorf("EndedAt = %v", f.EndedAt)
+	}
+}
+
+// No text of the conversation reaches the facts: a prompt, a reply, the
+// model's reasoning, a tool's output and any other field of the session
+// index are read past; the only free text is the title Codex recorded.
+func TestNoRolloutTextInEmittedFacts(t *testing.T) {
+	const secret = "SECRET-CONVERSATION-TEXT"
+	e := newEnv(t)
+	rollout := strings.ReplaceAll(string(fixture(t, "worker.jsonl")), "Placeholder prompt.", secret+" prompt")
+	rollout = strings.ReplaceAll(rollout, "Placeholder output.", secret+" output")
+	rollout += `{"timestamp":"2026-11-20T11:05:30.000Z","ordinal":11,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"` + secret + ` reply"}]}}
+{"timestamp":"2026-11-20T11:05:31.000Z","ordinal":12,"type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"` + secret + ` thought"}]}}
+{"timestamp":"2026-11-20T11:05:32.000Z","ordinal":13,"type":"event_msg","payload":{"type":"agent_message","message":"` + secret + ` message"}}
+{"timestamp":"2026-11-20T11:05:33.000Z","ordinal":14,"type":"event_msg","payload":{"type":"user_message","message":"` + secret + ` user"}}
+`
+	e.addBytes(idWorker, []byte(rollout), fixedNow.Add(-55*time.Minute))
+	index := `{"id": "` + idWorker + `", "thread_name": "Placeholder title", "first_user_message": "` + secret + ` index", "updated_at": "2026-11-20T11:06:00.000000Z"}` + "\n"
+	if err := os.WriteFile(filepath.Join(e.root, "session_index.jsonl"), []byte(index), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e.lock(idWorker, 4242)
+	e.rescan()
+
+	f, ok := e.last(idWorker)
+	if !ok || f.Name != "Placeholder title" {
+		t.Fatalf("no fact, or a name other than the recorded title: %v %q", ok, f.Name)
+	}
+	for _, x := range flatten(e.facts) {
+		if s := fmt.Sprintf("%+v", x); strings.Contains(s, secret) {
+			t.Errorf("conversation text reached a fact: %s", s)
+		}
 	}
 }

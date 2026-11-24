@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/IZZY-Agency/sitboard/internal/adapters/internal/runner"
+	"github.com/IZZY-Agency/sitboard/internal/model"
 	"github.com/IZZY-Agency/sitboard/internal/source"
 )
 
@@ -256,8 +257,8 @@ type closing struct {
 type hostAnswer struct {
 	at        time.Time
 	known     bool
-	subfolder bool // glab's config puts GitLab under a subfolder on this host
-	nowhere   bool // glab said it is logged in to no host at all
+	subfolder string // glab's "subfolder" for this host, slashes trimmed; "" for none
+	nowhere   bool   // glab said it is logged in to no host at all
 }
 
 // Provider answers merge request lookups through glab. It caches answers and
@@ -408,7 +409,6 @@ func (p *Provider) Known(ctx context.Context, host string) bool {
 var (
 	errNotKnown   = &sharedErr{"gitlab: glab is not logged in to this host", source.ErrNotLoggedIn}
 	errNowhere    = &sharedErr{"gitlab: glab is logged in to no host", source.ErrNoLogins}
-	errSubfolder  = &sharedErr{"gitlab: GitLab under a subfolder of its host is not supported yet", source.ErrUnsupported}
 	errNotChecked = &sharedErr{"gitlab: the login for this host is not checked now", source.ErrNotChecked}
 	errNotAsked   = errors.New("gitlab: glab not asked about this host")
 	errNoGlab     = errors.New("gitlab: glab not found")
@@ -420,9 +420,9 @@ var (
 // (the host answered 429, now or before), errNoAnswer (glab ran out of time
 // or the caller gave up), errNoGlab. An answer, yes or no, is kept a while;
 // a missing answer is not. For a host glab is logged in to it also asks
-// glab's non-secret per-host setting "subfolder": GitLab under a subfolder
-// needs its prefix taken off the project path and put into every link, which
-// this adapter does not do yet, so such a host is not asked about projects.
+// glab's non-secret per-host setting "subfolder" (GitLab under a subfolder
+// of its host): glab puts it into its own API calls, and Lookup takes it off
+// the front of a project's web path (apiPath).
 // When glab said it is logged in nowhere, no host is asked for unknownFor.
 func (p *Provider) host(ctx context.Context, host string) (hostAnswer, error) {
 	switch {
@@ -486,9 +486,30 @@ func (p *Provider) host(ctx context.Context, host string) (hostAnswer, error) {
 		return hostAnswer{}, p.noAnswer(ctx, host, err, "auth check failed")
 	}
 	p.setAuthNote(host, "")
-	sub := strings.Trim(strings.TrimSpace(string(out)), "/") != ""
+	sub := strings.Trim(strings.TrimSpace(string(out)), "/")
+	if sub != "" && !validSubfolder(sub) {
+		// Not a path any address can carry: such a host gets no lookups.
+		return hostAnswer{}, p.noAnswer(ctx, host, errors.New("unreadable subfolder"), "unreadable subfolder in glab's config")
+	}
 	return p.keepYes(host, hostAnswer{at: p.now(), known: true, subfolder: sub}, st), nil
 }
+
+// validSubfolder: glab's subfolder setting as a run of path segments ("gitlab",
+// "apps/gitlab"), each one a GitLab path could start with; at most 8.
+func validSubfolder(s string) bool {
+	segs := strings.Split(s, "/")
+	if len(segs) > 8 {
+		return false
+	}
+	for _, g := range segs {
+		if !gitlabSegment.MatchString(g) || strings.Contains(g, "..") {
+			return false
+		}
+	}
+	return true
+}
+
+var gitlabSegment = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,254}$`)
 
 // gaveUp: a check's glab call ended by time, glab's own limit or its
 // caller's, not by an answer.
@@ -678,25 +699,31 @@ func (p *Provider) loggedOut(host string) hostAnswer {
 	}
 	h := hostAnswer{at: p.now()}
 	p.hosts[host] = h
-	p.dropAnswersLocked(host + "\x00")
+	p.dropAnswersLocked(host)
 	return h
 }
 
-// dropAnswersLocked drops the lookups and closing issues cached under keys
-// starting with prefix ("" for all). Callers hold p.mu.
-func (p *Provider) dropAnswersLocked(prefix string) {
+// dropAnswersLocked drops the lookups and closing issues cached for host,
+// by its name (every web port of it: glab keeps one login per name), "" for
+// all. Every key starts with the site, the host with its web port if any.
+// Callers hold p.mu.
+func (p *Provider) dropAnswersLocked(host string) {
+	of := func(k string) bool {
+		site, _, _ := strings.Cut(k, "\x00")
+		return host == "" || model.GitLabHostname(site) == host
+	}
 	for k := range p.cache {
-		if strings.HasPrefix(k, prefix) {
+		if of(k) {
 			delete(p.cache, k)
 		}
 	}
 	for k := range p.closes {
-		if strings.HasPrefix(k, prefix) {
+		if of(k) {
 			delete(p.closes, k)
 		}
 	}
 	for k := range p.closingFailed {
-		if strings.HasPrefix(k, prefix) {
+		if of(k) {
 			delete(p.closingFailed, k)
 		}
 	}

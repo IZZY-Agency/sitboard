@@ -55,7 +55,7 @@ var githubSlugRe = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
 
 // Valid reports whether r can be asked about and linked to. Names come from
 // transcripts and git remotes and are untrusted. GitHub: the host is
-// GitHubHost and the path a plain "owner/name" within GitHub's length limits. GitLab: ValidGitLabHost and
+// GitHubHost and the path a plain "owner/name" within GitHub's length limits. GitLab: ValidGitLabSite and
 // ValidGitLabPath, and never GitHubHost.
 func (r ForgeRepo) Valid() bool {
 	switch r.Forge {
@@ -67,7 +67,7 @@ func (r ForgeRepo) Valid() bool {
 		return len(owner) <= maxGitHubOwner && len(name) <= maxGitHubName &&
 			owner != "." && owner != ".." && name != "." && name != ".."
 	case ForgeGitLab:
-		return r.Host != GitHubHost && ValidGitLabHost(r.Host) && ValidGitLabPath(r.Path)
+		return GitLabHostname(r.Host) != GitHubHost && ValidGitLabSite(r.Host) && ValidGitLabPath(r.Path)
 	}
 	return false
 }
@@ -122,16 +122,20 @@ func ForgeIssueURL(r ForgeRepo, n int) string {
 
 // gitlabLinkPath is a project path as a link may carry it; ValidGitLabPath is
 // stricter and is checked first.
+// gitlabLinkPort is an optional web port as ValidWebPort takes it: 1 to
+// 65535, no leading zero, never 443.
+const gitlabLinkPort = `(?::(?:[1-9]|[1-9][0-9]|[1-35-9][0-9]{2}|4[0-35-9][0-9]|44[0-24-9]|[1-9][0-9]{3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?`
+
 const gitlabLinkPath = `[A-Za-z0-9_][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_][A-Za-z0-9_.-]*){1,21}`
 
 // MergeRequestURLPattern and GitLabIssueURLPattern are the only forms of
 // merge request and GitLab issue link that reach the page; the host part is
-// checked with ValidGitLabHost (and, on the page, against the snapshot's
+// checked with ValidGitLabSite (and, on the page, against the snapshot's
 // GitLab hosts). contract.MergeRequestURLPattern and
 // contract.GitLabIssueURLPattern must stay equal to them (a test checks).
 const (
-	MergeRequestURLPattern = `^https://([a-z0-9.-]+)/(` + gitlabLinkPath + `)/-/merge_requests/([1-9][0-9]{0,9})$`
-	GitLabIssueURLPattern  = `^https://([a-z0-9.-]+)/(` + gitlabLinkPath + `)/-/issues/([1-9][0-9]{0,9})$`
+	MergeRequestURLPattern = `^https://([a-z0-9.-]+` + gitlabLinkPort + `)/(` + gitlabLinkPath + `)/-/merge_requests/([1-9][0-9]{0,9})$`
+	GitLabIssueURLPattern  = `^https://([a-z0-9.-]+` + gitlabLinkPort + `)/(` + gitlabLinkPath + `)/-/issues/([1-9][0-9]{0,9})$`
 )
 
 var (
@@ -153,7 +157,11 @@ func gitlabURL(re *regexp.Regexp, r ForgeRepo, kind string, n int) string {
 
 // maxGitLabPathDepth bounds a project path: a top-level group, up to 20
 // levels of subgroups under it (GitLab limits a group's ancestors to 20), and
-// the project itself.
+// the project itself. A web path is checked as a whole, so under a subfolder
+// (GitLab served at host/gitlab) the subfolder's own levels count toward the
+// 22: one level of mount leaves a 21-segment project. The mount and the
+// project are not validated apart on purpose: one rule is the same on the
+// server and in the page.
 const maxGitLabPathDepth = 22
 
 var (
@@ -166,6 +174,40 @@ var (
 // dot and no port, user or path: the only form passed to glab's --hostname.
 func ValidGitLabHost(h string) bool {
 	return len(h) <= 253 && gitlabHostRe.MatchString(h)
+}
+
+// ValidGitLabSite reports whether s is a GitLab host as its web addresses
+// name it: ValidGitLabHost, or that with a web port ("host:8443", 1 to
+// 65535, no leading zero). ":443" is refused: GitLab never writes it, so an
+// address with it is never GitLab's own.
+func ValidGitLabSite(s string) bool {
+	host, port, found := strings.Cut(s, ":")
+	if !found {
+		return ValidGitLabHost(s)
+	}
+	return ValidGitLabHost(host) && ValidWebPort(port)
+}
+
+// ValidWebPort reports whether p is a port as an https address writes it
+// after the host: 1 to 65535, no sign or leading zero, never 443.
+func ValidWebPort(p string) bool {
+	if p == "" || len(p) > 5 || p[0] == '0' {
+		return false
+	}
+	for _, c := range p {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	n, _ := strconv.Atoi(p)
+	return n <= math.MaxUint16 && n != 443
+}
+
+// GitLabHostname is site without its web port: the host name glab is asked
+// with (glab refuses a port in --hostname).
+func GitLabHostname(site string) string {
+	host, _, _ := strings.Cut(site, ":")
+	return host
 }
 
 // ValidGitLabPath reports whether p is a GitLab project path ("group/project"

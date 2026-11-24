@@ -57,7 +57,7 @@ function group(s: Snapshot, id: string, area: string, parentId = ''): void {
   if (p) Object.assign(p, { area, parentId });
 }
 function addProject(s: Snapshot, id: string, name: string, area = '', parentId = ''): void {
-  s.projects.push({ id, name, path: `~/projects/${name}`, repo: '', repoForge: '', repoHost: '', counts: { working: 0, needsYou: 0, inReview: 0, stale: 0 }, area, parentId });
+  s.projects.push({ id, name, path: `~/projects/${name}`, repo: '', repoForge: '', repoHost: '', counts: { working: 0, needsYou: 0, inReview: 0, stale: 0 }, openIssues: { known: false, open: 0 }, area, parentId });
 }
 
 export function golden(): Snapshot {
@@ -139,6 +139,7 @@ function crowd(): Snapshot {
     parentId: '',
     area: 'projects',
     counts: { working: 0, needsYou: 0, inReview: 0, stale: 0 },
+    openIssues: { known: false, open: 0 },
   }));
   s.projects.push(...projects);
   group(s, projects[0].id, 'area-one');
@@ -274,6 +275,13 @@ function site(): Snapshot {
   addProject(s, 'p_site00000004', 'lumen-docs', 'studio');
   addProject(s, 'p_site00000005', 'pixel-kit', '');
   const repo = 'example-org/harbor';
+  // Each project on its GitHub repository (harbor's parts share harbor's), so
+  // the Issues chip, the tiles and the Issues panel show their sample counts.
+  for (const p of s.projects) {
+    p.repo = p.id === 'p_site00000004' ? 'example-org/lumen-docs' : p.id === 'p_site00000005' ? 'example-org/pixel-kit' : repo;
+    p.repoForge = 'github';
+    p.repoHost = 'github.com';
+  }
   const pr = (number: number, state: 'open' | 'merged', checks: 'passing' | 'running' | 'failing' | 'none' = 'passing') => ({
     forge: 'github' as const, host: 'github.com', repo,
     number,

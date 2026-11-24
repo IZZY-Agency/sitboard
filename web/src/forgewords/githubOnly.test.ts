@@ -97,7 +97,7 @@ describe('GitHub only: the hidden words and labels, byte for byte', () => {
     const pr = s.cards.flatMap((c) => c.pullRequests)[0];
     const item: CatchupItem = { at: '2026-11-17T09:40:00Z', kind: 'pr_opened', cardId: '', projectId: s.projects[0].id, projectName: 'sample', agentName: 'sample-worker', title: 'Sample', pullRequest: pr };
     const client: CatchupClient = {
-      load: async () => ({ ok: true, catchup: { asOf: '2026-11-17T10:00:00Z', total: 2, items: [item, { ...item, at: '2026-11-17T09:30:00Z', kind: 'pr_merged', pullRequest: { ...pr, state: 'merged' } }] } }),
+      load: async () => ({ ok: true, catchup: { list: 'r-1', asOf: '2026-11-17T10:00:00Z', total: 2, items: [item, { ...item, at: '2026-11-17T09:30:00Z', kind: 'pr_merged', pullRequest: { ...pr, state: 'merged' } }] } }),
       markRead: async () => ({ ok: true }),
     };
     r = render(App, { feed: feedOf({ conn: 'live', snapshot: s }).feed, actions: recordActions().actions, catchup: client });

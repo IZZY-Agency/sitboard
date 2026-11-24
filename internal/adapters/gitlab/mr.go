@@ -21,11 +21,11 @@ const (
 
 // MergeRequest is what GitLab says about one merge request.
 type MergeRequest struct {
-	Host          string // a host glab is logged in to (gitlab.com or a self-hosted one)
-	Path          string // project path, "group/subgroup/project"
+	Host          string // a host glab is logged in to (gitlab.com or a self-hosted one), with its web port when its addresses carry one
+	Path          string // project path as addresses carry it, "group/subgroup/project", the host's subfolder in front
 	IID           int    // the project's own number, shown as !IID
 	Title         string
-	URL           string // MergeRequestURL(Host, Path, IID): built, never read from glab
+	URL           string // MergeRequestURL(Host, Path, IID): built, never read from glab (on a host with a port, GitLab's webUrl must equal it)
 	SourceBranch  string
 	State         model.PRState // locked (being merged) counts as open
 	Draft         bool
@@ -47,7 +47,7 @@ type MRRef struct {
 
 // MergeRequestURLPattern and IssueURLPattern are the only forms of merge
 // request and issue link this adapter builds: the model's, which the contract
-// repeats. The host part is checked with ValidHost.
+// repeats. The host part is checked with model.ValidGitLabSite.
 const (
 	MergeRequestURLPattern = model.MergeRequestURLPattern
 	IssueURLPattern        = model.GitLabIssueURLPattern
@@ -71,10 +71,10 @@ func IssueURL(host, path string, n int) string {
 func ValidIID(n int) bool { return n >= 1 && n <= math.MaxInt32 }
 
 func gitlabURL(host, path, kind string, n int) string {
-	if !ValidIID(n) || !ValidHost(host) || !ValidPath(path) {
+	if !ValidIID(n) || !model.ValidGitLabSite(host) || !ValidPath(path) {
 		return ""
 	}
-	// ValidHost and ValidPath are stricter than the pattern; a test checks
+	// ValidGitLabSite and ValidPath are stricter than the pattern; a test checks
 	// that every address built here matches it.
 	return "https://" + host + "/" + path + "/-/" + kind + "/" + strconv.Itoa(n)
 }

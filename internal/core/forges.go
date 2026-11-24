@@ -18,9 +18,12 @@ type GitLab interface {
 	source.PRProvider
 	// Host says whether merge requests on host may be looked up: nil only
 	// for a host glab is logged in to, gitlab.com included. An error wrapping
-	// source.ErrNotLoggedIn or source.ErrUnsupported is a definite no; any
-	// other error is no answer.
+	// source.ErrNotLoggedIn is a definite no; any other error is no answer.
+	// host may carry a web port ("host:8443").
 	Host(ctx context.Context, host string) error
+	// Subfolder is glab's subfolder setting for host ("gitlab" for GitLab at
+	// example.com/gitlab), "" for none or when host is not known now. No call.
+	Subfolder(host string) string
 	// Failing is the line for the last failed call about host, "" when its
 	// last call answered.
 	Failing(host string) string
@@ -47,7 +50,8 @@ const (
 type hostDecision struct {
 	at  time.Time // when it was last asked, answered or not
 	ok  bool      // lookups may go there
-	why error     // the last definite no: source.ErrNotLoggedIn or source.ErrUnsupported
+	sub string    // with ok: glab's subfolder for the host at that yes ("" for none)
+	why error     // the last definite no: source.ErrNotLoggedIn
 	// unanswered: the last check got no answer (its failure is newer than
 	// why, which still decides lookups).
 	unanswered bool
@@ -65,34 +69,67 @@ func (b *Board) gitlabOffLocked() bool {
 // noteHostLocked records an answer about host: nil is a yes, a definite no
 // keeps its reason, anything else is no answer and changes only when it is
 // asked next. A definite no also drops what the board knows from that host
-// (forgetHostLocked); source.ErrNoLogins (glab is logged in to no host)
-// does so for every host with a yes kept as well, each asked again when
-// its own check is due. Callers hold b.mu.
+// (forgetHostLocked), and holds for every host with the same name and
+// another web port too: glab keeps one login per host name.
+// source.ErrNoLogins (glab is logged in to no host) does so for every host
+// with a yes kept as well, each asked again when its own check is due.
+// Callers hold b.mu.
 func (b *Board) noteHostLocked(host string, err error) hostDecision {
 	d := b.glHosts[host]
+	was := d
 	d.at, d.unanswered = b.now(), false
 	switch {
 	case err == nil:
-		d.ok, d.why = true, nil
+		d.ok, d.why, d.sub = true, nil, b.opts.GitLab.Subfolder(host) // the check just read it
 	case errors.Is(err, source.ErrNotLoggedIn):
-		d.ok, d.why = false, source.ErrNotLoggedIn
-	case errors.Is(err, source.ErrUnsupported):
-		d.ok, d.why = false, source.ErrUnsupported
+		d.ok, d.why, d.sub = false, source.ErrNotLoggedIn, ""
 	default:
 		d.unanswered = true
 	}
 	if _, known := b.glHosts[host]; !known && len(b.glHosts) >= 256 {
+		// Every host's decision goes: what any check or lookup under way
+		// learned under one of them is dropped too (hostStamp).
 		clear(b.glHosts)
+		b.glEpoch++
+		// The issues listed from GitLab rested on those decisions: they go
+		// too, so a host allowed again later does not show them again.
+		gl := func(r model.ForgeRepo) bool { return r.Forge == model.ForgeGitLab }
+		listed := len(b.issues)
+		maps.DeleteFunc(b.issues, func(r model.ForgeRepo, _ model.RepoIssues) bool { return gl(r) })
+		maps.DeleteFunc(b.issuesTried, func(r model.ForgeRepo, _ time.Time) bool { return gl(r) })
+		if len(b.issues) != listed {
+			b.issuesPurgedLocked(b.now())
+		}
 	}
 	b.glHosts[host] = d
 	if d.why != nil {
 		b.forgetHostLocked(host)
 	}
-	if errors.Is(err, source.ErrNoLogins) {
+	if err == nil {
+		// One mount decision per name, for lookups and for display: when the
+		// subfolder moved, every site on the name takes it, and what was
+		// learned or shown under the old one goes (its merge requests, what
+		// was asked or found missing, its issues), to be asked again.
+		for h, o := range b.glHosts {
+			if h == host || !o.ok || o.sub == d.sub || model.GitLabHostname(h) != model.GitLabHostname(host) {
+				continue
+			}
+			o.sub = d.sub
+			b.glHosts[h] = o
+			b.forgetHostLocked(h)
+		}
+		if was.ok && was.sub != d.sub {
+			b.forgetHostLocked(host)
+		}
+	}
+	all := errors.Is(err, source.ErrNoLogins)
+	if all {
 		// Nothing learned anywhere before this answer holds any more.
 		b.glEpoch++
+	}
+	if errors.Is(err, source.ErrNotLoggedIn) { // this answer is a definite no (ErrNoLogins is one too)
 		for h, o := range b.glHosts {
-			if h != host && o.ok {
+			if h != host && o.ok && (all || model.GitLabHostname(h) == model.GitLabHostname(host)) {
 				o.ok, o.why = false, source.ErrNotLoggedIn
 				b.glHosts[h] = o
 				b.forgetHostLocked(h)
@@ -116,9 +153,16 @@ func (b *Board) forgetHostLocked(host string) {
 	maps.DeleteFunc(b.lookedUp, func(r model.ForgeRepo, _ time.Time) bool { return on(r) })
 	maps.DeleteFunc(b.pending, func(r model.ForgeRepo, _ bool) bool { return on(r) })
 	maps.DeleteFunc(b.goneRepos, func(r model.ForgeRepo, _ bool) bool { return on(r) })
+	// Issues listed from that host go too, and the page is told.
+	listed := len(b.issues)
+	maps.DeleteFunc(b.issues, func(r model.ForgeRepo, _ model.RepoIssues) bool { return on(r) })
+	maps.DeleteFunc(b.issuesTried, func(r model.ForgeRepo, _ time.Time) bool { return on(r) })
+	if len(b.issues) != listed {
+		b.issuesPurgedLocked(b.now())
+	}
 }
 
-// hostStamp is a GitLab host's generation when a check or lookup about it
+// hostStamp is a GitLab host name's generation when a check or lookup about it
 // started. Its answer is applied only while the stamp is unchanged: a
 // denial or logout found meanwhile (forgetHostLocked) or glab logged in to
 // no host each change it, so an older answer never brings back what a newer
@@ -127,11 +171,15 @@ type hostStamp struct{ epoch, host uint64 }
 
 // hostStampLocked is host's stamp now. Callers hold b.mu.
 func (b *Board) hostStampLocked(host string) hostStamp {
-	return hostStamp{epoch: b.glEpoch, host: b.glGen[host]}
+	return hostStamp{epoch: b.glEpoch, host: b.glGen[model.GitLabHostname(host)]}
 }
 
-// bumpHostLocked changes host's stamp. Callers hold b.mu.
+// bumpHostLocked changes host's stamp, and with it that of every site on the
+// same name with another web port: glab keeps one login, and one subfolder,
+// per name, so a denial or a moved mount found for one voids what any of
+// them was learning. Callers hold b.mu.
 func (b *Board) bumpHostLocked(host string) {
+	host = model.GitLabHostname(host) // one generation for every web port of a name
 	if _, known := b.glGen[host]; !known && len(b.glGen) >= 4096 {
 		clear(b.glGen)
 		b.glEpoch++ // a cleared count could meet an old stamp again
@@ -184,12 +232,21 @@ func (b *Board) noteGitLabDemandLocked() {
 	b.glDemand = demand
 }
 
-// shownRemoteLocked is a resolved remote as the page may show it: a GitLab
-// one only on a host lookups may go to, else none, like a remote on no forge
-// sitboard knows. Callers hold b.mu.
-func (b *Board) shownRemoteLocked(r model.ForgeRepo) model.ForgeRepo {
-	if r.Forge == model.ForgeGitLab && (b.gitlabOffLocked() || !b.glHosts[r.Host].ok) {
+// shownRemoteLocked is a resolved repo's remote as the page may show it: a
+// GitLab one only on a host lookups may go to, else none, like a remote on no
+// forge sitboard knows. A GitLab remote from an ssh address (RemoteBare) gets
+// the host's subfolder in front of its path, as the web addresses carry it.
+// Callers hold b.mu.
+func (b *Board) shownRemoteLocked(repo model.Repo) model.ForgeRepo {
+	r := repo.Remote
+	if r.Forge != model.ForgeGitLab {
+		return r
+	}
+	if b.gitlabOffLocked() || !b.glHosts[r.Host].ok {
 		return model.ForgeRepo{}
+	}
+	if sub := b.glHosts[r.Host].sub; repo.RemoteBare && sub != "" { // the mount the allowlist holds
+		r.Path = sub + "/" + r.Path
 	}
 	return r
 }
@@ -409,8 +466,7 @@ func (b *Board) creditAllPushedLocked() {
 // refreshGitLabLineLocked keeps the GitLab source line honest while
 // sitboard runs: when glab answered its probe, the line names the first host
 // sessions need (sorted) that has something wrong. For a host of a session's
-// merge requests that is a definite no (glab is not logged in to it, or
-// GitLab sits under a subfolder there); for any needed host, a session's
+// merge requests that is a definite no (glab is not logged in to it); for any needed host, a session's
 // remote included, its last failed call (a check without an answer, a rate
 // limit, a lost login). A failure newer than the no wins. One host's answer
 // never hides another's failure. With nothing wrong it is the probe's line
@@ -426,11 +482,8 @@ func (b *Board) refreshGitLabLineLocked() bool {
 	for _, h := range slices.Sorted(maps.Keys(b.gitlabDemandLocked())) {
 		d, why := b.glHosts[h], ""
 		if slices.Contains(refs, h) { // a remote alone names no host that is not logged in
-			switch d.why {
-			case source.ErrNotLoggedIn:
+			if d.why == source.ErrNotLoggedIn {
 				why = "not logged in to " + h
-			case source.ErrUnsupported:
-				why = "GitLab under a subfolder of " + h + " is not supported yet"
 			}
 		}
 		note := why

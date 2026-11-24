@@ -95,6 +95,11 @@ type Repo struct {
 	// this repo's own worktrees: a worktree with any checkout beneath it is
 	// held back, since that checkout's files are inside it.
 	Checkouts []string
+	// CheckoutsUnknown: some repo's checkouts could not all be listed, so
+	// Checkouts may miss one. A worktree with ignored files is held back
+	// then: such a checkout could sit in an ignored folder of it, where its
+	// own status does not show it (anywhere else it shows as untracked).
+	CheckoutsUnknown bool
 }
 
 // Sitter is a leftover session and the processes that are its own.
@@ -290,6 +295,10 @@ func Scan(ctx context.Context, git source.RepoInventory, r Repo, inv model.RepoI
 			}
 			if !st.Clean {
 				hold(ReasonChanges)
+				continue
+			}
+			if st.Ignored > 0 && r.CheckoutsUnknown {
+				hold(ReasonUnknown)
 				continue
 			}
 			if inside(r.LiveDirs, w.Path) {

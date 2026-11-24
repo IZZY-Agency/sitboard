@@ -105,6 +105,29 @@ func TestHeadlessCodexInAWorkersTerminalIsNotAWorker(t *testing.T) {
 	}
 }
 
+// The same for `claude -p` run from a worker's terminal.
+func TestHeadlessClaudeInAWorkersTerminalIsNotAWorker(t *testing.T) {
+	b := newTestBoard(t)
+	coord := busySession("coord", tNow)
+	coord.Name = "coordinator-a"
+	coord.SpawnedNames = []string{"worker-x"}
+	worker := busySession("w", tNow)
+	worker.Name = ""
+	worker.TerminalID = termUUID
+	run := busySession("r", tNow)
+	run.Name, run.Headless = "Review the change", true
+	for _, s := range []model.SessionFact{coord, worker, run} {
+		b.applySync(s)
+	}
+	b.applySync(model.TerminalFact{ID: termUUID, Name: "worker-x", HasAgent: true})
+	if c, ok := cardByID(t, b, "claude:w"); !ok || c.Agent.ParentCardID != "claude:coord" {
+		t.Errorf("worker: %v %+v", ok, c.Agent)
+	}
+	if c, ok := cardByID(t, b, "claude:r"); !ok || c.Agent.ParentCardID != "" {
+		t.Errorf("run: %v %+v", ok, c.Agent)
+	}
+}
+
 // A source is ready when it is not present (nothing to wait for), when it
 // answers on demand (git, GitHub), or once its watcher reported SourceReady.
 func TestSourceReadiness(t *testing.T) {

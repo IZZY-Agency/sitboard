@@ -57,3 +57,29 @@ func OnlyIn(t *testing.T, names, allowed []string) {
 		}
 	}
 }
+
+// NoCall fails t for each use, in the _test.go files of the current folder, of
+// pkg.name (for example state.Open): a test must use the variant that takes
+// its clock.
+func NoCall(t *testing.T, pkg, name string) {
+	t.Helper()
+	files, err := filepath.Glob("*_test.go")
+	if err != nil || len(files) == 0 {
+		t.Fatalf("no test files to read: %v", err)
+	}
+	fset := token.NewFileSet()
+	for _, f := range files {
+		file, err := parser.ParseFile(fset, f, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ast.Inspect(file, func(n ast.Node) bool {
+			if sel, ok := n.(*ast.SelectorExpr); ok && sel.Sel.Name == name {
+				if id, ok := sel.X.(*ast.Ident); ok && id.Name == pkg {
+					t.Errorf("%s: uses %s.%s", fset.Position(sel.Pos()), pkg, name)
+				}
+			}
+			return true
+		})
+	}
+}

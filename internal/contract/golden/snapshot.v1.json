@@ -1,5 +1,5 @@
 {
-  "version": 16,
+  "version": 20,
   "seq": 42,
   "generatedAt": "2026-11-17T10:00:00Z",
   "sources": [
@@ -67,6 +67,10 @@
         "needsYou": 1,
         "inReview": 1,
         "stale": 1
+      },
+      "openIssues": {
+        "known": true,
+        "open": 12
       }
     },
     {
@@ -83,6 +87,10 @@
         "needsYou": 1,
         "inReview": 0,
         "stale": 0
+      },
+      "openIssues": {
+        "known": false,
+        "open": 0
       }
     }
   ],
@@ -614,5 +622,11 @@
   },
   "gitlabHosts": [
     "gitlab.example.com"
-  ]
+  ],
+  "issues": {
+    "state": "ready",
+    "asOf": "2026-11-17T10:00:00Z",
+    "open": 12,
+    "rev": 4
+  }
 }

@@ -30,9 +30,6 @@ func TestOwnWritesNeverWarn(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := s.SetCatchupMarker(time.Now()); err != nil {
-		t.Fatal(err)
-	}
 	// Reopened from an existing file: the first write does not warn either.
 	again, warnings2 := openWatched(t, file)
 	if err := again.SetSeen("card", time.Now()); err != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -26,9 +27,21 @@ type fakeInventory struct {
 	ancetor map[[2]string]bool
 	read    map[string]int  // status reads by folder
 	fail    map[string]bool // by main root: inv is returned with an error
+	// treeErr: by worktree, the status read fails so; ancErr: every
+	// ancestry question fails so; during runs once, at the first look.
+	treeErr map[string]error
+	ancErr  error
+	during  func()
 }
 
 func (f *fakeInventory) Inventory(_ context.Context, root string) (model.RepoInventory, error) {
+	f.mu.Lock()
+	during := f.during
+	f.during = nil
+	f.mu.Unlock()
+	if during != nil {
+		during()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.looks++
@@ -43,6 +56,9 @@ func (f *fakeInventory) Inventory(_ context.Context, root string) (model.RepoInv
 }
 
 func (f *fakeInventory) IsAncestor(_ context.Context, _, a, b string) (bool, error) {
+	if f.ancErr != nil {
+		return false, f.ancErr
+	}
 	return a == b || f.ancetor[[2]string{a, b}], nil
 }
 
@@ -53,6 +69,9 @@ func (f *fakeInventory) TreeStatus(_ context.Context, dir string) (model.TreeSta
 		f.read = map[string]int{}
 	}
 	f.read[dir]++
+	if err := f.treeErr[dir]; err != nil {
+		return model.TreeStatus{}, err
+	}
 	st, ok := f.trees[dir]
 	if !ok {
 		return st, errors.New("no such worktree")
@@ -113,11 +132,12 @@ type leftoverEnv struct {
 func newLeftoverEnv(t *testing.T, cwds []string) *leftoverEnv {
 	t.Helper()
 	t.Setenv("HOME", testHome)
-	st, err := state.Open(t.TempDir() + "/state.json")
+	clock := &fakeClock{t: tNow}
+	st, err := state.OpenAt(t.TempDir()+"/state.json", clock.Now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	e := &testEnv{clock: &fakeClock{t: tNow}, repos: &fakeRepos{repos: map[string]model.Repo{}}, prs: &fakePRs{}, state: st}
+	e := &testEnv{clock: clock, repos: &fakeRepos{repos: map[string]model.Repo{}}, prs: &fakePRs{}, state: st}
 	inv := &fakeInventory{
 		inv: map[string]model.RepoInventory{alpha: {
 			Worktrees: []model.Worktree{{Path: alpha, Main: true, Branch: model.Of("main")}, {Path: alphaWT, Branch: model.Of("feat")}},
@@ -766,6 +786,21 @@ func TestNoRepoYetDoesNotDelayTheFirstLook(t *testing.T) {
 	}
 }
 
+// The only session on the board sits in a folder git gave no answer about:
+// no repo to look at, and the list says it is incomplete until git answers.
+func TestOnlyAnUnresolvedFolderMakesTheEmptyListPartial(t *testing.T) {
+	e := newLeftoverEnv(t, nil)
+	e.repos.fail = map[string]bool{alpha: true}
+	e.board.applySync(session("s2", model.StatusBusy, tNow))
+	e.board.tick()
+	if l := list(t, e.board); l.State != contract.LeftoversReady || len(l.Items) != 0 || !l.Partial {
+		t.Fatalf("no answer: %+v", l)
+	}
+	if s := e.board.Snapshot(); !s.Leftovers.Partial {
+		t.Fatalf("summary = %+v", s.Leftovers)
+	}
+}
+
 // A pull request the board sees merge brings the next look forward: a minute
 // after the last one, not ten.
 func TestNewMergeBringsTheLookForward(t *testing.T) {
@@ -1054,6 +1089,325 @@ func TestWorktreeHoldingAnUnreadableReposCheckout(t *testing.T) {
 	l := list(t, e.board)
 	if len(l.Items) != 0 || !slices.Contains(l.Held, contract.HeldCount{Reason: contract.HeldNested, Count: 1}) || !l.Partial {
 		t.Fatalf("list = %+v", l)
+	}
+}
+
+// Another repo on the board cannot be read before git lists its worktrees
+// (its main checkout is unreadable for a moment): one of them may sit in an
+// ignored folder of alpha-wt, where alpha-wt's own status does not show it,
+// so alpha-wt is held back and the list says it is incomplete. When the
+// listing was whole and only the rest failed, alpha-wt is offered.
+func TestUnlistedWorktreesHoldAWorktreeWithIgnoredFiles(t *testing.T) {
+	for _, listed := range []bool{false, true} {
+		t.Run(fmt.Sprint("listed ", listed), func(t *testing.T) {
+			e := newLeftoverEnv(t, nil)
+			e.folders.set(workerProcs...)
+			e.addWorker(t, "s1")
+			beta := testHome + "/projects/beta"
+			e.repos.set(beta, model.Repo{Root: beta, MainRoot: beta, Branch: model.Of("main"), Remote: model.GitHubRepo("example-org/beta")})
+			e.inv.inv[beta] = model.RepoInventory{WorktreesListed: listed, Worktrees: []model.Worktree{{Path: beta, Main: true, Branch: model.Of("main")}}}
+			e.inv.fail = map[string]bool{beta: true}
+			o := session("s2", model.StatusBusy, tNow)
+			o.Folder = beta
+			e.board.applySync(o)
+			e.clock.Set(tNow.Add(leftoversEvery))
+			e.board.tick()
+			e.board.tick()
+			l := list(t, e.board)
+			if !l.Partial {
+				t.Fatalf("list = %+v", l)
+			}
+			unknown := slices.Contains(l.Held, contract.HeldCount{Reason: contract.HeldUnknown, Count: 1})
+			if listed && (len(l.Items) != 1 || unknown) || !listed && (len(l.Items) != 0 || !unknown) {
+				t.Fatalf("list = %+v", l)
+			}
+		})
+	}
+}
+
+// A session's folder whose git lookup failed may be in any repo, a GitHub
+// clone too: the list says it is incomplete, and a worktree that could hide
+// one of that repo's checkouts in its ignored files is held back. Once git
+// answers, the list is looked at again within a minute and is whole.
+func TestFailedResolveMakesTheListPartial(t *testing.T) {
+	e := newLeftoverEnv(t, nil)
+	e.folders.set(workerProcs...)
+	e.addWorker(t, "s1")
+	beta := e.betaRepo(model.GitHubRepo("example-org/beta"))
+	e.repos.fail = map[string]bool{beta: true}
+	o := session("s2", model.StatusBusy, tNow)
+	o.Folder = beta
+	e.board.applySync(o)
+	e.clock.Set(tNow.Add(leftoversEvery))
+	e.board.tick()
+	e.board.tick()
+	l := list(t, e.board)
+	if !l.Partial || len(l.Items) != 0 || !slices.Contains(l.Held, contract.HeldCount{Reason: contract.HeldUnknown, Count: 1}) {
+		t.Fatalf("unresolved: list = %+v", l)
+	}
+	// git answers.
+	e.repos.fail = nil
+	e.board.mu.Lock()
+	e.board.startResolveLocked(beta)
+	e.board.mu.Unlock()
+	e.board.resolving.Wait()
+	e.clock.Set(tNow.Add(leftoversEvery + leftoversSoonest))
+	e.board.tick()
+	e.board.tick()
+	if l := list(t, e.board); l.Partial || len(l.Items) != 1 {
+		t.Fatalf("answered: list = %+v", l)
+	}
+}
+
+// betaRepo makes repo beta known to git: its main checkout only, with
+// origin remote (zero: none). A session in it puts it on the board.
+func (e *leftoverEnv) betaRepo(remote model.ForgeRepo) string {
+	beta := testHome + "/projects/beta"
+	e.repos.set(beta, model.Repo{Root: beta, MainRoot: beta, Branch: model.Of("main"), Remote: remote})
+	inv := model.RepoInventory{WorktreesListed: true, Worktrees: []model.Worktree{{Path: beta, Main: true, Branch: model.Of("main")}}, CommonDir: beta + "/.git"}
+	if remote.Forge == model.ForgeGitHub {
+		inv.Origin = remote
+	}
+	e.inv.inv[beta] = inv
+	return beta
+}
+
+// A clone whose first git answer has not come yet has no card, and still
+// makes the list incomplete: its checkouts could be anywhere. When git
+// answers, the next look (a minute on) is whole.
+func TestPendingFolderWithNoCardMakesTheListPartial(t *testing.T) {
+	e := newLeftoverEnv(t, nil)
+	e.folders.set(workerProcs...)
+	e.addWorker(t, "s1")
+	beta := e.betaRepo(model.GitHubRepo("example-org/beta"))
+	release := make(chan struct{})
+	e.repos.mu.Lock()
+	e.repos.hold = map[string]chan struct{}{beta: release}
+	e.repos.mu.Unlock()
+	o := session("s2", model.StatusBusy, tNow)
+	o.Folder = beta
+	e.board.Apply(o) // git is asked; the answer waits
+	if cards := e.board.Snapshot().Cards; len(cards) != 1 {
+		t.Fatalf("cards before the answer: %d", len(cards))
+	}
+	e.clock.Set(tNow.Add(leftoversEvery))
+	e.board.tickCtx(context.Background()) // the look starts with beta pending
+	close(release)
+	e.board.resolving.Wait()
+	l := list(t, e.board)
+	if !l.Partial || len(l.Items) != 0 || !slices.Contains(l.Held, contract.HeldCount{Reason: contract.HeldUnknown, Count: 1}) {
+		t.Fatalf("pending: list = %+v", l)
+	}
+	e.clock.Set(tNow.Add(leftoversEvery + leftoversSoonest))
+	e.board.tick()
+	e.board.tick()
+	if l := list(t, e.board); l.Partial || len(l.Items) != 1 {
+		t.Fatalf("answered: list = %+v", l)
+	}
+}
+
+// A clone that joins the board while a look runs is not in that look: the
+// list it gives says it is incomplete, and the next one comes a minute on.
+func TestRepoJoiningDuringALookMakesItPartial(t *testing.T) {
+	e := newLeftoverEnv(t, nil)
+	e.folders.set(workerProcs...)
+	e.addWorker(t, "s1")
+	beta := e.betaRepo(model.GitHubRepo("example-org/beta"))
+	e.inv.mu.Lock()
+	e.inv.during = func() {
+		o := session("s2", model.StatusBusy, tNow)
+		o.Folder = beta
+		e.board.Apply(o)
+	}
+	e.inv.mu.Unlock()
+	e.clock.Set(tNow.Add(leftoversEvery))
+	e.board.tick()
+	e.board.tick()
+	if l := list(t, e.board); !l.Partial || len(l.Items) != 1 {
+		t.Fatalf("joined during the look: list = %+v", l)
+	}
+	e.clock.Set(tNow.Add(leftoversEvery + leftoversSoonest))
+	e.board.tick()
+	e.board.tick()
+	if l := list(t, e.board); l.Partial || len(l.Items) != 1 {
+		t.Fatalf("next look: list = %+v", l)
+	}
+}
+
+// A check cut short (a worktree's status, or an ancestry question, out of
+// time) holds that work back and makes the list incomplete; a commit that is
+// not in the repo is an answer: held back, the list whole.
+func TestCheckWithNoAnswerMakesTheListPartial(t *testing.T) {
+	for name, c := range map[string]struct {
+		tree, anc error
+		partial   bool
+	}{
+		"status timed out":   {tree: fmt.Errorf("git: %w", context.DeadlineExceeded), partial: true},
+		"status unreadable":  {tree: errors.New("cannot tell"), partial: true},
+		"ancestry timed out": {anc: fmt.Errorf("git: %w", context.DeadlineExceeded), partial: true},
+		"commit missing":     {anc: errors.New("exit status 128")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newLeftoverEnv(t, nil)
+			e.folders.set(workerProcs...)
+			e.addWorker(t, "s1")
+			if c.tree != nil {
+				e.inv.treeErr = map[string]error{alphaWT: c.tree}
+			}
+			if c.anc != nil {
+				inv := e.inv.inv[alpha]
+				inv.Branches[1].Tip = tipOther // not the head: the scan asks git
+				e.inv.inv[alpha] = inv
+				e.inv.ancErr = c.anc
+			}
+			e.clock.Set(tNow.Add(leftoversEvery))
+			e.board.tick()
+			e.board.tick()
+			l := list(t, e.board)
+			if l.Partial != c.partial || len(l.Items) != 0 || !slices.Contains(l.Held, contract.HeldCount{Reason: contract.HeldUnknown, Count: 1}) {
+				t.Fatalf("list = %+v", l)
+			}
+		})
+	}
+}
+
+// A repo on the board that is not on GitHub (on GitLab, or with no origin)
+// is never looked at for leftovers, but its checkouts are read: one inside
+// an ignored folder of alpha-wt holds alpha-wt back. When they cannot be
+// listed, the list is incomplete and alpha-wt is held back too.
+func TestCheckoutsOfReposNotOnGitHubHoldWorktrees(t *testing.T) {
+	for name, remote := range map[string]model.ForgeRepo{
+		"gitlab":    model.GitLabRepo("gitlab.example.com", "example-group/beta"),
+		"no origin": {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			for _, listed := range []bool{true, false} {
+				e := newLeftoverEnv(t, nil)
+				e.folders.set(workerProcs...)
+				e.addWorker(t, "s1")
+				beta := e.betaRepo(remote)
+				inv := e.inv.inv[beta]
+				inv.Worktrees = append(inv.Worktrees, model.Worktree{Path: alphaWT + "/vendor/beta-wt", Branch: model.Of("x")})
+				if !listed {
+					inv = model.RepoInventory{}
+					e.inv.fail = map[string]bool{beta: true}
+				}
+				e.inv.inv[beta] = inv
+				o := session("s2", model.StatusBusy, tNow)
+				o.Folder = beta
+				e.board.applySync(o)
+				e.clock.Set(tNow.Add(leftoversEvery))
+				e.board.tick()
+				e.board.tick()
+				l := list(t, e.board)
+				want := contract.HeldCount{Reason: contract.HeldNested, Count: 1}
+				if !listed {
+					want.Reason = contract.HeldUnknown
+				}
+				if len(l.Items) != 0 || !slices.Contains(l.Held, want) || l.Partial == listed {
+					t.Fatalf("listed %v: list = %+v", listed, l)
+				}
+			}
+		})
+	}
+}
+
+// A repo whose origin git read as none, and finds on GitHub when it lists the
+// checkouts, changed between the two: the list is incomplete.
+// The same when origin has several addresses now, one on GitHub, and when a
+// read after the origin's (the stashes) failed.
+func TestRepoMovedToGitHubMakesTheListPartial(t *testing.T) {
+	for name, c := range map[string]struct {
+		origin       model.ForgeRepo
+		unclear, bad bool
+	}{
+		"github":              {origin: model.GitHubRepo("example-org/beta")},
+		"several addresses":   {unclear: true},
+		"github, then failed": {origin: model.GitHubRepo("example-org/beta"), bad: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newLeftoverEnv(t, nil)
+			beta := e.betaRepo(model.ForgeRepo{})
+			inv := e.inv.inv[beta]
+			inv.Origin, inv.OriginUnclear = c.origin, c.unclear
+			e.inv.inv[beta] = inv
+			if c.bad {
+				e.inv.fail = map[string]bool{beta: true}
+			}
+			o := session("s2", model.StatusBusy, tNow)
+			o.Folder = beta
+			e.board.applySync(o)
+			e.board.applySync(session("s3", model.StatusBusy, tNow)) // keeps alpha on the board
+			e.board.tick()
+			e.board.tick()
+			if l := list(t, e.board); !l.Partial {
+				t.Fatalf("list = %+v", l)
+			}
+		})
+	}
+}
+
+// A board that empties after a look is not due for another until it changes.
+func TestEmptiedBoardIsNotDueAgain(t *testing.T) {
+	e := newLeftoverEnv(t, nil)
+	s := session("s3", model.StatusBusy, tNow)
+	e.board.applySync(s)
+	e.board.tick()
+	e.board.tick()
+	s.Ended = true
+	e.board.applySync(s)
+	e.clock.Set(tNow.Add(leftoversSoonest))
+	e.board.tick()
+	e.board.mu.Lock()
+	due := e.board.leftoversDueLocked(tNow.Add(2 * leftoversSoonest))
+	e.board.mu.Unlock()
+	if due {
+		t.Fatal("an empty board is due again")
+	}
+}
+
+// Two folders of one repo that git answered about differently (its origin
+// changed between the answers): the repo is not looked at, and the list
+// says it is incomplete.
+func TestFoldersDisagreeingAboutARepoMakeItUnclear(t *testing.T) {
+	for _, noOrigin := range []string{alpha, alphaWT} {
+		t.Run(filepath.Base(noOrigin), func(t *testing.T) {
+			e := newLeftoverEnv(t, nil)
+			e.folders.set(workerProcs...)
+			if noOrigin == alpha {
+				e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Branch: model.Of("main")})
+			} else {
+				e.repos.set(alphaWT, model.Repo{Root: alphaWT, MainRoot: alpha, Branch: model.Of("feat")})
+			}
+			e.board.applySync(session("s3", model.StatusBusy, tNow))
+			e.addWorker(t, "s1")
+			e.clock.Set(tNow.Add(leftoversEvery))
+			e.board.tick()
+			e.board.tick()
+			if l := list(t, e.board); !l.Partial || len(l.Items) != 0 {
+				t.Fatalf("list = %+v", l)
+			}
+		})
+	}
+}
+
+// A look whose own time ran out says the list is incomplete, whatever it
+// found.
+func TestLookOutOfTimeIsPartial(t *testing.T) {
+	e := newLeftoverEnv(t, nil)
+	e.folders.set(workerProcs...)
+	e.addWorker(t, "s1")
+	b := e.board
+	b.mu.Lock()
+	repos, sessions, live := b.leftoverInputsLocked()
+	b.mu.Unlock()
+	if l := b.lookForLeftovers(context.Background(), repos, sessions, live, false); l.Partial || len(l.Items) != 1 {
+		t.Fatalf("in time: %+v", l)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if l := b.lookForLeftovers(ctx, repos, sessions, live, false); !l.Partial {
+		t.Fatalf("out of time: %+v", l)
 	}
 }
 

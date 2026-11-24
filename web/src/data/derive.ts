@@ -244,13 +244,46 @@ export interface Index {
   gitlabHosts: readonly string[]; // the only hosts a GitLab link may point at (Snapshot.gitlabHosts)
 }
 
+const GITLAB_SEGMENT = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,254}$/;
+/** The longest repository path the server gives the page (core maxText, in characters; paths are ASCII). */
+const PAGE_PATH_MAX = 300;
+
+const HOST_LABEL = '[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?';
+/** model.ValidGitLabHost: a lowercase DNS name with at least one dot. */
+const GITLAB_HOST = new RegExp(`^${HOST_LABEL}(?:\\.${HOST_LABEL})+$`);
+
+/** model.ValidGitLabSite: a GitLab host, with a web port (1 to 65535, no leading zero, never 443) or without. */
+function validGitLabSite(s: string): boolean {
+  const i = s.indexOf(':');
+  const host = i < 0 ? s : s.slice(0, i);
+  if (host.length > 253 || !GITLAB_HOST.test(host)) return false;
+  if (i < 0) return true;
+  const port = s.slice(i + 1);
+  return /^[1-9][0-9]{0,4}$/.test(port) && Number(port) <= 65535 && port !== '443';
+}
+
+/** glab's subfolder as the server keeps it (gitlab validSubfolder): 1 to 8 segments, never "..". */
+function validMount(m: string): boolean {
+  const segs = m.split('/');
+  return segs.length <= 8 && segs.every((g) => GITLAB_SEGMENT.test(g) && !g.includes('..'));
+}
+
 /**
- * The GitLab hosts a snapshot lists: an array's strings, whole; anything else
- * (a string, an object, nothing) reads as none, so a damaged value never
- * approves a host that was not listed. Hosts are compared exactly.
+ * The GitLab hosts a snapshot lists: an array's strings, each a site the
+ * server could list (validGitLabSite, then its subfolder after a slash, as
+ * the server bounds it); anything else (a string, an object, nothing) reads
+ * as none, so a damaged value never approves a host that was not listed. Two
+ * different entries for the same site contradict each other: neither is
+ * kept. Hosts are compared exactly.
  */
 export function readGitlabHosts(v: unknown): string[] {
-  return Array.isArray(v) ? v.filter((h): h is string => typeof h === 'string') : [];
+  if (!Array.isArray(v)) return [];
+  const entries = [...new Set(v.filter((h): h is string => typeof h === 'string'))].filter((e) => {
+    const i = e.indexOf('/');
+    return validGitLabSite(i < 0 ? e : e.slice(0, i)) && (i < 0 || validMount(e.slice(i + 1)));
+  });
+  const site = (e: string) => e.split('/')[0];
+  return entries.filter((e) => entries.filter((o) => site(o) === site(e)).length === 1);
 }
 
 export function indexOf(s: Pick<Snapshot, 'cards' | 'projects'> & Partial<Pick<Snapshot, 'gitlabHosts'>>): Index {
@@ -363,13 +396,50 @@ export function prLine(pr: PullRequest): Line {
 
 type Linkable = Pick<PullRequest, 'forge' | 'host' | 'repo' | 'number' | 'url'>;
 
+/**
+ * The subfolder GitLab sits under on host ('' for none), as
+ * Snapshot.gitlabHosts names it ("host", or "host/sub/folder" under a
+ * subfolder); null when host is not one of them.
+ */
+export function gitlabMount(gitlabHosts: readonly string[], host: string): string | null {
+  // An entry is its site, then its subfolder after the first slash: a row's
+  // host equal to a whole entry with a subfolder is no site, so it matches none.
+  for (const e of gitlabHosts) {
+    if (typeof e !== 'string') continue;
+    const i = e.indexOf('/');
+    if ((i < 0 ? e : e.slice(0, i)) === host) return i < 0 ? '' : e.slice(i + 1);
+  }
+  return null;
+}
+
+/**
+ * The project path rule the server keeps (model.ValidGitLabPath): 2 to 22 segments, never "..", none ending in ".git" or ".atom";
+ * and no longer than the server gives the page a path (core maxText, pagePath): one longer never has a link.
+ */
+function validGitLabPath(p: string): boolean {
+  const segs = p.split('/');
+  return p.length <= PAGE_PATH_MAX && segs.length >= 2 && segs.length <= 22 &&
+    segs.every((s) => GITLAB_SEGMENT.test(s) && !s.includes('..') && !s.endsWith('.git') && !s.endsWith('.atom'));
+}
+
+/** GitLab numbers merge requests and issues with a signed 32-bit integer. */
+const GITLAB_MAX_IID = 2147483647;
+
 /** url when it is the address forgeLink's rule builds for this forge, host, repo and number; null otherwise. */
 function forgeLink(it: Linkable, gitlabHosts: readonly string[], github: RegExp, gitlab: RegExp, ghKind: string, glKind: string): string | null {
   if (it.forge === 'github') {
     return it.host === 'github.com' && github.test(it.url) && it.url === `https://github.com/${it.repo}/${ghKind}/${it.number}` ? it.url : null;
   }
   if (it.forge === 'gitlab') {
-    return gitlabHosts.includes(it.host) && gitlab.test(it.url) && it.url === `https://${it.host}/${it.repo}/-/${glKind}/${it.number}` ? it.url : null;
+    // A row of the wrong shape never has a link, and github.com is no GitLab (the server's rule).
+    if (typeof it.host !== 'string' || typeof it.repo !== 'string' || typeof it.url !== 'string' ||
+        it.host.split(':')[0] === 'github.com') return null;
+    // On a listed host, under exactly its subfolder: the project path after
+    // it is one GitLab can have, as the server's own rule says.
+    const mount = gitlabMount(gitlabHosts, it.host);
+    const project = mount === '' ? it.repo : mount !== null && it.repo.startsWith(mount + '/') ? it.repo.slice(mount.length + 1) : null;
+    return project !== null && validGitLabPath(it.repo) && validGitLabPath(project) && it.number <= GITLAB_MAX_IID &&
+      gitlab.test(it.url) && it.url === `https://${it.host}/${it.repo}/-/${glKind}/${it.number}` ? it.url : null;
   }
   return null;
 }
@@ -379,7 +449,8 @@ function forgeLink(it: Linkable, gitlabHosts: readonly string[], github: RegExp,
  * very pull request: it must match its forge's pattern and be the one for its
  * own host, repo and number, so a tampered snapshot cannot put another
  * repository's address on the row. A GitLab address must also be on one of
- * gitlabHosts (Snapshot.gitlabHosts); with none given, no GitLab link passes.
+ * gitlabHosts (Snapshot.gitlabHosts), under exactly the subfolder it names;
+ * with none given, no GitLab link passes.
  */
 export function prHref(pr: Linkable, gitlabHosts: readonly string[] = []): string | null {
   return forgeLink(pr, gitlabHosts, PULL_REQUEST_URL_PATTERN, MERGE_REQUEST_URL_PATTERN, 'pull', 'merge_requests');

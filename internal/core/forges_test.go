@@ -22,7 +22,6 @@ const (
 
 var (
 	errFakeNotLoggedIn = fmt.Errorf("fake: %w", source.ErrNotLoggedIn)
-	errFakeSubfolder   = fmt.Errorf("fake: %w", source.ErrUnsupported)
 )
 
 // fakeGitLab answers like gitlab.Source: lookups from fakePRs, hosts from
@@ -47,6 +46,10 @@ type fakeGitLab struct {
 	entered    chan string              // when set, gets each Host call's host as it starts
 	quit       chan string              // when set, gets the host of each Host call whose caller gave up
 	holds      map[string]chan struct{} // host → what its Host calls wait for, besides block
+	subs       map[string]string        // host → glab's subfolder setting (Subfolder)
+	// partial, when set, makes every Lookup answer only the pull requests not
+	// named in it, with it as the error (as gitlab.Source does).
+	partial *source.PartialLookup
 	// lookupGate, when set, runs in every Lookup before it answers.
 	lookupGate func(repo model.ForgeRepo)
 	// probeGate, when set, runs in every Probe before it answers.
@@ -109,7 +112,24 @@ func (f *fakeGitLab) Lookup(ctx context.Context, repo model.ForgeRepo, numbers [
 	if stale {
 		return nil, fmt.Errorf("fake: %w", source.ErrNotChecked)
 	}
-	return f.fakePRs.Lookup(ctx, repo, numbers, branches)
+	prs, err := f.fakePRs.Lookup(ctx, repo, numbers, branches)
+	f.hmu.Lock()
+	part := f.partial
+	f.hmu.Unlock()
+	if part != nil && err == nil {
+		prs = slices.DeleteFunc(prs, func(pr model.PullRequest) bool {
+			return slices.Contains(part.Wrong, pr.Number) || slices.Contains(part.Unverified, pr.Number)
+		})
+		return prs, part
+	}
+	return prs, err
+}
+
+// Subfolder is subs[host]: no call, as gitlab.Source.
+func (f *fakeGitLab) Subfolder(host string) string {
+	f.hmu.Lock()
+	defer f.hmu.Unlock()
+	return f.subs[host]
 }
 
 func (f *fakeGitLab) setHost(host string, err error) {
@@ -305,20 +325,42 @@ func TestGitLabHostNotLoggedInIsNeverAsked(t *testing.T) {
 	}
 }
 
-// GitLab under a subfolder is not supported yet: never asked, and said so.
-func TestGitLabSubfolderHostSaysSo(t *testing.T) {
-	e, gl := newGitLabEnv(t)
-	e.board.SetSources([]source.Status{glOK})
-	gl.setHost(glHost, errFakeSubfolder)
-	w := busySession("w", tNow)
-	w.CreatedPRs = []model.PRRef{{Repo: model.GitLabRepo(glHost, glPath), Number: 5}}
-	e.board.applySync(w)
-	e.board.tick()
-	if _, _, lookups := gl.counts(); lookups != 0 {
-		t.Fatalf("%d lookups", lookups)
-	}
-	if l := gitlabLine(t, e.board); l.State != contract.SourceFailing || l.Detail != "GitLab under a subfolder of gitlab.example.com is not supported yet" {
-		t.Fatalf("line %+v", l)
+// GitLab under a subfolder: its merge requests are looked up like any other
+// (the adapter takes the subfolder off for the API), the line stays fine,
+// and an ssh remote's project gets the subfolder in front of its path, as
+// the web addresses carry it; an https remote already has it.
+func TestGitLabSubfolderHost(t *testing.T) {
+	for _, c := range []struct {
+		name, remote string
+		bare         bool
+	}{
+		{"ssh remote", glPath, true},
+		{"https remote", "gitlab/" + glPath, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			e, gl := newGitLabEnv(t)
+			e.board.SetSources([]source.Status{glOK})
+			gl.subs = map[string]string{glHost: "gitlab"}
+			e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Remote: model.GitLabRepo(glHost, c.remote), RemoteBare: c.bare})
+			w := busySession("w", tNow)
+			w.CreatedPRs = []model.PRRef{{Repo: model.GitLabRepo(glHost, "gitlab/"+glPath), Number: 5}}
+			e.board.applySync(w)
+			e.board.tick()
+			if _, _, lookups := gl.counts(); lookups != 1 {
+				t.Fatalf("%d lookups", lookups)
+			}
+			if l := gitlabLine(t, e.board); l.State != contract.SourceOK || l.Detail != "" {
+				t.Fatalf("line %+v", l)
+			}
+			ps := e.board.Snapshot().Projects
+			if len(ps) != 1 {
+				t.Fatalf("projects %+v", ps)
+			}
+			p := ps[0]
+			if p.Repo != "gitlab/"+glPath || p.RepoHost != glHost || p.RepoForge != contract.ForgeGitLab {
+				t.Fatalf("project %q %q %q", p.Repo, p.RepoHost, p.RepoForge)
+			}
+		})
 	}
 }
 
@@ -1484,5 +1526,222 @@ func TestGitLabOffScansNothing(t *testing.T) {
 	e.board.mu.Unlock()
 	if after != before {
 		t.Fatalf("%d GitLab scans with GitLab missing", after-before)
+	}
+}
+
+// The snapshot lists a GitLab host with the subfolder GitLab sits under, as
+// glab has it at the host's last yes: the page links a merge request only
+// under exactly that subfolder.
+func TestGitLabHostsCarryTheSubfolder(t *testing.T) {
+	for _, sub := range []string{"", "gitlab", "apps/gitlab"} {
+		t.Run("sub="+sub, func(t *testing.T) {
+			e, gl := newGitLabEnv(t)
+			e.board.SetSources([]source.Status{glOK})
+			gl.subs = map[string]string{glHost: sub}
+			web := glPath
+			if sub != "" {
+				web = sub + "/" + glPath
+			}
+			repo := model.GitLabRepo(glHost, web)
+			gl.prs = []model.PullRequest{mrAt(repo, 5, tNow.Add(-time.Hour))}
+			e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Remote: repo})
+			w := busySession("w", tNow)
+			w.CreatedPRs = []model.PRRef{{Repo: repo, Number: 5}}
+			e.board.applySync(w)
+			e.board.tick()
+			want := glHost
+			if sub != "" {
+				want += "/" + sub
+			}
+			if hosts := e.board.Snapshot().GitLabHosts; !slices.Equal(hosts, []string{want}) {
+				t.Fatalf("gitlabHosts %v, want [%s]", hosts, want)
+			}
+		})
+	}
+}
+
+// A host whose decision is not a yes is not listed, even while a merge
+// request of it is still held: the page links nothing there.
+func TestGitLabHostsListOnlyAYes(t *testing.T) {
+	b := newBoard(t, Options{GitLab: &fakeGitLab{known: map[string]error{glHost: nil}, probe: glOK}})
+	b.SetSources([]source.Status{glOK})
+	repo := model.GitLabRepo(glHost, glPath)
+	b.mu.Lock()
+	b.prs[model.PRRef{Repo: repo, Number: 5}] = model.PullRequest{Repo: repo, Number: 5, State: model.PRStateMerged}
+	b.glHosts[glHost] = hostDecision{ok: false, sub: "gitlab"}
+	no := b.gitlabHostsLocked()
+	b.glHosts[glHost] = hostDecision{ok: true, sub: "gitlab"}
+	yes := b.gitlabHostsLocked()
+	b.mu.Unlock()
+	if len(no) != 0 || !slices.Equal(yes, []string{glHost + "/gitlab"}) {
+		t.Fatalf("no: %v, yes: %v", no, yes)
+	}
+}
+
+// glab keeps one login per host name: a definite no about a host takes the
+// same name on another web port with it, and nothing else.
+func TestGitLabLogoutHoldsForTheSameNameOnAnotherPort(t *testing.T) {
+	b := newBoard(t, Options{GitLab: &fakeGitLab{known: map[string]error{glHost: nil}, probe: glOK}})
+	b.SetSources([]source.Status{glOK})
+	b.mu.Lock()
+	b.glHosts[glHost+":8443"] = hostDecision{at: b.now(), ok: true}
+	b.glHosts["other.example.com"] = hostDecision{at: b.now(), ok: true}
+	b.noteHostLocked(glHost, errFakeNotLoggedIn)
+	port, other := b.glHosts[glHost+":8443"], b.glHosts["other.example.com"]
+	b.mu.Unlock()
+	if port.ok {
+		t.Error("the same host name on a web port is still asked")
+	}
+	if !other.ok {
+		t.Error("another host lost its yes")
+	}
+}
+
+// When a check finds the host's subfolder moved, every site on the name
+// takes the new one, and what was learned or shown under the old one goes
+// (the merge requests, what was asked or found missing), to be asked again;
+// a check or lookup under way across it keeps nothing.
+func TestGitLabMountChangeForgetsWhatWasShown(t *testing.T) {
+	b := newBoard(t, Options{GitLab: &fakeGitLab{known: map[string]error{glHost: nil}, probe: glOK, subs: map[string]string{glHost: "apps"}}})
+	b.SetSources([]source.Status{glOK})
+	site := glHost + ":8443"
+	repo := model.GitLabRepo(glHost, "apps/gitlab/"+glPath)
+	ref := model.PRRef{Repo: repo, Number: 5}
+	b.mu.Lock()
+	b.noteHostLocked(glHost, nil)
+	b.glHosts[site] = hostDecision{at: b.now(), ok: true, sub: "apps"}
+	b.prs[ref] = model.PullRequest{Repo: repo, Number: 5, State: model.PRStateOpen}
+	b.asked[ref], b.missingRefs[ref], b.lookedUp[repo] = true, true, b.now()
+	st, stSite := b.hostStampLocked(glHost), b.hostStampLocked(site)
+	b.opts.GitLab.(*fakeGitLab).subs = map[string]string{glHost: "apps/gitlab"}
+	b.noteHostLocked(glHost, nil)
+	got, port := b.glHosts[glHost], b.glHosts[site]
+	_, kept := b.prs[ref]
+	left := b.asked[ref] || b.missingRefs[ref] || !b.lookedUp[repo].IsZero()
+	moved := b.hostStampLocked(glHost) != st || b.hostStampLocked(site) != stSite
+	b.mu.Unlock()
+	if got.sub != "apps/gitlab" || port.sub != "apps/gitlab" {
+		t.Errorf("mounts %q and %q, want apps/gitlab for the name's every site", got.sub, port.sub)
+	}
+	if kept || left {
+		t.Errorf("shown under the old mount: kept %v, asked or missing or looked up %v", kept, left)
+	}
+	if !moved {
+		t.Error("a check under way across the move still counts")
+	}
+}
+
+// An answer that leaves out a merge request asked for by number (gone, or
+// no longer at the address shown) takes its old copy with it: its link and
+// its approval do not stay.
+func TestGitLabLookupWithoutTheMRDropsTheOldCopy(t *testing.T) {
+	e, gl := newGitLabEnv(t)
+	e.board.SetSources([]source.Status{glOK})
+	repo := model.GitLabRepo(glHost, glPath)
+	ref := model.PRRef{Repo: repo, Number: 5}
+	e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Remote: repo})
+	w := busySession("w", tNow)
+	w.CreatedPRs = []model.PRRef{{Repo: repo, Number: 5}}
+	gl.prs = []model.PullRequest{mrAt(repo, 5, tNow.Add(-time.Hour))}
+	e.board.applySync(w)
+	e.board.tick()
+	e.board.mu.Lock()
+	_, shown := e.board.prs[ref]
+	e.board.mu.Unlock()
+	if !shown || len(e.board.Snapshot().GitLabHosts) != 1 {
+		t.Fatalf("not shown to begin with: %v", e.board.Snapshot().GitLabHosts)
+	}
+	gl.mu.Lock()
+	gl.prs = nil // GitLab's webUrl no longer matches: the adapter leaves it out
+	gl.mu.Unlock()
+	e.clock.Set(e.clock.Now().Add(time.Hour))
+	e.board.tick()
+	e.board.mu.Lock()
+	_, kept := e.board.prs[ref]
+	missing := e.board.missingRefs[ref]
+	e.board.mu.Unlock()
+	if kept || !missing {
+		t.Errorf("old copy kept %v, missing %v", kept, missing)
+	}
+	if hosts := e.board.Snapshot().GitLabHosts; len(hosts) != 0 {
+		t.Errorf("gitlabHosts %v, want none: nothing of the host is shown", hosts)
+	}
+}
+
+// A denial found for one site voids the check under way for every site of
+// the same name: glab keeps one login per name.
+func TestGitLabDenialVoidsTheNamesOtherSites(t *testing.T) {
+	b := newBoard(t, Options{GitLab: &fakeGitLab{known: map[string]error{glHost: nil}, probe: glOK}})
+	b.SetSources([]source.Status{glOK})
+	b.mu.Lock()
+	sibling, other := b.hostStampLocked(glHost+":9443"), b.hostStampLocked("other.example.com")
+	b.noteHostLocked(glHost+":8443", errFakeNotLoggedIn)
+	voided := b.hostStampLocked(glHost+":9443") != sibling
+	untouched := b.hostStampLocked("other.example.com") == other
+	b.mu.Unlock()
+	if !voided {
+		t.Error("a check under way for a sibling port still counts after the denial")
+	}
+	if !untouched {
+		t.Error("another host's stamp moved")
+	}
+}
+
+// An ssh remote's project path takes the mount the allowlist holds, so the
+// displayed project and the listed host cannot disagree.
+func TestShownRemoteTakesTheMountOfTheDecision(t *testing.T) {
+	gl := &fakeGitLab{known: map[string]error{glHost: nil}, probe: glOK, subs: map[string]string{glHost: "other"}}
+	b := newBoard(t, Options{GitLab: gl})
+	b.SetSources([]source.Status{glOK})
+	repo := model.Repo{Remote: model.GitLabRepo(glHost, glPath), RemoteBare: true}
+	b.mu.Lock()
+	b.glHosts[glHost] = hostDecision{at: b.now(), ok: true, sub: "gitlab"} // the provider has moved on to "other" since
+	got := b.shownRemoteLocked(repo)
+	b.mu.Unlock()
+	if got.Path != "gitlab/"+glPath {
+		t.Errorf("path %q, want the decision's mount in front", got.Path)
+	}
+}
+
+// One answer that settles some numbers and not others: what was placed is
+// kept; a number GitLab put at another address loses its old copy but is
+// not marked missing (the route may be put right, so ended sessions ask
+// again); a number it did not place stays as it was and is asked again;
+// only the rest are missing.
+func TestGitLabPartialAnswerSettlesPerNumber(t *testing.T) {
+	e, gl := newGitLabEnv(t)
+	e.board.SetSources([]source.Status{glOK})
+	repo := model.GitLabRepo(glHost, glPath)
+	ref := func(n int) model.PRRef { return model.PRRef{Repo: repo, Number: n} }
+	e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Remote: repo})
+	w := session("w", model.StatusFinished, tNow)
+	w.Ended, w.EndedAt = true, tNow
+	w.CreatedPRs = []model.PRRef{ref(5), ref(6), ref(7), ref(8)}
+	old := func(n int) model.PullRequest {
+		return model.PullRequest{Repo: repo, Number: n, Title: "old", URL: model.ChangeRequestURL(repo, n), State: model.PRStateOpen, OpenedAt: tNow.Add(-time.Hour)}
+	}
+	e.board.mu.Lock()
+	for _, n := range []int{5, 6, 8} {
+		e.board.prs[ref(n)] = old(n)
+	}
+	e.board.mu.Unlock()
+	fresh := old(7)
+	fresh.Title = "fresh"
+	gl.prs = []model.PullRequest{fresh}
+	gl.partial = &source.PartialLookup{Wrong: []int{5}, Unverified: []int{6}}
+	e.board.applySync(w)
+	e.board.tick()
+	e.board.mu.Lock()
+	_, has5 := e.board.prs[ref(5)]
+	_, has6 := e.board.prs[ref(6)]
+	got7 := e.board.prs[ref(7)].Title
+	_, has8 := e.board.prs[ref(8)]
+	miss := []bool{e.board.missingRefs[ref(5)], e.board.missingRefs[ref(6)], e.board.missingRefs[ref(7)], e.board.missingRefs[ref(8)]}
+	e.board.mu.Unlock()
+	if has5 || !has6 || got7 != "fresh" || has8 {
+		t.Errorf("kept: !5 %v, !6 %v, !7 %q, !8 %v; want only !6 and the fresh !7", has5, has6, got7, has8)
+	}
+	if !slices.Equal(miss, []bool{false, false, false, true}) {
+		t.Errorf("missing markers %v, want only !8", miss)
 	}
 }

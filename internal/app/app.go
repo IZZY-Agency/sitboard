@@ -7,7 +7,6 @@ package app
 import (
 	"context"
 	"errors"
-	"time"
 
 	"github.com/IZZY-Agency/sitboard/internal/contract"
 	"github.com/IZZY-Agency/sitboard/internal/model"
@@ -33,12 +32,17 @@ type Board interface {
 
 	Catchup(ctx context.Context) (contract.Catchup, error)
 	Leftovers(ctx context.Context) (contract.Leftovers, error)
+	// Issues lists the open issues of the projects on the board, and asks
+	// for a new look when the list is older than contract.IssuesFreshFor.
+	Issues(ctx context.Context) (contract.Issues, error)
 
 	// MarkSeen marks a card seen. Unknown card ids are an error.
 	MarkSeen(cardID string) error
-	// MarkCatchupRead moves the catch-up marker to upTo, clamped to now; it
-	// never moves the marker back.
-	MarkCatchupRead(upTo time.Time) error
+	// MarkCatchupRead marks read exactly the items of the catch-up list named
+	// list (contract.Catchup.List). ErrCatchupStale when that list is not one
+	// of this run's current ones, ErrCatchupFull when marking it would pass the
+	// state file's cap: in both cases nothing was marked.
+	MarkCatchupRead(list string) error
 	// ForgetGrouping forgets the grouping of a project that has parts now:
 	// its parts are no longer grouped under it, and its folder does not group
 	// again until no agent has sat in it for a while. ErrUnknownProject when
@@ -66,3 +70,13 @@ var (
 	ErrNotGrouping     = errors.New("app: the project is not a grouping")
 	ErrTooManySettings = errors.New("app: too many folders have a grouping setting")
 )
+
+// ErrCatchupStale: MarkCatchupRead was given a list that is not current (one
+// of an earlier run, or too old). Nothing was marked; the page loads the list
+// again.
+var ErrCatchupStale = errors.New("app: that catch-up list is not current; load it again")
+
+// ErrCatchupFull: marking the list read would keep more marked items from the
+// last 7 days than the state file holds. Nothing was marked: its items stay
+// unread.
+var ErrCatchupFull = errors.New("app: too many catch-up items marked read in the last 7 days")

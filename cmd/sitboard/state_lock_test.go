@@ -188,7 +188,7 @@ func TestUnlockStopsWritesFirst(t *testing.T) {
 		t.Fatal(err)
 	}
 	unlock()
-	if err := st.SetCatchupMarker(time.Now()); err != nil {
+	if err := st.SetSeen("card", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if after, _ := os.ReadFile(file); string(after) != string(before) {
@@ -331,5 +331,66 @@ func TestUnlockLetsAWriteInProgressFinishFirst(t *testing.T) {
 	<-unlocked
 	if slow.early.Load() {
 		t.Error("the lock was let go while a write was still in progress")
+	}
+}
+
+// A state file that could not be written at open (the store keeps this run
+// in memory) is said at the start.
+func TestStartSaysWhenTheStateFileIsKeptInMemory(t *testing.T) {
+	env := testEnv(t.TempDir())
+	env.openStore = func(string) (state.Store, error) { return state.Memory(), nil }
+	_, notes, unlock, err := openState(context.Background(), cfgWith(0, true), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	if !slices.ContainsFunc(notes, func(n string) bool { return strings.Contains(n, "could not write the state file") }) {
+		t.Fatalf("notes %q", notes)
+	}
+}
+
+// A file of sitboard 0.4.0 or earlier in a folder sitboard cannot write is
+// served in memory only, with the warning, and left as it was; a newer file
+// there is still refused (review of #152, round 6, finding 41).
+func TestStartServesAnOldFileInAnUnwritableFolderInMemory(t *testing.T) {
+	for _, c := range []struct {
+		name, doc string
+		served    bool
+	}{
+		{"0.4.0 file", `{"version":1,"seen":{},"catchupMarker":"2026-11-17T09:00:00Z"}`, true},
+		{"file without a marker", `{"version":1,"seen":{}}`, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			home := t.TempDir()
+			file := stateFile(home, "linux", func(string) string { return "" })
+			if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(file, []byte(c.doc), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(filepath.Dir(file), 0o500); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(filepath.Dir(file), 0o700) })
+			st, notes, unlock, err := openState(context.Background(), cfgWith(0, true), testEnv(home))
+			if !c.served {
+				if err == nil {
+					unlock()
+					t.Fatal("served a file it cannot write")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer unlock()
+			if !st.InMemory() || !slices.Contains(notes, memoryNote) {
+				t.Fatalf("in memory %v, notes %q", st.InMemory(), notes)
+			}
+			if b, _ := os.ReadFile(file); string(b) != c.doc {
+				t.Fatalf("the file changed: %s", b)
+			}
+		})
 	}
 }

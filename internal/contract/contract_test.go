@@ -47,6 +47,7 @@ func TestGoldenRoundTrips(t *testing.T) {
 		{"snapshot.v1.json", &Snapshot{}},
 		{"catchup.v1.json", &Catchup{}},
 		{"leftovers.v1.json", &Leftovers{}},
+		{"issues.v1.json", &Issues{}},
 	}
 	for _, c := range cases {
 		t.Run(c.file, func(t *testing.T) {

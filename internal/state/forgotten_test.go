@@ -45,8 +45,9 @@ func TestFileWrittenBy010Loads(t *testing.T) {
 	if got, ok := s.SeenAt("claude:s1"); !ok || !got.Equal(at) {
 		t.Fatalf("seen %v %v", got, ok)
 	}
-	if !s.CatchupMarker().Equal(at.Add(-time.Hour)) {
-		t.Fatalf("marker %v", s.CatchupMarker())
+	// Its catch-up marker is dropped at once, and the drop saved.
+	if b, _ := os.ReadFile(file); strings.Contains(string(b), "catchupMarker") {
+		t.Fatalf("the marker was kept: %s", b)
 	}
 	if got := s.Umbrellas(); len(got) != 1 || !got["/home/dev/work"].Equal(at) {
 		t.Fatalf("umbrellas %v", got)
@@ -258,8 +259,8 @@ func TestUnreadableForgottenIsDroppedNotFatal(t *testing.T) {
 			if _, ok := s.SeenAt("claude:s1"); !ok {
 				t.Fatal("the seen marks were lost")
 			}
-			if !s.CatchupMarker().Equal(at) || len(s.Umbrellas()) != 1 {
-				t.Fatalf("marker %v, umbrellas %v", s.CatchupMarker(), s.Umbrellas())
+			if len(s.Umbrellas()) != 1 {
+				t.Fatalf("umbrellas %v", s.Umbrellas())
 			}
 			got := slices.Sorted(maps.Keys(s.Forgotten()))
 			if !slices.Equal(got, c.want) {
@@ -280,7 +281,6 @@ func TestUnreadableForgottenIsDroppedNotFatal(t *testing.T) {
 func TestBadExistingKeysStillRefuseTheFile(t *testing.T) {
 	for _, doc := range []string{
 		`{"version":1,"seen":"x"}`,
-		`{"version":1,"seen":{},"catchupMarker":"yesterday"}`,
 		`{"version":1,"seen":{},"umbrellas":["/home/dev/u"]}`,
 	} {
 		file := filepath.Join(t.TempDir(), "state.json")

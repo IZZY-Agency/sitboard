@@ -44,9 +44,8 @@ func prAt(n int, state model.PRState, opened, closed time.Time) model.PullReques
 	}
 }
 
-// Before the first "mark read" catch-up reaches 7 days back; after it, only
-// what came after the marker. A turn end in the future is not listed yet.
-func TestCatchupTurnsFollowTheMarkerAndTheWindow(t *testing.T) {
+// Catch-up reaches 7 days back. A turn end in the future is not listed yet.
+func TestCatchupTurnsFollowTheWindow(t *testing.T) {
 	e := newEnv(t)
 	s := session("s1", model.StatusFinished, tNow.Add(-time.Hour))
 	s.TurnEnds = []time.Time{
@@ -67,40 +66,12 @@ func TestCatchupTurnsFollowTheMarkerAndTheWindow(t *testing.T) {
 		t.Fatalf("items %v, want %v", got, want)
 	}
 
-	// The next run starts with a marker the last one saved: what it covers
-	// stays read.
-	if err := e.state.SetCatchupMarker(tNow.Add(-2 * time.Hour)); err != nil {
-		t.Fatal(err)
-	}
-	b := e.restart(t)
-	b.applySync(s)
-	c = catchup(t, b)
-	if !c.Marker.Equal(tNow.Add(-2 * time.Hour)) {
-		t.Fatalf("marker %v", c.Marker)
-	}
-	if got := kindsAt(c); !slices.Equal(got, want[:1]) {
-		t.Fatalf("after mark read: items %v, want %v", got, want[:1])
-	}
 }
 
 // restart is a new board on the same state file, as after sitboard restarts.
 func (e *testEnv) restart(t *testing.T) *Board {
 	t.Helper()
 	return newBoard(t, Options{Repos: e.repos, PRs: e.prs, State: e.state, Now: e.clock.Now, StaleAfter: 20 * time.Minute})
-}
-
-// A marker older than the window still stops at 7 days.
-func TestCatchupOldMarkerStopsAtTheWindow(t *testing.T) {
-	e := newEnv(t)
-	if err := e.state.SetCatchupMarker(tNow.Add(-30 * 24 * time.Hour)); err != nil {
-		t.Fatal(err)
-	}
-	s := session("s1", model.StatusFinished, tNow)
-	s.TurnEnds = []time.Time{tNow.Add(-8 * 24 * time.Hour), tNow.Add(-time.Hour)}
-	e.board.applySync(s)
-	if got := kindsAt(catchup(t, e.board)); !slices.Equal(got, []string{"turn_finished@11-17T09:00"}) {
-		t.Fatalf("items %v", got)
-	}
 }
 
 // An item carries the card id while the card is on the board, the agent's
@@ -282,7 +253,7 @@ func TestCatchupKeepsTheNewestItemsUnderTheCap(t *testing.T) {
 	if len(c.Items) != maxCatchupItems {
 		t.Fatalf("%d items, want %d", len(c.Items), maxCatchupItems)
 	}
-	if !c.Items[0].At.Equal(tNow.Add(-time.Minute)) || !c.Items[len(c.Items)-1].At.Equal(tNow.Add(-maxCatchupItems*time.Minute)) {
+	if !c.Items[0].At.Equal(tNow.Add(-time.Minute)) || !c.Items[len(c.Items)-1].At.Equal(tNow.Add(-time.Duration(maxCatchupItems)*time.Minute)) {
 		t.Fatalf("kept %v .. %v", c.Items[0].At, c.Items[len(c.Items)-1].At)
 	}
 }
@@ -304,16 +275,17 @@ func TestCatchupMatchesContractGoldenShape(t *testing.T) {
 	e := newEnv(t)
 	e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Remote: model.GitHubRepo(exRepo), Branch: model.Of("main")})
 	e.prs.prs = []model.PullRequest{prAt(1, model.PRStateMerged, tNow.Add(-time.Hour), tNow.Add(-time.Minute))}
-	if err := e.state.SetCatchupMarker(tNow.Add(-2 * time.Hour)); err != nil {
+	if err := e.state.SetCatchupRead(nil, tNow.Add(-2*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	s := session("s1", model.StatusFinished, tNow)
 	s.CreatedPRs = []model.PRRef{{Repo: model.GitHubRepo(exRepo), Number: 1}}
 	s.Artifacts = []model.ArtifactRef{{URL: "https://claude.ai/artifact/exampleArtifact0001", Title: "Placeholder", PublishedAt: tNow.Add(-time.Minute)}}
-	e.board.applySync(s)
-	e.board.tick()
+	b := e.restart(t) // when a list was last marked read is read at the start
+	b.applySync(s)
+	b.tick()
 
-	raw, err := json.Marshal(catchup(t, e.board))
+	raw, err := json.Marshal(catchup(t, b))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -376,44 +348,22 @@ func TestCatchupNamesTheProjectLikeTheBoard(t *testing.T) {
 	}
 }
 
-// The marker goes to the time the page sends, never past now and never back.
-func TestMarkCatchupReadClampsAndNeverMovesBack(t *testing.T) {
+// The page's "since" line follows the newest list marked read, never back.
+func TestCatchupSinceIsTheNewestListMarkedRead(t *testing.T) {
 	e := newEnv(t)
-	if err := e.board.MarkCatchupRead(tNow.Add(-time.Hour)); err != nil {
+	b := e.board
+	e.clock.Set(tNow.Add(time.Minute))
+	older := catchup(t, b)
+	e.clock.Set(tNow.Add(2 * time.Minute))
+	newer := catchup(t, b)
+	if err := b.MarkCatchupRead(newer.List); err != nil {
 		t.Fatal(err)
 	}
-	if m := e.state.CatchupMarker(); !m.Equal(tNow.Add(-time.Hour)) {
-		t.Fatalf("marker %v, want the time sent", m)
-	}
-	// A second tab with an older list.
-	if err := e.board.MarkCatchupRead(tNow.Add(-2 * time.Hour)); err != nil {
+	if err := b.MarkCatchupRead(older.List); err != nil { // a second tab
 		t.Fatal(err)
 	}
-	if m := e.state.CatchupMarker(); !m.Equal(tNow.Add(-time.Hour)) {
-		t.Fatalf("marker moved back to %v", m)
-	}
-	// A page clock ahead of the server's.
-	if err := e.board.MarkCatchupRead(tNow.Add(3 * time.Hour)); err != nil {
-		t.Fatal(err)
-	}
-	if m := e.state.CatchupMarker(); !m.Equal(tNow) {
-		t.Fatalf("marker %v, want clamped to now %v", m, tNow)
-	}
-}
-
-// An item newer than the marker a run started with stays unread, though it
-// happened before the start.
-func TestCatchupKeepsWhatCameAfterTheStartMarker(t *testing.T) {
-	e := newEnv(t)
-	if err := e.state.SetCatchupMarker(tNow.Add(-30 * time.Minute)); err != nil {
-		t.Fatal(err)
-	}
-	b := e.restart(t)
-	s := session("s1", model.StatusFinished, tNow)
-	s.TurnEnds = []time.Time{tNow.Add(-30 * time.Minute), tNow.Add(-5 * time.Minute)}
-	b.applySync(s)
-	if got := kindsAt(catchup(t, b)); !slices.Equal(got, []string{"turn_finished@11-17T09:55"}) {
-		t.Fatalf("items %v", got)
+	if m := catchup(t, b).Marker; !m.Equal(newer.AsOf) {
+		t.Fatalf("since %v, want the newest list marked read %v", m, newer.AsOf)
 	}
 }
 
@@ -421,10 +371,7 @@ func TestCatchupKeepsWhatCameAfterTheStartMarker(t *testing.T) {
 // before the start are still being read does not mark them read unseen.
 func TestCatchupBackfillAfterCaughtUpStaysUnread(t *testing.T) {
 	e := newEnv(t)
-	if err := e.state.SetCatchupMarker(tNow.Add(-10 * time.Hour)); err != nil {
-		t.Fatal(err)
-	}
-	b := e.restart(t)
+	b := e.board
 	b.SetSources([]source.Status{{Kind: source.KindClaude, State: source.StateOK}})
 	live := session("live", model.StatusFinished, tNow)
 	live.TurnEnds = []time.Time{tNow.Add(time.Second)}
@@ -434,7 +381,7 @@ func TestCatchupBackfillAfterCaughtUpStaysUnread(t *testing.T) {
 	if !shown.Pending {
 		t.Fatal("not pending while the backfill runs")
 	}
-	if err := b.MarkCatchupRead(shown.AsOf); err != nil {
+	if err := b.MarkCatchupRead(shown.List); err != nil {
 		t.Fatal(err)
 	}
 	// The backlog arrives: a session that ended three hours before the start.
@@ -454,13 +401,10 @@ func TestCatchupBackfillAfterCaughtUpStaysUnread(t *testing.T) {
 // list: its turns from before the start stay unread.
 func TestCatchupLiveTurnsReadLateStayUnread(t *testing.T) {
 	e := newEnv(t)
-	if err := e.state.SetCatchupMarker(tNow.Add(-10 * time.Hour)); err != nil {
-		t.Fatal(err)
-	}
-	b := e.restart(t)
+	b := e.board
 	e.clock.Set(tNow.Add(3 * time.Second))
 	shown := catchup(t, b) // nothing yet: the transcript is still being read
-	if err := b.MarkCatchupRead(shown.AsOf); err != nil {
+	if err := b.MarkCatchupRead(shown.List); err != nil {
 		t.Fatal(err)
 	}
 	s := session("s1", model.StatusBusy, tNow)
@@ -539,7 +483,7 @@ func TestCatchupShowsAMergeGitHubReportedLate(t *testing.T) {
 	e.clock.Set(tNow.Add(30 * time.Second))
 	e.board.applySync(coord)
 	shown := catchup(t, e.board)
-	if err := e.board.MarkCatchupRead(shown.AsOf); err != nil {
+	if err := e.board.MarkCatchupRead(shown.List); err != nil {
 		t.Fatal(err)
 	}
 	e.clock.Set(tNow.Add(githubEvery + time.Second))
@@ -568,7 +512,7 @@ func TestCatchupShowsWhatGitHubReportsAfterAnOutage(t *testing.T) {
 	if got := kindsAt(shown); !slices.Equal(got, []string{"turn_finished@11-17T10:04"}) {
 		t.Fatalf("during the outage: %v", got)
 	}
-	if err := e.board.MarkCatchupRead(shown.AsOf); err != nil {
+	if err := e.board.MarkCatchupRead(shown.List); err != nil {
 		t.Fatal(err)
 	}
 	// Back: pull request 4 was opened at +1m and merged at +2m, both before
@@ -598,7 +542,7 @@ func TestCatchupEqualTimesAtTheBoundary(t *testing.T) {
 	b := session("b", model.StatusFinished, tNow)
 	b.TurnEnds = []time.Time{tNow.Add(30 * time.Minute)}
 	e.board.applySync(b)
-	if err := e.board.MarkCatchupRead(first.AsOf); err != nil {
+	if err := e.board.MarkCatchupRead(first.List); err != nil {
 		t.Fatal(err)
 	}
 	second := catchup(t, e.board)
@@ -608,7 +552,7 @@ func TestCatchupEqualTimesAtTheBoundary(t *testing.T) {
 	if len(second.Items) != 1 || second.Items[0].AgentName != "worker-b" {
 		t.Fatalf("after marking the first list: %+v", second.Items)
 	}
-	if err := e.board.MarkCatchupRead(second.AsOf); err != nil {
+	if err := e.board.MarkCatchupRead(second.List); err != nil {
 		t.Fatal(err)
 	}
 	if n := len(catchup(t, e.board).Items); n != 0 {
@@ -621,11 +565,11 @@ func TestCatchupEqualTimesAtTheBoundary(t *testing.T) {
 func TestCatchupRestartDoesNotListReadItemsAgain(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	open := func(at time.Time) (*Board, *fakeClock) {
-		st, err := state.Open(path)
+		clock := &fakeClock{t: at}
+		st, err := state.OpenAt(path, clock.Now)
 		if err != nil {
 			t.Fatal(err)
 		}
-		clock := &fakeClock{t: at}
 		return newBoard(t, Options{Repos: &fakeRepos{repos: map[string]model.Repo{}}, PRs: &fakePRs{}, State: st, Now: clock.Now, StaleAfter: 20 * time.Minute}), clock
 	}
 	t.Setenv("HOME", testHome)
@@ -639,7 +583,7 @@ func TestCatchupRestartDoesNotListReadItemsAgain(t *testing.T) {
 	if len(shown.Items) != 2 {
 		t.Fatalf("first run: %v", kindsAt(shown))
 	}
-	if err := first.MarkCatchupRead(shown.AsOf); err != nil {
+	if err := first.MarkCatchupRead(shown.List); err != nil {
 		t.Fatal(err)
 	}
 	first.markClosed()
@@ -653,8 +597,9 @@ func TestCatchupRestartDoesNotListReadItemsAgain(t *testing.T) {
 	}
 }
 
-// A time later than any list made covers nothing more than the newest list.
-func TestMarkCatchupReadNeverCoversMoreThanTheNewestList(t *testing.T) {
+// A list marks only what it showed: what was learned after it stays unread,
+// and a list id this run never made marks nothing.
+func TestMarkCatchupReadCoversOnlyItsList(t *testing.T) {
 	e := newEnv(t)
 	e.clock.Set(tNow.Add(time.Hour))
 	s := session("s1", model.StatusFinished, tNow)
@@ -664,11 +609,13 @@ func TestMarkCatchupReadNeverCoversMoreThanTheNewestList(t *testing.T) {
 	s.TurnEnds = append(s.TurnEnds, tNow.Add(20*time.Minute))
 	e.clock.Set(tNow.Add(2 * time.Hour))
 	e.board.applySync(s)
-	if err := e.board.MarkCatchupRead(tNow.Add(2 * time.Hour)); err != nil {
-		t.Fatal(err)
+	for _, id := range []string{"", "nope", e.board.listRun + "-99"} {
+		if err := e.board.MarkCatchupRead(id); !errors.Is(err, ErrCatchupStale) {
+			t.Fatalf("list %q: %v, want stale", id, err)
+		}
 	}
-	if m := e.state.CatchupMarker(); !m.Equal(shown.AsOf) {
-		t.Fatalf("marker %v, want the newest list's %v", m, shown.AsOf)
+	if err := e.board.MarkCatchupRead(shown.List); err != nil {
+		t.Fatal(err)
 	}
 	if got := kindsAt(catchup(t, e.board)); !slices.Equal(got, []string{"turn_finished@11-17T10:20"}) {
 		t.Fatalf("items %v", got)
@@ -848,9 +795,9 @@ func TestEndedSessionsStopAskingWhatGitHubDidNotFind(t *testing.T) {
 }
 
 // A board whose state lives in memory says so in every list.
-func TestCatchupSaysTheMarkerIsNotSaved(t *testing.T) {
+func TestCatchupSaysWhatIsMarkedIsNotSaved(t *testing.T) {
 	clock := &fakeClock{t: tNow}
-	b := newBoard(t, Options{Repos: &fakeRepos{repos: map[string]model.Repo{}}, State: state.Memory(), StateInMemory: true, Now: clock.Now, StaleAfter: 20 * time.Minute})
+	b := newBoard(t, Options{Repos: &fakeRepos{repos: map[string]model.Repo{}}, State: state.MemoryAt(clock.Now), Now: clock.Now, StaleAfter: 20 * time.Minute})
 	if !catchup(t, b).Unsaved {
 		t.Fatal("unsaved not said")
 	}
@@ -871,7 +818,7 @@ func TestCatchupShowsARepublishedArtifactAtOnce(t *testing.T) {
 	if len(shown.Items) != 1 {
 		t.Fatalf("first: %v", kindsAt(shown))
 	}
-	if err := e.board.MarkCatchupRead(shown.AsOf); err != nil {
+	if err := e.board.MarkCatchupRead(shown.List); err != nil {
 		t.Fatal(err)
 	}
 	e.clock.Set(tNow.Add(time.Hour))
@@ -883,31 +830,34 @@ func TestCatchupShowsARepublishedArtifactAtOnce(t *testing.T) {
 	}
 }
 
-// A saved marker ahead of the clock at start (the clock was stepped back):
-// what the board learns before the clock passes it is still unread (review
-// of #80, B).
+// A marker an older build saved ahead of the clock (the clock was stepped
+// back, or that run's was fast) covers nothing: an item in that gap is
+// unread, and stays unread across a restart once the clock has passed the
+// old marker (review of #80, B; review of #152, round 4, finding 22).
 func TestCatchupClockBehindTheSavedMarker(t *testing.T) {
 	t.Setenv("HOME", testHome)
-	st, err := state.Open(filepath.Join(t.TempDir(), "state.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := st.SetCatchupMarker(tNow.Add(10 * time.Minute)); err != nil {
-		t.Fatal(err)
-	}
+	file := filepath.Join(t.TempDir(), "state.json")
 	clock := &fakeClock{t: tNow}
-	b := newBoard(t, Options{Repos: &fakeRepos{repos: map[string]model.Repo{}}, PRs: &fakePRs{}, State: st, Now: clock.Now, StaleAfter: 20 * time.Minute})
+	raw := fmt.Sprintf(`{"version":1,"seen":{},"catchupMarker":%q}`, tNow.Add(10*time.Minute).Format(time.RFC3339))
+	if err := os.WriteFile(file, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	s := session("s1", model.StatusFinished, tNow)
 	s.TurnEnds = []time.Time{tNow.Add(time.Minute)}
-	clock.Set(tNow.Add(2 * time.Minute))
-	b.applySync(s)
-	first := catchup(t, b)
-	if !first.AsOf.After(tNow.Add(10 * time.Minute)) {
-		t.Fatalf("as of %v, not past the saved marker", first.AsOf)
-	}
-	clock.Set(tNow.Add(20 * time.Minute))
-	if got := kindsAt(catchup(t, b)); !slices.Equal(got, []string{"turn_finished@11-17T10:01"}) {
-		t.Fatalf("once the clock passed the marker: %v, want the turn", got)
+	want := []string{"turn_finished@11-17T10:01"}
+	for _, at := range []time.Duration{2 * time.Minute, 20 * time.Minute} { // before and after the clock passes the old marker
+		clock.Set(tNow.Add(at))
+		st, err := state.OpenAt(file, clock.Now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b := newBoard(t, Options{Repos: &fakeRepos{repos: map[string]model.Repo{}}, PRs: &fakePRs{}, State: st, Now: clock.Now, StaleAfter: 20 * time.Minute})
+		b.applySync(s)
+		if got := kindsAt(catchup(t, b)); !slices.Equal(got, want) {
+			t.Fatalf("at +%v: %v, want the turn", at, got)
+		}
+		b.markClosed()
+		st.Close()
 	}
 }
 
@@ -976,13 +926,10 @@ func TestCatchupLeavesOutHeadlessRuns(t *testing.T) {
 // the turn is still unread in the next run, and read once marked.
 func TestCatchupUnreadSurvivesARestartMidBacklog(t *testing.T) {
 	e := newEnv(t)
-	if err := e.state.SetCatchupMarker(tNow.Add(-10 * time.Hour)); err != nil {
-		t.Fatal(err)
-	}
-	b := e.restart(t)
+	b := e.board
 	b.SetSources([]source.Status{{Kind: source.KindClaude, State: source.StateOK}})
 	e.clock.Set(tNow.Add(3 * time.Second))
-	if err := b.MarkCatchupRead(catchup(t, b).AsOf); err != nil {
+	if err := b.MarkCatchupRead(catchup(t, b).List); err != nil {
 		t.Fatal(err)
 	}
 	old := session("old", model.StatusFinished, tNow.Add(-3*time.Hour))
@@ -1001,11 +948,8 @@ func TestCatchupUnreadSurvivesARestartMidBacklog(t *testing.T) {
 	if k := kindsAt(shown); !slices.Equal(k, []string{"turn_finished@11-17T07:00"}) {
 		t.Fatalf("after the restart: %v", k)
 	}
-	if err := second.MarkCatchupRead(shown.AsOf); err != nil {
+	if err := second.MarkCatchupRead(shown.List); err != nil {
 		t.Fatal(err)
-	}
-	if n := len(e.state.CatchupUnread()); n != 0 {
-		t.Fatalf("%d still saved as unread after it was read", n)
 	}
 	second.markClosed()
 	third := e.restart(t)
@@ -1029,7 +973,7 @@ func TestCatchupLateMergeSurvivesARestart(t *testing.T) {
 	e.prs.prs = []model.PullRequest{prAt(9, model.PRStateMerged, tNow.Add(-3*time.Hour), tNow.Add(10*time.Second))}
 	e.prs.mu.Unlock()
 	e.clock.Set(tNow.Add(30 * time.Second))
-	if err := e.board.MarkCatchupRead(catchup(t, e.board).AsOf); err != nil {
+	if err := e.board.MarkCatchupRead(catchup(t, e.board).List); err != nil {
 		t.Fatal(err)
 	}
 	e.clock.Set(tNow.Add(githubEvery + time.Second))
@@ -1048,139 +992,83 @@ func TestCatchupLateMergeSurvivesARestart(t *testing.T) {
 	}
 }
 
-// Saved as unread, then a run that marks a list before that session is read
-// again (the backlog still being read) keeps it saved.
-func TestCatchupUnreadKeptUntilItIsLearnedAgain(t *testing.T) {
-	e := newEnv(t)
-	k := state.CatchupKey(fmt.Sprintf("turn|claude|old|%d", tNow.Add(-3*time.Hour).UnixNano()))
-	if err := e.state.SetCatchup(tNow.Add(time.Minute), map[string]time.Time{k: tNow.Add(-3 * time.Hour)}); err != nil {
-		t.Fatal(err)
-	}
-	e.clock.Set(tNow.Add(time.Hour))
-	b := e.restart(t)
-	if err := b.MarkCatchupRead(catchup(t, b).AsOf); err != nil {
-		t.Fatal(err)
-	}
-	b.markClosed()
-	third := e.restart(t)
-	old := session("old", model.StatusFinished, tNow.Add(-3*time.Hour))
-	old.TurnEnds = []time.Time{tNow.Add(-3 * time.Hour)}
-	third.applySync(old)
-	if n := len(catchup(t, third).Items); n != 1 {
-		t.Fatalf("%d items", n)
-	}
-}
-
-// Before any list of this run, the clock learns nothing: a mark then (a tab
-// left from the last run) cannot cover what no list showed.
-func TestCatchupNothingLearnedBeforeTheFirstList(t *testing.T) {
+// Before any list of this run, nothing can be marked: a tab left from the
+// last run names a list this run never made.
+func TestCatchupNothingMarkedBeforeTheFirstList(t *testing.T) {
 	e := newEnv(t)
 	s := session("s1", model.StatusFinished, tNow)
 	s.TurnEnds = []time.Time{tNow.Add(-time.Minute)}
 	e.board.applySync(s)
 	e.clock.Set(tNow.Add(10 * time.Second))
 	e.board.tick()
-	if err := e.board.MarkCatchupRead(tNow.Add(10 * time.Second)); err != nil {
-		t.Fatal(err)
+	if err := e.board.MarkCatchupRead(e.board.listRun + "-1"); !errors.Is(err, ErrCatchupStale) {
+		t.Fatalf("%v, want stale", err)
 	}
 	if n := len(catchup(t, e.board).Items); n != 1 {
 		t.Fatalf("%d items", n)
 	}
 }
 
-// What the clock learns comes after every list made and after the marker,
-// even when the clock reads the same as then: a list that did not hold it
-// never covers it.
-func TestCatchupClockLearnsAfterListsAndMarker(t *testing.T) {
-	turn := func(b *Board) {
-		s := session("s1", model.StatusFinished, tNow)
-		s.TurnEnds = []time.Time{tNow.Add(-time.Minute)}
-		b.applySync(s)
+// What is learned after a list, even at the same clock reading, is not
+// covered by it.
+func TestCatchupLearnedAfterAListIsNotCovered(t *testing.T) {
+	e := newEnv(t)
+	e.clock.Set(tNow.Add(10 * time.Second))
+	shown := catchup(t, e.board)
+	s := session("s1", model.StatusFinished, tNow)
+	s.TurnEnds = []time.Time{tNow.Add(-time.Minute)}
+	e.board.applySync(s)
+	e.board.tick() // same clock reading as the list
+	if err := e.board.MarkCatchupRead(shown.List); err != nil {
+		t.Fatal(err)
 	}
-	t.Run("after a list", func(t *testing.T) {
-		e := newEnv(t)
-		e.clock.Set(tNow.Add(10 * time.Second))
-		shown := catchup(t, e.board)
-		turn(e.board)
-		e.board.tick() // same clock reading as the list
-		if err := e.board.MarkCatchupRead(shown.AsOf); err != nil {
-			t.Fatal(err)
-		}
-		e.clock.Set(tNow.Add(11 * time.Second))
-		if n := len(catchup(t, e.board).Items); n != 1 {
-			t.Fatalf("%d items", n)
-		}
-	})
-	t.Run("after a mark", func(t *testing.T) {
-		e := newEnv(t)
-		e.clock.Set(tNow.Add(10 * time.Second))
-		if err := e.board.MarkCatchupRead(tNow.Add(10 * time.Second)); err != nil {
-			t.Fatal(err)
-		}
-		turn(e.board)
-		e.board.tick() // same clock reading as the mark
-		e.clock.Set(tNow.Add(11 * time.Second))
-		if n := len(catchup(t, e.board).Items); n != 1 {
-			t.Fatalf("%d items", n)
-		}
-	})
+	e.clock.Set(tNow.Add(11 * time.Second))
+	if n := len(catchup(t, e.board).Items); n != 1 {
+		t.Fatalf("%d items", n)
+	}
 }
 
-// catchupWrites counts the catch-up writes.
+// catchupWrites counts the acknowledgement writes and can refuse them.
 type catchupWrites struct {
 	state.Store
 	mu     sync.Mutex
 	writes int
+	fail   error
 }
 
-func (c *catchupWrites) SetCatchup(m time.Time, u map[string]time.Time) error {
+func (c *catchupWrites) SetCatchupRead(r map[string]time.Time, at time.Time) error {
 	c.mu.Lock()
 	c.writes++
+	fail := c.fail
 	c.mu.Unlock()
-	return c.Store.SetCatchup(m, u)
+	if fail != nil {
+		return fail
+	}
+	return c.Store.SetCatchupRead(r, at)
 }
 
-// What the clock learns is saved in one write per tick, not one per item,
-// and only when it holds something new.
-func TestCatchupUnreadIsOneWritePerTick(t *testing.T) {
+// Learning writes nothing; "Caught up" is one write, and marking the same
+// list again none.
+func TestCatchupWritesOnlyOnCaughtUp(t *testing.T) {
 	e := newEnv(t)
 	st := &catchupWrites{Store: e.state}
 	b := newBoard(t, Options{Repos: e.repos, PRs: e.prs, State: st, Now: e.clock.Now, StaleAfter: 20 * time.Minute})
-	e.clock.Set(tNow.Add(10 * time.Second))
-	if err := b.MarkCatchupRead(catchup(t, b).AsOf); err != nil {
-		t.Fatal(err)
-	}
 	s := session("s1", model.StatusFinished, tNow)
 	s.TurnEnds = []time.Time{tNow.Add(-3 * time.Minute), tNow.Add(-2 * time.Minute), tNow.Add(-time.Minute)}
 	b.applySync(s)
-	st.writes = 0
-	e.clock.Set(tNow.Add(20 * time.Second))
-	b.tick()
-	e.clock.Set(tNow.Add(30 * time.Second))
-	b.tick() // nothing new
-	if st.writes != 1 || len(e.state.CatchupUnread()) != 3 {
-		t.Fatalf("%d writes, %d saved", st.writes, len(e.state.CatchupUnread()))
-	}
-}
-
-// When sitboard stops, what arrived since the last tick is saved.
-func TestCatchupUnreadSavedAtStop(t *testing.T) {
-	e := newEnv(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() { _ = e.board.Run(ctx); close(done) }()
-	time.Sleep(100 * time.Millisecond) // past Run's first tick
 	e.clock.Set(tNow.Add(10 * time.Second))
-	if err := e.board.MarkCatchupRead(catchup(t, e.board).AsOf); err != nil {
-		t.Fatal(err)
+	shown := catchup(t, b)
+	b.tick()
+	if st.writes != 0 {
+		t.Fatalf("%d writes before Caught up", st.writes)
 	}
-	s := session("s1", model.StatusFinished, tNow)
-	s.TurnEnds = []time.Time{tNow.Add(-time.Minute)}
-	e.board.applySync(s)
-	cancel()
-	<-done
-	if n := len(e.state.CatchupUnread()); n != 1 {
-		t.Fatalf("%d saved", n)
+	for range 2 {
+		if err := b.MarkCatchupRead(shown.List); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if st.writes != 1 || len(e.state.CatchupRead()) != 3 {
+		t.Fatalf("%d writes, %d read", st.writes, len(e.state.CatchupRead()))
 	}
 }
 
@@ -1188,13 +1076,10 @@ func TestCatchupUnreadSavedAtStop(t *testing.T) {
 // The list shows it, and "Caught up" on that list clears it.
 func TestCatchupClockBackAfterTick(t *testing.T) {
 	e := newEnv(t)
-	if err := e.state.SetCatchupMarker(tNow.Add(-10 * time.Hour)); err != nil {
-		t.Fatal(err)
-	}
-	b := e.restart(t)
+	b := e.board
 	b.applySync(session("live1", model.StatusFinished, tNow))
 	e.clock.Set(tNow.Add(3 * time.Second))
-	if err := b.MarkCatchupRead(catchup(t, b).AsOf); err != nil {
+	if err := b.MarkCatchupRead(catchup(t, b).List); err != nil {
 		t.Fatal(err)
 	}
 	old := session("ended1", model.StatusFinished, tNow.Add(-3*time.Hour))
@@ -1202,13 +1087,13 @@ func TestCatchupClockBackAfterTick(t *testing.T) {
 	old.TurnEnds = []time.Time{tNow.Add(-3 * time.Hour)}
 	b.applySync(old)
 	e.clock.Set(tNow.Add(time.Hour))
-	b.learnTick()                           // learned at now+1h
+	b.tick()                                // learned at now+1h
 	e.clock.Set(tNow.Add(10 * time.Second)) // the clock steps back
 	shown := catchup(t, b)
 	if len(shown.Items) != 1 {
 		t.Fatalf("shown %v", kindsAt(shown))
 	}
-	if err := b.MarkCatchupRead(shown.AsOf); err != nil {
+	if err := b.MarkCatchupRead(shown.List); err != nil {
 		t.Fatal(err)
 	}
 	if after := catchup(t, b); len(after.Items) != 0 {
@@ -1216,20 +1101,69 @@ func TestCatchupClockBackAfterTick(t *testing.T) {
 	}
 }
 
-// A save the store refused (it is closed) is not taken as saved.
-func TestCatchupUnreadNotTakenAsSavedAfterClose(t *testing.T) {
+// "Caught up" marks read what the list held. With more items than the cap, an
+// older item the cap left out (here a Claude turn, behind a Codex session's
+// thousand newer ones) is not covered: it stays unread, through the marker
+// and a restart, until a list shows it.
+func TestCatchupCapLeavesTheOmittedItemsUnread(t *testing.T) {
 	e := newEnv(t)
-	e.clock.Set(tNow.Add(10 * time.Second))
-	if err := e.board.MarkCatchupRead(catchup(t, e.board).AsOf); err != nil {
+	old := session("old", model.StatusFinished, tNow.Add(-5*time.Hour))
+	old.TurnEnds = []time.Time{tNow.Add(-5 * time.Hour)}
+	old.Live, old.Ended, old.EndedAt, old.Backfill = model.Of(false), true, tNow.Add(-5*time.Hour), true
+	big := session("big", model.StatusFinished, tNow)
+	big.Key = model.SessionKey{Tool: model.ToolCodex, ID: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"}
+	for i := range maxCatchupItems {
+		big.TurnEnds = append(big.TurnEnds, tNow.Add(-time.Duration(i+1)*time.Second))
+	}
+	big.Live, big.Ended, big.EndedAt, big.Backfill = model.Of(false), true, tNow, true
+	e.board.applySync(old)
+	e.board.applySync(big)
+
+	first := catchup(t, e.board)
+	if len(first.Items) != maxCatchupItems || first.Total != maxCatchupItems+1 {
+		t.Fatalf("%d items, total %d", len(first.Items), first.Total)
+	}
+	if err := e.board.MarkCatchupRead(first.List); err != nil {
 		t.Fatal(err)
 	}
-	s := session("s1", model.StatusFinished, tNow)
-	s.TurnEnds = []time.Time{tNow.Add(-time.Minute)}
-	e.board.applySync(s)
-	e.state.Close()
-	e.clock.Set(tNow.Add(20 * time.Second))
-	e.board.learnTick()
-	if len(e.board.unreadSaved) != 0 {
-		t.Fatalf("taken as saved: %v", e.board.unreadSaved)
+	// Marked read: what it held is gone, and the item it left out is not.
+	wantOld := []string{"turn_finished@" + tNow.Add(-5*time.Hour).UTC().Format("01-02T15:04")}
+	if k := kindsAt(catchup(t, e.board)); !slices.Equal(k, wantOld) {
+		t.Fatalf("after marking read: %v, want %v", k, wantOld)
+	}
+	// Shown but not marked read: listed again.
+	if k := kindsAt(catchup(t, e.board)); !slices.Equal(k, wantOld) {
+		t.Fatalf("shown, not marked read, then listed again: %v, want %v", k, wantOld)
+	}
+	if n := len(e.state.CatchupRead()); n != maxCatchupItems {
+		t.Fatalf("%d saved as read: want the list's, and nothing else", n)
+	}
+	e.board.markClosed()
+	second := e.restart(t)
+	second.applySync(old)
+	second.applySync(big)
+	shown := catchup(t, second)
+	if k := kindsAt(shown); !slices.Equal(k, wantOld) {
+		t.Fatalf("after a restart: %v, want %v", k, wantOld)
+	}
+	if err := second.MarkCatchupRead(shown.List); err != nil {
+		t.Fatal(err)
+	}
+	if k := kindsAt(catchup(t, second)); len(k) != 0 {
+		t.Fatalf("shown and marked read, listed again: %v", k)
+	}
+}
+
+// A watcher whose read of the sessions ended before the start was cut by a
+// bound says so in its BackfillDone, and the list says items may be missing
+// (review of #152, round 4, finding 30).
+func TestCatchupSaysWhenTheStartupReadWasCut(t *testing.T) {
+	for _, cut := range []bool{false, true} {
+		e := newEnv(t)
+		e.board.applySync(model.BackfillDone{Kind: string(source.KindCodex), Cut: cut})
+		e.board.applySync(model.BackfillDone{Kind: string(source.KindClaude)})
+		if got := catchup(t, e.board); got.Partial != cut {
+			t.Errorf("cut %v: partial %v", cut, got.Partial)
+		}
 	}
 }

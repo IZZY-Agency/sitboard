@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	neturl "net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -21,9 +22,10 @@ const (
 	branchFirst = 50 // newest merge requests over all the branches asked for
 )
 
-// mrFields are the fields read for each merge request. The address is not
-// asked for: it is built from the host, the path and the number.
-const mrFields = `iid title sourceBranch sourceProjectId projectId state draft createdAt closedAt mergedAt headPipeline{status}`
+// mrFields are the fields read for each merge request. The address is built
+// from the host, the path and the number; webUrl is read only to confirm a
+// web port (toMR), never shown.
+const mrFields = `iid title sourceBranch sourceProjectId projectId state draft createdAt closedAt mergedAt webUrl headPipeline{status}`
 
 // approvalFields are asked only of an instance that has them: Community
 // Edition has no approvalsLeft or approvalsRequired and refuses the whole
@@ -82,6 +84,7 @@ type glMR struct {
 	CreatedAt         string  `json:"createdAt"`
 	ClosedAt          *string `json:"closedAt"`
 	MergedAt          *string `json:"mergedAt"`
+	WebURL            *string `json:"webUrl"`
 	Approved          *bool   `json:"approved"`
 	ApprovalsLeft     *int    `json:"approvalsLeft"`
 	ApprovalsRequired *int    `json:"approvalsRequired"`
@@ -154,6 +157,10 @@ type shape struct {
 type parsed struct {
 	mrs        []found
 	branchFull bool // the branch list came back full: older ones may be missing
+	// wrong: numbers GitLab placed at another address than the one asked;
+	// unverified: numbers on a site with a web port that GitLab gave no
+	// address for (see toMR). Neither is in mrs.
+	wrong, unverified []int
 }
 
 var errIncomplete = errors.New("gitlab: GitLab answered only part of the lookup")
@@ -169,7 +176,7 @@ var errIncomplete = errors.New("gitlab: GitLab answered only part of the lookup"
 // a list that was asked for and is missing, makes the whole answer
 // errIncomplete: a merge request left out would read as one that does not
 // exist.
-func parseAnswer(out []byte, host, path string, q shape) (parsed, error) {
+func parseAnswer(out []byte, w where, q shape) (parsed, error) {
 	var a answer
 	if err := json.Unmarshal(out, &a); err != nil || a.Data == nil {
 		return parsed{}, errors.New("gitlab: unexpected answer from glab")
@@ -231,8 +238,18 @@ func parseAnswer(out []byte, host, path string, q shape) (parsed, error) {
 		if conn == "b" && fork {
 			return
 		}
-		mr, ok := toMR(g, host, path, q.approvals)
-		if !ok || seen[mr.IID] {
+		mr, v := toMR(g, w, q.approvals)
+		switch v {
+		case wrongSite:
+			if !slices.Contains(res.wrong, mr.IID) {
+				res.wrong = append(res.wrong, mr.IID)
+			}
+		case unverified:
+			if !slices.Contains(res.unverified, mr.IID) {
+				res.unverified = append(res.unverified, mr.IID)
+			}
+		}
+		if v != shown || seen[mr.IID] {
 			return
 		}
 		mr.FromFork = fork
@@ -260,17 +277,53 @@ func parseAnswer(out []byte, host, path string, q shape) (parsed, error) {
 	return res, nil
 }
 
-func toMR(g *glMR, host, path string, approvals bool) (MergeRequest, bool) {
+// where names a project two ways: as glab is asked (host name, project
+// path without the subfolder) and as its addresses carry it (site: the host
+// with its web port, if any; web: the path with the subfolder in front).
+type where struct {
+	host, path string
+	site, web  string
+}
+
+// verdict is what toMR made of one merge request.
+type verdict int
+
+const (
+	shown      verdict = iota // kept
+	notShown                  // not a merge request this lookup can show (a number, a state)
+	wrongSite                 // GitLab's webUrl is another address than the one built: not this site's
+	unverified                // the site has a web port and GitLab gave no webUrl to confirm it
+)
+
+// toMR reads one merge request. GitLab's own webUrl, when it came, must be
+// exactly the address built for the site, path and number (an explicit
+// :443 on https is the same address): a portless reference that glab
+// routed to an instance on another port, or a changed port, is wrongSite and
+// never shown. On a site with a web port, which came from a session's
+// output or a remote and not from glab, a missing webUrl is unverified.
+func toMR(g *glMR, w where, approvals bool) (MergeRequest, verdict) {
 	iid, err := strconv.Atoi(g.IID)
 	if err != nil || iid <= 0 {
-		return MergeRequest{}, false
+		return MergeRequest{}, notShown
 	}
 	state, ok := mapState(g.State)
 	if !ok {
-		return MergeRequest{}, false
+		return MergeRequest{}, notShown
+	}
+	url := MergeRequestURL(w.site, w.web, iid)
+	if url == "" {
+		return MergeRequest{}, notShown
+	}
+	switch {
+	case g.WebURL != nil:
+		if !sameAddress(*g.WebURL, url) {
+			return MergeRequest{IID: iid}, wrongSite
+		}
+	case w.site != w.host:
+		return MergeRequest{IID: iid}, unverified
 	}
 	mr := MergeRequest{
-		Host: host, Path: path, IID: iid, Title: g.Title, URL: MergeRequestURL(host, path, iid),
+		Host: w.site, Path: w.web, IID: iid, Title: g.Title, URL: url,
 		SourceBranch: g.SourceBranch, State: state, Draft: g.Draft, OpenedAt: parseTime(g.CreatedAt),
 		Checks:   mapPipeline(pipelineStatus(g), g.HeadPipeline != nil),
 		Approval: ApprovalUnknown,
@@ -284,7 +337,22 @@ func toMR(g *glMR, host, path string, approvals bool) (MergeRequest, bool) {
 	if mr.ClosedAt.IsZero() && state != model.PRStateOpen && g.ClosedAt != nil {
 		mr.ClosedAt = parseTime(*g.ClosedAt)
 	}
-	return mr, true
+	return mr, shown
+}
+
+// sameAddress says whether GitLab's webUrl is the address built, once an
+// explicit :443 is dropped (GitLab never writes it, and sitboard never keeps
+// it). The text must be the built one whole: another scheme, a user, a query
+// or a fragment make it another address.
+func sameAddress(web, built string) bool {
+	u, err := neturl.Parse(web)
+	if err != nil {
+		return false
+	}
+	if u.Port() == "443" {
+		u.Host = u.Hostname()
+	}
+	return u.String() == built
 }
 
 func pipelineStatus(g *glMR) string {

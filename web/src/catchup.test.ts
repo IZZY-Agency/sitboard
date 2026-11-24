@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { flushSync } from 'svelte';
 import App from './App.svelte';
 import { card, project, snapshot } from './test/fixtures';
@@ -10,8 +10,16 @@ let r: ReturnType<typeof render> | null = null;
 afterEach(() => {
   r?.destroy();
   r = null;
+  vi.useRealTimers();
 });
-beforeEach(() => localStorage.clear());
+// The fixtures are dated 17 Nov 2026; the clock stands just after the board's
+// "as of" time, so "since" and the 7-day window never depend on the real day.
+// Only Date is faked: timers and animation frames stay real for settle().
+const FIXED_NOW = Date.parse('2026-11-17T10:05:00Z');
+beforeEach(() => {
+  localStorage.clear();
+  vi.useFakeTimers({ toFake: ['Date'], now: FIXED_NOW });
+});
 
 const P = 'p_000000000001';
 const onBoardCard = card({ id: 'claude:lead', agent: { name: 'harbor-lead' } });
@@ -46,7 +54,7 @@ const merged = (at: string, n: number): CatchupItem => ({
   },
 });
 
-type Partial = Omit<Catchup, 'asOf' | 'total'> & { asOf?: string; total?: number };
+type Partial = Omit<Catchup, 'asOf' | 'total' | 'list'> & { asOf?: string; total?: number; list?: string };
 const AS_OF = '2026-11-17T10:00:00Z';
 
 function client(loads: Array<CatchupLoad | Partial>, reads: ReadResult[] = []) {
@@ -55,10 +63,10 @@ function client(loads: Array<CatchupLoad | Partial>, reads: ReadResult[] = []) {
     async load() {
       calls.push('load');
       const next = loads.length > 1 ? loads.shift()! : loads[0];
-      return 'ok' in next ? next : { ok: true, catchup: { asOf: AS_OF, total: next.items.length, ...next } };
+      return 'ok' in next ? next : { ok: true, catchup: { list: 'r-1', asOf: AS_OF, total: next.items.length, ...next } };
     },
-    async markRead(upTo) {
-      calls.push(`read ${upTo}`);
+    async markRead(list) {
+      calls.push(`read ${list}`);
       return reads.shift() ?? { ok: true };
     },
   };
@@ -208,10 +216,59 @@ describe('catch-up panel', () => {
     const done = [...panel()!.querySelectorAll<HTMLButtonElement>('button')].find((b) => text(b) === 'Caught up')!;
     done.click();
     await settle();
-    expect(c.calls).toEqual(['load', 'load', `read ${AS_OF}`, 'load']);
+    expect(c.calls).toEqual(['load', 'load', 'read r-1', 'load']);
     expect(text(panel()!.querySelector('.empty'))).toMatch(/^Nothing new since (\w+ )*\d\d:\d\d\.$/);
     expect(text(panel()!.querySelector('[role="status"]'))).toMatch(/Marked read/);
     expect(done.disabled).toBe(true);
+  });
+
+  it('a list that is not current marks nothing: it says so, never "Marked read", and shows the list again', async () => {
+    const two = { items: [turn('2026-11-17T09:50:00Z', 'a'), turn('2026-11-17T09:20:00Z', 'b')] };
+    const three = { list: 'r-2', items: [turn('2026-11-17T09:55:00Z', 'c'), ...two.items] };
+    const c = app([two, two, three], [{ ok: false, kind: 'stale' }]);
+    await settle();
+    await open();
+    const done = [...panel()!.querySelectorAll<HTMLButtonElement>('button')].find((b) => text(b) === 'Caught up')!;
+    done.click();
+    await settle();
+    expect(c.calls).toEqual(['load', 'load', 'read r-1', 'load']);
+    expect(text(panel()!.querySelector('[role="alert"]'))).toMatch(/^Could not mark it read: the list changed since this tab loaded it .*; this is the list as it is now\. Nothing was lost\.$/);
+    expect(text(panel()!.querySelector('[role="status"]'))).not.toMatch(/Marked read/);
+    expect(panel()!.querySelectorAll('li')).toHaveLength(3); // the fresh list: a new agent's turn, then the two
+    expect(done.disabled).toBe(false);
+    done.click();
+    await settle();
+    expect(c.calls.at(-2)).toBe('read r-2');
+  });
+
+  it('a list that is not current and a reload that fails: the button waits for a list that can be marked', async () => {
+    const two = { items: [turn('2026-11-17T09:50:00Z', 'a'), turn('2026-11-17T09:20:00Z', 'b')] };
+    const down: CatchupLoad = { ok: false, kind: 'failed', message: 'sitboard did not answer' };
+    const c = app([two, two, down], [{ ok: false, kind: 'stale' }]);
+    await settle();
+    await open();
+    const done = [...panel()!.querySelectorAll<HTMLButtonElement>('button')].find((b) => text(b) === 'Caught up')!;
+    done.click();
+    await settle();
+    const alerts = [...panel()!.querySelectorAll('[role="alert"]')].map(text);
+    expect(alerts[0]).toMatch(/^Could not mark it read: the list changed since this tab loaded it \([^)]*\)\. Nothing was lost\.$/);
+    expect(alerts[1]).toMatch(/^Could not load it again: sitboard did not answer\. This is the list as it was\./);
+    expect(done.disabled).toBe(true);
+    expect(c.calls.filter((x) => x.startsWith('read'))).toEqual(['read r-1']);
+  });
+
+  it('at the cap nothing is marked: it says why and keeps the list', async () => {
+    const two = { items: [turn('2026-11-17T09:50:00Z', 'a'), turn('2026-11-17T09:20:00Z', 'b')] };
+    const c = app([two], [{ ok: false, kind: 'full' }]);
+    await settle();
+    await open();
+    const done = [...panel()!.querySelectorAll<HTMLButtonElement>('button')].find((b) => text(b) === 'Caught up')!;
+    done.click();
+    await settle();
+    expect(c.calls.slice(-2)).toEqual(['read r-1', 'load']);
+    expect(text(panel()!.querySelector('[role="alert"]'))).toMatch(/^Could not mark it read: marking this list read would keep more than 20,000 items .* Nothing was lost\.$/);
+    expect(text(panel()!.querySelector('[role="status"]'))).not.toMatch(/Marked read/);
+    expect(done.disabled).toBe(false);
   });
 
   it('says when there is nothing new, and offers nothing to mark', async () => {
@@ -304,7 +361,7 @@ describe('catch-up panel', () => {
     app([{ unsaved: true, items: [turn('2026-11-17T09:00:00Z', 'a')] }]);
     await settle();
     await open();
-    expect(text(panel()!.querySelector('.note'))).toBe('Nothing here is saved: sitboard runs with --no-state, so after every start this lists the last 7 days again.');
+    expect(text(panel()!.querySelector('.note'))).toBe('Nothing here is saved: sitboard runs with --no-state, or could not write its state file when it started, so what you mark read lasts until it stops.');
   });
 
   it('says so while earlier sessions are still being read', async () => {
@@ -316,6 +373,15 @@ describe('catch-up panel', () => {
     expect(notes()).toEqual(['Still reading the sessions that ended before sitboard started: more may appear here.']);
     const done = [...panel()!.querySelectorAll<HTMLButtonElement>('button')].find((b) => text(b) === 'Caught up')!;
     expect(done.disabled).toBe(false); // never blocked
+  });
+
+  it('says so when the read of earlier sessions was cut short', async () => {
+    const partial = { partial: true, items: [turn('2026-11-17T09:00:00Z', 'a')] };
+    app([partial, partial]);
+    await settle();
+    await open();
+    const notes = () => [...panel()!.querySelectorAll('.note')].map(text);
+    expect(notes()).toEqual(['Some sessions that ended before sitboard started were too large or too slow to read in full: items from them may be missing here.']);
   });
 
   it('with a state file it says nothing about saving', async () => {
@@ -471,7 +537,7 @@ describe('merge requests of a host the snapshot no longer lists', () => {
       load: () => new Promise<CatchupLoad>((res) => out.push(res)),
       markRead: async () => ({ ok: true }),
     };
-    const ok = (): CatchupLoad => ({ ok: true, catchup: { asOf: AS_OF, total: 2, items: items() } });
+    const ok = (): CatchupLoad => ({ ok: true, catchup: { list: 'r-1', asOf: AS_OF, total: 2, items: items() } });
     const f = feedOf(withHosts([HOST]));
     r = render(App, { feed: f.feed, actions: recordActions().actions, catchup: c });
     await settle();
@@ -497,6 +563,30 @@ describe('merge requests of a host the snapshot no longer lists', () => {
     out[out.length - 1](ok());
     await settle();
     expect(body()).toContain('Placeholder merge request 7');
+  });
+
+  it('keeps a merge request of a host mounted under a subfolder, and only under that subfolder', async () => {
+    const mounted = (n: number, repo: string): CatchupItem => {
+      const it = mr('2026-11-17T09:30:00Z', n);
+      return { ...it, pullRequest: { ...it.pullRequest!, repo, url: `https://${HOST}/${repo}/-/merge_requests/${n}` } };
+    };
+    const f = feedOf(withHosts([`${HOST}/gitlab`]));
+    const c = client([{ items: [mounted(7, 'gitlab/example-org/example-repo'), mounted(8, 'example-org/example-repo'), merged('2026-11-17T09:00:00Z', 9)] }]);
+    r = render(App, { feed: f.feed, actions: recordActions().actions, catchup: c.client });
+    await settle();
+    await open();
+    expect(panel()!.querySelector(`a[href="https://${HOST}/gitlab/example-org/example-repo/-/merge_requests/7"]`)).not.toBeNull();
+    // The same host with a path outside the mount is not shown at all.
+    expect(panel()!.querySelector('a[href*="/-/merge_requests/8"]')).toBeNull();
+    expect(body()).not.toContain('Placeholder merge request 8');
+    expect(body()).toContain('Placeholder merge request 7');
+    expect(body()).toContain('Getting started page');
+
+    // The mount moves: the rows of the old one leave at once, before the list is asked for again.
+    f.push(withHosts([`${HOST}/apps`]));
+    await settle();
+    expect(body()).not.toContain('Placeholder merge request 7');
+    expect(body()).toContain('Getting started page');
   });
 
   it('shows no merge request of a host that was never listed', async () => {

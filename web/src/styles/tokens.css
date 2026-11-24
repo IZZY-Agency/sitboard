@@ -25,6 +25,11 @@
   /* States: a word always goes with the colour */
   --state-needs: #f5c542;
   --state-working: #8fc79a;
+  /* The header's Live chip while connected: the working green, on a soft
+     ground and edge made the way the amber ones are. The text reads at 9:1
+     on its ground over the page. */
+  --working-soft: rgb(143 199 154 / 8%);
+  --working-edge: rgb(143 199 154 / 40%);
   --state-coordinator: #98aabe;
   --state-review: #8fb8f2;
   --state-done: #b0a6ee;

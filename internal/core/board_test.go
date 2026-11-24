@@ -44,6 +44,11 @@ func keysOf(v any, path string, out map[string]bool) {
 
 func TestSnapshotMatchesContractGoldenShape(t *testing.T) {
 	e := newEnv(t)
+	gh := &fakeIssues{by: map[model.ForgeRepo]model.RepoIssues{model.GitHubRepo(exRepo): sampleIssues(model.GitHubRepo(exRepo), 12, 48)}}
+	e.board = newBoard(t, Options{
+		Repos: e.repos, PRs: e.prs, State: e.state, Now: e.clock.Now, StaleAfter: 20 * time.Minute,
+		Issues: map[model.Forge]source.IssueLister{model.ForgeGitHub: gh},
+	})
 	e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Remote: model.GitHubRepo(exRepo), Branch: model.Of("main")})
 	e.prs.prs = []model.PullRequest{{Repo: model.GitHubRepo(exRepo), Number: 101, Title: "t", URL: "https://github.com/example-org/example-repo/pull/101", State: model.PRStateOpen, Checks: model.ChecksFailing, ClosingIssues: []int{7}}}
 	s := session("s1", model.StatusFinished, tNow)

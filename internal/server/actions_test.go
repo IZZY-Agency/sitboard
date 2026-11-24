@@ -1,13 +1,15 @@
 package server
 
 import (
+	"errors"
+	"fmt"
 	"io/fs"
 	"net/http"
 	"os"
 	"strings"
 	"testing"
-	"time"
 
+	"github.com/IZZY-Agency/sitboard/internal/app"
 	"github.com/IZZY-Agency/sitboard/internal/contract"
 	"github.com/IZZY-Agency/sitboard/internal/source"
 )
@@ -93,22 +95,43 @@ func TestSeenAndCatchupReadCallBoard(t *testing.T) {
 	wantStatus(t, h.do(req(http.MethodPost, contract.PathSeen, cardBody(cardA))), http.StatusNoContent)
 	wantStatus(t, h.do(req(http.MethodPost, contract.PathSeen, cardBody("claude:nope"))), http.StatusNotFound)
 	wantStatus(t, h.do(req(http.MethodPost, contract.PathSeen, `{}`)), http.StatusBadRequest)
-	wantStatus(t, h.do(req(http.MethodPost, contract.PathCatchupRead, `{"upTo":"2026-11-17T09:55:00Z","path":"/etc"}`)), http.StatusNoContent)
+	wantStatus(t, h.do(req(http.MethodPost, contract.PathCatchupRead, `{"list":"run-3","path":"/etc"}`)), http.StatusNoContent)
 	if len(h.board.seen) != 1 || h.board.catchup != 1 {
 		t.Fatalf("seen %v catchup %d", h.board.seen, h.board.catchup)
 	}
-	if want := time.Date(2026, 11, 17, 9, 55, 0, 0, time.UTC); !h.board.upTo.Equal(want) {
-		t.Fatalf("upTo %v, want %v", h.board.upTo, want)
+	if h.board.list != "run-3" {
+		t.Fatalf("list %q, want run-3", h.board.list)
 	}
 }
 
-// Marking catch-up read needs the time of the newest item the page showed.
-func TestCatchupReadNeedsATime(t *testing.T) {
+// Marking catch-up read answers what the board said: a stale list is 409 and
+// a full file 507, so the page can say which and load the list again; any
+// other failure is 500.
+func TestCatchupReadStatuses(t *testing.T) {
+	for _, c := range []struct {
+		err  error
+		want int
+	}{
+		{nil, http.StatusNoContent},
+		{app.ErrCatchupStale, http.StatusConflict},
+		{fmt.Errorf("wrapped: %w", app.ErrCatchupStale), http.StatusConflict},
+		{app.ErrCatchupFull, http.StatusInsufficientStorage},
+		{errors.New("disk full"), http.StatusInternalServerError},
+	} {
+		h := newHarness()
+		h.board.markErr = c.err
+		wantStatus(t, h.do(req(http.MethodPost, contract.PathCatchupRead, `{"list":"run-1"}`)), c.want)
+	}
+}
+
+// Marking catch-up read needs a JSON object; a body without a list (a page
+// from before list ids) reaches the board, which finds no such list (409).
+func TestCatchupReadNeedsJSON(t *testing.T) {
 	h := newHarness()
-	for _, body := range []string{"", "{}", `{"upTo":""}`, `{"upTo":"yesterday"}`, `{"upTo":"0001-01-01T00:00:00Z"}`, `[1]`} {
+	for _, body := range []string{"", `[1]`, `{"list":3}`} {
 		wantStatus(t, h.do(req(http.MethodPost, contract.PathCatchupRead, body)), http.StatusBadRequest)
 	}
-	r := req(http.MethodPost, contract.PathCatchupRead, `{"upTo":"2026-11-17T09:55:00Z"}`)
+	r := req(http.MethodPost, contract.PathCatchupRead, `{"list":"run-1"}`)
 	r.Header.Set("Content-Type", "text/plain")
 	wantStatus(t, h.do(r), http.StatusUnsupportedMediaType)
 	if h.board.catchup != 0 {

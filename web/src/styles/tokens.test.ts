@@ -114,6 +114,29 @@ describe('tokens', () => {
     }
   });
 
+  it('the amber and the working green each have a soft ground and an edge of their own hue, and the hue reads on its soft ground', () => {
+    const css = readFileSync(join(SRC, 'styles/tokens.css'), 'utf8');
+    const token = (k: string) => css.match(new RegExp(`${k}:\\s*(#[0-9a-f]{6});`))?.[1] ?? '';
+    const over = (hue: string, a: number, ground: string) =>
+      '#' + rgb(hue).map((c, i) => Math.round(a * c + (1 - a) * rgb(ground)[i]).toString(16).padStart(2, '0')).join('');
+    for (const [hue, name] of [
+      ['--amber', '--amber'],
+      ['--state-working', '--working'],
+    ]) {
+      const want = rgb(token(hue)).join(' ');
+      const strength = (k: string) => {
+        const m = css.match(new RegExp(`${name}-${k}:\\s*rgb\\(([0-9 ]+) / (\\d+)%\\);`));
+        expect(m?.[1], `${name}-${k}`).toBe(want);
+        return Number(m?.[2]) / 100;
+      };
+      expect(strength('soft'), name).toBe(0.08);
+      expect(strength('edge'), name).toBe(0.4);
+      for (const g of ['--bg', '--surface']) {
+        expect(contrast(token(hue), over(token(hue), 0.08, token(g))), `${hue} on ${name}-soft on ${g}`).toBeGreaterThanOrEqual(4.5);
+      }
+    }
+  });
+
   it('each model family has a hue and a half-strength line, apart from every text and state colour and readable on the page and a card', () => {
     const css = readFileSync(join(SRC, 'styles/tokens.css'), 'utf8');
     const token = (k: string) => css.match(new RegExp(`${k}:\\s*(#[0-9a-f]{6});`))?.[1] ?? '';

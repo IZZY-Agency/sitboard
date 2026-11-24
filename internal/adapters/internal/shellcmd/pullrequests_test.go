@@ -222,3 +222,23 @@ func TestRunsOtherGH(t *testing.T) {
 		}
 	}
 }
+
+// The address pattern lets a repository named "." or ".." through, but no
+// GitHub repository has that name (model.ForgeRepo.Valid): such an address is
+// never taken, by any reading, and is no first address either. Found while
+// writing FuzzPullRequests' rule that every ref is valid.
+func TestPullRequestsRefuseDotNames(t *testing.T) {
+	want := []model.PRRef{{Repo: model.GitHubRepo("example-org/example-repo"), Number: 4}}
+	for _, bad := range []string{"https://github.com/example-org/./pull/3", "https://github.com/example-org/../pull/3"} {
+		out := bad + "\nhttps://github.com/example-org/example-repo/pull/4\n"
+		if got := PullRequests(out); !slices.Equal(got, want) {
+			t.Errorf("PullRequests(%q) = %v, want %v", out, got, want)
+		}
+		if got := OwnPullRequests(out, true); !slices.Equal(got, want) {
+			t.Errorf("OwnPullRequests(%q, first) = %v, want %v", out, got, want)
+		}
+		if got := OwnPullRequests("Creating pull request for f into main\n"+bad+"\n", false); got != nil {
+			t.Errorf("an announced %q was taken: %v", bad, got)
+		}
+	}
+}

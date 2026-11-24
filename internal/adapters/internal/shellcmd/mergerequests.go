@@ -145,7 +145,7 @@ func isCreateOption(v string) bool {
 // as `glab mr create` prints it without a terminal, or after git's "remote:"
 // prefix as GitLab prints it on a push. The "/-/merge_requests/new?…" address
 // of "To create a merge request" never matches: the number must end the line.
-var mrLineRe = regexp.MustCompile(`^(remote:)?[ \t]*https://([a-z0-9.-]{1,253})/([A-Za-z0-9_][A-Za-z0-9_./-]*)/-/merge_requests/([0-9]{1,10})$`)
+var mrLineRe = regexp.MustCompile(`^(remote:)?[ \t]*https://([a-z0-9.-]{1,253}(?::[0-9]{1,5})?)/([A-Za-z0-9_][A-Za-z0-9_./-]*)/-/merge_requests/([0-9]{1,10})$`)
 
 // mrPushAnnounceRe is GitLab's own line before the address on a push, "remote:
 // View merge request for <branch>:" (it is the same whether the push created
@@ -206,7 +206,10 @@ const maxMRNumber = math.MaxInt32
 // A plain push followed by a `glab mr create` that fails therefore does not
 // credit the session with the existing merge request the push named.
 //
-// The host rule: the host must pass model.ValidGitLabHost and must not be
+// An explicit :443 is dropped from the host: https's own port is the same address without it.
+//
+// The host rule: the host (with its web port, if any) must pass
+// model.ValidGitLabSite and its name must not be
 // github.com, so a github.com address never becomes a GitLab ref. The
 // matcher does not know the session's remotes; the core asks only for hosts
 // glab is logged in to.
@@ -243,11 +246,13 @@ func MergeRequests(text string, k MRCreation) []MergeRequest {
 		case !remote && !k.Glab:
 			continue
 		}
+		// https's own port written out is no port (as for a clone's origin).
+		site := strings.TrimSuffix(m[2], ":443")
 		n, err := strconv.Atoi(m[4])
-		if err != nil || n < 1 || n > maxMRNumber || m[2] == model.GitHubHost || !model.ValidGitLabHost(m[2]) || !model.ValidGitLabPath(m[3]) {
+		if err != nil || n < 1 || n > maxMRNumber || model.GitLabHostname(site) == model.GitHubHost || !model.ValidGitLabSite(site) || !model.ValidGitLabPath(m[3]) {
 			continue
 		}
-		r := MergeRequest{Ref: model.PRRef{Repo: model.GitLabRepo(m[2], m[3]), Number: n}, Pushed: remote}
+		r := MergeRequest{Ref: model.PRRef{Repo: model.GitLabRepo(site, m[3]), Number: n}, Pushed: remote}
 		if !remote && k.Mixed && !ga {
 			if firstBare == nil {
 				firstBare = &r

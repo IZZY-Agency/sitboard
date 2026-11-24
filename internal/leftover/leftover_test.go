@@ -33,6 +33,8 @@ type lab struct {
 	bases map[string]bool
 	// checkouts: other repos' checkouts the board knows
 	checkouts []string
+	// checkoutsUnknown: some repo's checkouts could not all be listed
+	checkoutsUnknown bool
 }
 
 // labEnv is the environment of every process the lab starts: the caller's,
@@ -173,7 +175,7 @@ func (l *lab) scanProcs(procs []model.Proc, sitters []Sitter) (map[string]Item, 
 		l.t.Fatal(err)
 	}
 	items, held := Scan(context.Background(), git, Repo{Root: l.repo, PRs: l.prs, Incomplete: l.incomplete, Bases: l.bases,
-		Procs: procs, ProcsKnown: true, Sessions: sitters, LiveDirs: l.live, Checkouts: l.checkouts}, inv)
+		Procs: procs, ProcsKnown: true, Sessions: sitters, LiveDirs: l.live, Checkouts: l.checkouts, CheckoutsUnknown: l.checkoutsUnknown}, inv)
 	im, hm := map[string]Item{}, map[string]Held{}
 	for _, it := range items {
 		key := it.Branch
@@ -860,6 +862,31 @@ func TestWorktreeHoldingAnotherCheckoutIsHeld(t *testing.T) {
 	}
 	if it := items["plain"]; it.Worktree != l.wt("plain") {
 		t.Errorf("plain: %+v", it)
+	}
+}
+
+// While some repo's checkouts could not all be listed, a worktree with
+// ignored files may hide one in them: it is held back. One without ignored
+// files would show such a checkout as untracked: it is listed.
+func TestUnlistedCheckoutsHoldWorktreesWithIgnoredFiles(t *testing.T) {
+	l := newLab(t)
+	for _, b := range []string{"ignored", "plain"} {
+		l.branch(b)
+		l.pr(b, "squash")
+	}
+	l.write(l.repo, ".git/info/exclude", "vendor/\n")
+	l.write(l.wt("ignored"), "vendor/lib.txt", "x\n")
+	l.checkoutsUnknown = true
+	items, held := l.scan(nil, nil)
+	if _, ok := items["ignored"]; ok || held["ignored"].Reason != ReasonUnknown {
+		t.Errorf("ignored: listed %+v, held %+v", items["ignored"], held["ignored"])
+	}
+	if it := items["plain"]; it.Worktree != l.wt("plain") {
+		t.Errorf("plain: %+v", it)
+	}
+	l.checkoutsUnknown = false
+	if items, _ := l.scan(nil, nil); items["ignored"].Worktree != l.wt("ignored") {
+		t.Errorf("all listed: ignored %+v", items["ignored"])
 	}
 }
 

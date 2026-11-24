@@ -5,7 +5,7 @@
   import type { Actions } from './data/actions';
   import type { Feed } from './data/client';
   import { indexOf, sourcesReady } from './data/derive';
-  import { ALL, countsOf, filterCards, grouping as groupingOf, sameSel, selName, validSel, type Sel } from './data/groups';
+  import { ALL, countsOf, filterCards, grouping as groupingOf, projectsOf, sameSel, selName, validSel, type Sel } from './data/groups';
   import { clock } from './data/time';
   import { BoardState } from './data/store.svelte';
   import { iconVersion, showSignal, tabSignal, warmLostIcon } from './data/nudge';
@@ -17,11 +17,15 @@
   import { createCatchupClient, type CatchupClient } from './data/catchup';
   import { CatchupState } from './data/catchup.svelte';
   import { createLeftoversClient, type LeftoversClient } from './data/leftovers';
+  import { createIssuesClient, issuesShown, openIssuesOf, withoutIssueCounts, type IssuesClient } from './data/issues';
+  import { IssuesState } from './data/issues.svelte';
+  import IssuesButton from './components/IssuesButton.svelte';
+  import IssuesPanel from './components/IssuesPanel.svelte';
   import CatchupButton from './components/CatchupButton.svelte';
   import CatchupPanel, { type Refocus } from './components/CatchupPanel.svelte';
   import SpendButton from './components/SpendButton.svelte';
   import SpendPanel from './components/SpendPanel.svelte';
-  import { NOT_A_BILL, PENDING_NOTE, todayNote, todaySpoken, todayText, todayTitle } from './data/spend';
+  import { NOT_A_BILL, PENDING_NOTE, todayNote, todayParts, todaySpoken, todayTitle } from './data/spend';
   import Header from './components/Header.svelte';
   import StatusBar from './components/StatusBar.svelte';
   import ActionNotice from './components/ActionNotice.svelte';
@@ -39,12 +43,14 @@
     actions,
     catchup = createCatchupClient((...a) => fetch(...a)),
     leftovers = createLeftoversClient((...a) => fetch(...a)),
+    issues = createIssuesClient((...a) => fetch(...a)),
     tick: every = 10_000,
     permission = browserPermission(),
-  }: { feed: Feed; actions: Actions; catchup?: CatchupClient; leftovers?: LeftoversClient; tick?: number; permission?: Permission } = $props();
+  }: { feed: Feed; actions: Actions; catchup?: CatchupClient; leftovers?: LeftoversClient; issues?: IssuesClient; tick?: number; permission?: Permission } = $props();
 
   const board = new BoardState(() => actions);
   const cu = new CatchupState(() => catchup);
+  const is = new IssuesState(() => issues);
   // Every critter on the page reads its move on a change of state from here.
   setContext(MOVES, board.moves);
   let view = $state<View>(loadView());
@@ -139,9 +145,11 @@
     const hosts = ix?.gitlabHosts;
     if (hosts) untrack(() => cu.setGitlabHosts(hosts));
   });
+  // A lost key (see the Issues part below) takes the issue counts off the page.
+  const keyLost = $derived(board.conn === 'unauthorized' || cu.status === 'unauthorized' || is.status === 'unauthorized');
   // Header counts stay totals: top-level projects, whatever is selected.
   // The grouping is worked out once per snapshot and shared by everything below.
-  const grp = $derived(snap ? groupingOf(snap) : null);
+  const grp = $derived(snap ? groupingOf(keyLost ? withoutIssueCounts(snap) : snap) : null);
   const projects = $derived(grp ? grp.tops.length : null);
 
   // One project selection for all three views; how it is shown is a per-viewer choice.
@@ -180,7 +188,7 @@
     panelTop = Math.max(0, Math.round(headerEl?.getBoundingClientRect().bottom ?? 0));
   }
   $effect(() => {
-    if (!catchupOpen && !spendOpen) return;
+    if (!catchupOpen && !spendOpen && !issuesOpen) return;
     measure();
     window.addEventListener('scroll', measure, { passive: true });
     window.addEventListener('resize', measure);
@@ -194,14 +202,27 @@
   // Leftovers show private paths: a lost key from any poll (the board's or
   // Catch-up's) or a page older than the server turns them off, and an open
   // sheet goes at once.
-  const leftoversOn = $derived(showCatchup && cu.status !== 'unauthorized');
+  const leftoversOn = $derived(showCatchup && cu.status !== 'unauthorized' && is.status !== 'unauthorized');
+  // Issues are private too. One lost-key state for them: a lost key from the
+  // board's stream, Catch-up's poll or Issues' own read clears the list, drops
+  // a read still out, and takes every issue count off the page (header chip,
+  // tiles, rail). An open panel stays with its alert and its Close button.
+  $effect(() => {
+    if (board.conn === 'unauthorized' || cu.status === 'unauthorized') untrack(() => is.lose());
+  });
+  // Rows the server dropped (a lost login, a denied host) leave the page and
+  // its memory with the snapshot that says so, open panel or not.
+  $effect(() => {
+    const purged = snap?.issues.purged ?? 0;
+    untrack(() => is.purge(purged));
+  });
 
   // Spend: today's estimate in the header, and the project × day panel. One
   // panel is open at a time.
   const SPEND_ID = 'spend-panel';
   let spendOpen = $state(false);
   let spendBtn = $state<HTMLButtonElement>();
-  const spendToday = $derived(snap ? todayText(snap.spend, now) : '');
+  const spendToday = $derived(snap ? todayParts(snap.spend, now) : []);
   const spendTodaySpoken = $derived(snap ? todaySpoken(snap.spend, now) : '');
   const spendPending = $derived(snap?.spend.pending ?? false);
   const spendTodayTitle = $derived.by(() => {
@@ -210,6 +231,7 @@
   });
   async function openSpend() {
     catchupOpen = false;
+    closeIssues('stay');
     spendOpen = true;
     await tick();
     document.getElementById(SPEND_ID)?.focus();
@@ -221,6 +243,7 @@
 
   async function openCatchup() {
     spendOpen = false;
+    closeIssues('stay');
     catchupOpen = true;
     void cu.refresh();
     await tick();
@@ -230,6 +253,45 @@
     catchupOpen = false;
     if (refocus === 'button') catchupBtn?.focus();
   }
+  // Issues: the open issues of the selected projects' repositories, read
+  // only. Opening the panel loads the list (and lets the server look again
+  // when its list is over a minute old; a read that is out or a fresh one
+  // at the same rev is reused).
+  const ISSUES_ID = 'issues-panel';
+  let issuesOpen = $state(false);
+  let issuesBtn = $state<HTMLButtonElement>();
+  const showIssues = $derived(showCatchup && issuesShown(snap?.issues));
+  const issuesCount = $derived(snap && !keyLost ? openIssuesOf(snap.projects) : null);
+  const selProjects = $derived(grp ? projectsOf(grp, sel) : []);
+  async function openIssues() {
+    catchupOpen = false;
+    spendOpen = false;
+    issuesOpen = true;
+    void is.refresh(snap?.issues.rev ?? 0);
+    await tick();
+    document.getElementById(ISSUES_ID)?.focus();
+  }
+  function closeIssues(refocus: Refocus) {
+    if (!issuesOpen) return;
+    issuesOpen = false;
+    is.stop();
+    if (refocus === 'button') issuesBtn?.focus();
+  }
+  // While it is open, a snapshot whose issues.rev moved loads the list again
+  // (a new list, a repository that joined, a change of state; asOf only says
+  // how old the list is).
+  let issuesRev = -1;
+  $effect(() => {
+    const rev = snap?.issues.rev ?? 0;
+    if (!issuesOpen) {
+      issuesRev = rev;
+      return;
+    }
+    if (rev === issuesRev) return;
+    issuesRev = rev;
+    untrack(() => void is.refresh(rev));
+  });
+
   // "Card" in the panel: close it, then bring the card into view and focus it.
   // A project filter that hides the card is lifted first.
   async function showCard(cardId: string) {
@@ -268,6 +330,15 @@
             onclick={() => (spendOpen ? closeSpend('button') : void openSpend())}
           />
         {/if}
+        {#if showIssues}
+          <IssuesButton
+            bind:button={issuesBtn}
+            count={issuesCount}
+            open={issuesOpen}
+            controls={ISSUES_ID}
+            onclick={() => (issuesOpen ? closeIssues('button') : void openIssues())}
+          />
+        {/if}
         {#if showCatchup}
           <CatchupButton
             bind:button={catchupBtn}
@@ -284,6 +355,10 @@
   </div>
   {#if catchupOpen && showCatchup}
     <CatchupPanel id={CATCHUP_ID} {cu} {now} {onBoard} gitlabHosts={ix?.gitlabHosts ?? []} toggle={catchupBtn} top={panelTop} onclose={closeCatchup} onshowcard={(id) => void showCard(id)} />
+  {/if}
+  <!-- An open panel stays through a lost key, cleared, with its alert and Close. -->
+  {#if issuesOpen && (showIssues || keyLost)}
+    <IssuesPanel id={ISSUES_ID} {is} {now} projects={selProjects} scope={scope} gitlabHosts={ix?.gitlabHosts ?? []} toggle={issuesBtn} top={panelTop} onclose={closeIssues} />
   {/if}
   {#if spendOpen && showCatchup && snap}
     <SpendPanel id={SPEND_ID} spend={snap.spend} {now} toggle={spendBtn} top={panelTop} onclose={closeSpend} />

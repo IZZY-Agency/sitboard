@@ -124,11 +124,11 @@ func parseArgs(args []string, stderr io.Writer) (config, error) {
 	fs.IntVar(&cfg.port, "port", defaultPort, "port on 127.0.0.1; 0 picks a free one")
 	fs.BoolVar(&cfg.noOpen, "no-open", false, "do not open the browser")
 	fs.BoolVar(&cfg.noGitHub, "no-github", false, "never call gh: no pull request lookups on GitHub")
-	fs.BoolVar(&cfg.noGitLab, "no-gitlab", false, "never call glab: no merge request lookups on GitLab (with --no-github: no network traffic)")
+	fs.BoolVar(&cfg.noGitLab, "no-gitlab", false, "never call glab: no merge request lookups on GitLab (with --no-github: nothing goes to GitHub or GitLab)")
 	fs.StringVar(&roots, "roots", "", "comma-separated folders; only agents working under them are shown")
 	fs.DurationVar(&cfg.staleAfter, "stale-after", 20*time.Minute, "a busy agent with no activity for this long is flagged stale")
-	fs.StringVar(&cfg.statePath, "state", "", "`file` for seen marks, the catch-up marker and project groupings (default: ~/Library/Application Support/sitboard/state.json on macOS; elsewhere sitboard/state.json under $XDG_STATE_HOME, or ~/.local/state)")
-	fs.BoolVar(&cfg.noState, "no-state", false, "keep seen marks, the catch-up marker and project groupings in memory only: no state file is read or written")
+	fs.StringVar(&cfg.statePath, "state", "", "`file` for seen marks, what Catch-up marked read and project groupings (default: ~/Library/Application Support/sitboard/state.json on macOS; elsewhere sitboard/state.json under $XDG_STATE_HOME, or ~/.local/state)")
+	fs.BoolVar(&cfg.noState, "no-state", false, "keep seen marks, what Catch-up marked read and project groupings in memory only: no state file is read or written")
 	fs.BoolVar(&cfg.version, "version", false, "print the version and exit")
 	fs.BoolVar(&cfg.licenses, "licenses", false, "print sitboard's licence and the third-party notices and exit")
 	if err := fs.Parse(args); err != nil {
@@ -175,11 +175,17 @@ type sources struct {
 	folders  source.FolderUse
 	prs      source.PRProvider // GitHub
 	gitlab   core.GitLab       // nil: no GitLab source at all
+	issues   map[model.Forge]source.IssueLister
 	jumper   source.Jumper
 }
 
 func realSources(cfg config, home string) sources {
 	term := agterm.New(agterm.Options{})
+	gh := github.New(github.Options{Off: cfg.noGitHub})
+	issues := map[model.Forge]source.IssueLister{}
+	if l, ok := gh.(source.IssueLister); ok {
+		issues[model.ForgeGitHub] = l
+	}
 	tm := tmux.New(tmux.Options{AgtermOf: claude.AgtermIDOf, Raise: term, Alive: claude.ProcessAlive})
 	return sources{
 		watchers: []source.Watcher{
@@ -190,7 +196,8 @@ func realSources(cfg config, home string) sources {
 		repos:   gitsrc.New(gitsrc.Options{}),
 		inv:     gitsrc.NewInventory(gitsrc.Options{}),
 		folders: procs.New(),
-		prs:     github.New(github.Options{Off: cfg.noGitHub}),
+		prs:     gh,
+		issues:  issues,
 		gitlab:  gitlab.NewSource(gitlab.Options{Off: cfg.noGitLab}),
 		jumper: source.Jumpers{
 			model.FocusAgterm: term,
@@ -233,12 +240,10 @@ func run(ctx context.Context, cfg config, env runEnv) error {
 		Folders:    src.folders,
 		PRs:        src.prs,
 		GitLab:     src.gitlab,
+		Issues:     src.issues,
 		State:      st,
 		StaleAfter: cfg.staleAfter,
 		Roots:      cfg.roots,
-		// With --no-state the catch-up marker is gone at every start; the
-		// page says so.
-		StateInMemory: cfg.noState,
 	})
 	statuses := make([]source.Status, 0, len(src.watchers)+3)
 	for _, w := range src.watchers {
@@ -386,7 +391,7 @@ func listen(port int, explicit bool) (net.Listener, string, error) {
 func openState(ctx context.Context, cfg config, env runEnv) (st state.Store, notes []string, unlock func(), err error) {
 	unlock = func() {}
 	if cfg.noState {
-		return state.Memory(), []string{"no state file (--no-state): seen marks, the catch-up marker and groupings last until sitboard stops"}, unlock, nil
+		return state.Memory(), []string{"no state file (--no-state): seen marks, what Catch-up marked read and groupings last until sitboard stops"}, unlock, nil
 	}
 	file := stateFile(env.home, env.goos, env.getenv)
 	if cfg.statePath != "" {
@@ -400,7 +405,20 @@ func openState(ctx context.Context, cfg config, env runEnv) (st state.Store, not
 	if cfg.statePath != "" {
 		notes = append(notes, "state file "+file) // after links are followed: the file really used
 	}
+	open := env.openStore
+	if open == nil {
+		open = state.Open
+	}
 	if err := state.CheckWritable(file); err != nil {
+		// A file of sitboard 0.4.0 or earlier in a folder it cannot write is
+		// still served, in memory only (state.Open drops its old catch-up
+		// marker and cannot save that). Such a run writes nothing, so it takes
+		// no lock. Any other file there is refused, as before.
+		if fi, serr := os.Stat(file); serr == nil && fi.Mode().IsRegular() {
+			if st, oerr := open(file); oerr == nil && st.InMemory() {
+				return st, append(notes, memoryNote), unlock, nil
+			}
+		}
 		return nil, nil, unlock, err
 	}
 	lock := env.lock
@@ -418,19 +436,21 @@ func openState(ctx context.Context, cfg config, env runEnv) (st state.Store, not
 		return nil, nil, unlock, err
 	}
 	release := func() { _ = held.Release() } // a nil lock releases nothing
-	open := env.openStore
-	if open == nil {
-		open = state.Open
-	}
 	st, err = open(file)
 	if err != nil {
 		release()
 		return nil, nil, unlock, err
 	}
+	if st.InMemory() {
+		notes = append(notes, memoryNote)
+	}
 	// The store stops writing before the lock goes, so a write that comes
 	// late (a watcher still stopping) never lands once another may hold it.
 	return st, notes, func() { st.Close(); release() }, nil
 }
+
+// memoryNote is the start line for a state file this run cannot write.
+const memoryNote = "warning: could not write the state file; seen marks, what Catch-up marks read and groupings last until sitboard stops"
 
 // statePath makes a --state value absolute and clean; a leading "~/" is the
 // home folder, as in --roots, so "--state=~/x" works without the shell. The

@@ -83,7 +83,7 @@ func TestSelectionSeenIsPersisted(t *testing.T) {
 	t.Setenv("HOME", testHome)
 	file := filepath.Join(t.TempDir(), "state.json")
 	open := func() *Board {
-		st, err := state.Open(file)
+		st, err := state.OpenAt(file, func() time.Time { return tNow })
 		if err != nil {
 			t.Fatal(err)
 		}

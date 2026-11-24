@@ -28,7 +28,7 @@ func (e *env) catchup() catchupResult {
 	e.t.Helper()
 	e.rescan()
 	ctx := context.Background()
-	older, cut := e.a.olderRollouts(ctx, firstDisplayedMidnight(fixedNow))
+	older, cut := e.a.olderRollouts(ctx, catchupSince(fixedNow))
 	res := readCatchup(ctx, e.r.planCatchup(older), fixedNow)
 	res.cut = res.cut || cut
 	e.r.applyCatchup(res)
@@ -100,8 +100,162 @@ func TestCatchupCountsAnEndedTerminalSession(t *testing.T) {
 	if f.Folder != "/home/dev/projects/alpha" || f.Key.Tool != model.ToolCodex || f.Key.ID != idWorker {
 		t.Errorf("folder %q key %+v", f.Folder, f.Key)
 	}
-	if len(f.TurnEnds) != 0 || len(f.CreatedPRs) != 0 {
-		t.Errorf("a catch-up fact carries turns or pull requests: %+v %+v", f.TurnEnds, f.CreatedPRs)
+	// Its finished turn, as the live read has it, for Catch-up (#135).
+	if len(f.TurnEnds) != 1 || !slices.Equal(f.TurnEnds, want.TurnEnds) || len(f.CreatedPRs) != 0 {
+		t.Errorf("turns %v (live read: %v), pull requests %v", f.TurnEnds, want.TurnEnds, f.CreatedPRs)
+	}
+}
+
+// What Catch-up lists of an ended session comes with its fact, as for a
+// Claude Code session found by its transcript (#135): the title from the
+// session index, the turn ends and pull requests of its own rollout, its
+// model, effort and folder, the same as a live read of the same files. A
+// thread it spawned is read for its tokens only: its own turn is not the
+// session's. The session has no token record: it is published for its turn.
+func TestCatchupFactCarriesTitleTurnsAndPullRequests(t *testing.T) {
+	setup := func(e *env) {
+		e.add("worker.jsonl", idWorker, fixedNow.Add(-55*time.Minute))
+		e.add("child.jsonl", idChild, fixedNow.Add(-56*time.Minute))
+		if err := os.WriteFile(filepath.Join(e.root, "session_index.jsonl"), fixture(t, "session_index.jsonl"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	live := newEnv(t)
+	setup(live)
+	live.lock(idWorker, 4242)
+	live.rescan()
+	want, _ := live.last(idWorker)
+
+	e := newEnv(t)
+	setup(e)
+	e.catchup()
+	f, ok := e.last(idWorker)
+	if !ok {
+		t.Fatal("no fact for the ended session")
+	}
+	if !f.Backfill || !f.Ended || f.Live != model.Of(false) || f.Headless {
+		t.Errorf("backfill %v ended %v live %+v headless %v", f.Backfill, f.Ended, f.Live, f.Headless)
+	}
+	if f.Name != "Placeholder title" || f.Name != want.Name {
+		t.Errorf("name %q, live read %q", f.Name, want.Name)
+	}
+	if !slices.Equal(f.TurnEnds, []time.Time{at(11, 5)}) || !slices.Equal(f.TurnEnds, want.TurnEnds) {
+		t.Errorf("turns %v, live read %v; the spawned thread's turn is not the session's", f.TurnEnds, want.TurnEnds)
+	}
+	if !slices.Equal(f.CreatedPRs, []model.PRRef{{Repo: model.GitHubRepo("example-org/example-repo"), Number: 301}}) ||
+		!slices.Equal(f.CreatedPRs, want.CreatedPRs) || !slices.Equal(f.PushedPRs, want.PushedPRs) {
+		t.Errorf("pull requests %v pushed %v, live read %v %v", f.CreatedPRs, f.PushedPRs, want.CreatedPRs, want.PushedPRs)
+	}
+	if f.Model != want.Model || f.Effort != want.Effort || f.Folder != want.Folder || !f.Model.OK {
+		t.Errorf("model %v effort %v folder %q, live read %v %v %q", f.Model, f.Effort, f.Folder, want.Model, want.Effort, want.Folder)
+	}
+	if _, ok := e.last(idChild); ok {
+		t.Error("the spawned thread became a session")
+	}
+}
+
+// A caught-up session's merge requests, created and pushed, are its own as
+// the live read has them: the GitLab fixture's lines, in a session with a
+// finished turn.
+func TestCatchupFactCarriesPushedMergeRequests(t *testing.T) {
+	body := strings.TrimRight(string(fixture(t, "gitlab-mr.jsonl")), "\n")
+	e := newEnv(t)
+	e.addLines(idWorker, fixedNow.Add(-time.Hour), metaAt(idWorker, "2026-11-20T11:00:00.000Z"), body,
+		`{"timestamp":"2026-11-20T11:30:00.000Z","type":"event_msg","payload":{"type":"task_complete"}}`)
+	e.catchup()
+	f, ok := e.last(idWorker)
+	if !ok {
+		t.Fatal("no fact for the ended session")
+	}
+	pushedAt := time.Date(2026, 11, 20, 11, 11, 5, 0, time.UTC)
+	if want := []model.PRRef{glRef(41), glRef(43)}; !slices.Equal(f.CreatedPRs, want) {
+		t.Errorf("CreatedPRs = %+v, want %+v", f.CreatedPRs, want)
+	}
+	if want := []model.PushedRef{{Ref: glRef(43), From: pushedAt, To: pushedAt}}; !slices.Equal(f.PushedPRs, want) {
+		t.Errorf("PushedPRs = %+v, want %+v", f.PushedPRs, want)
+	}
+}
+
+// A caught-up session's folder is the one its turns ran in, as for a live
+// session, not only the one it started in: its use counts in that project.
+func TestCatchupFolderIsTheTurnsFolderAsLive(t *testing.T) {
+	lines := []string{
+		threadMeta(idWorker, "codex-tui", `"vscode"`),
+		`{"timestamp":"2026-11-20T11:01:00.000Z","type":"turn_context","payload":{"cwd":"/home/dev/projects/beta","model":"gpt-6.2-sol","effort":"high"}}`,
+		recLine(idWorker, "2026-11-20T11:02:00.000Z", 100, 0, 10),
+		`{"timestamp":"2026-11-20T11:03:00.000Z","type":"event_msg","payload":{"type":"task_complete"}}`,
+	}
+	live := newEnv(t)
+	live.addLines(idWorker, fixedNow.Add(-time.Hour), lines...)
+	live.lock(idWorker, 4242)
+	live.rescan()
+	want, ok := live.last(idWorker)
+	if !ok || want.Folder != "/home/dev/projects/beta" {
+		t.Fatalf("live read: %v folder %q", ok, want.Folder)
+	}
+	e := newEnv(t)
+	e.addLines(idWorker, fixedNow.Add(-time.Hour), lines...)
+	e.catchup()
+	if f, ok := e.last(idWorker); !ok || f.Folder != want.Folder {
+		t.Errorf("caught up: %v folder %q, live read %q", ok, f.Folder, want.Folder)
+	}
+}
+
+// A session found only in a day folder older than the scan's (a thread
+// started days ago, resumed recently) gets its title too: the scan's lookup of
+// the index does not ask for it.
+func TestCatchupTitleOfARootFromAnOlderFolder(t *testing.T) {
+	e := newEnv(t)
+	e.addAt(12, "worker.jsonl", idWorker, fixedNow.Add(-2*time.Hour))
+	if err := os.WriteFile(filepath.Join(e.root, "session_index.jsonl"), fixture(t, "session_index.jsonl"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e.catchup()
+	if _, inScan := e.r.sessions[idWorker]; inScan {
+		t.Fatal("the scan lists the older folder: the test does not test that")
+	}
+	f, ok := e.last(idWorker)
+	if !ok || f.Name != "Placeholder title" || len(f.TurnEnds) != 1 {
+		t.Fatalf("older folder's session: %v name %q turns %v", ok, f.Name, f.TurnEnds)
+	}
+}
+
+// A `codex exec` run's turns come with its fact, headless, so that Catch-up
+// leaves it out as it does a claude -p run.
+func TestCatchupExecRunKeepsItsHeadlessMarkWithItsTurns(t *testing.T) {
+	e := newEnv(t)
+	e.add("exec.jsonl", idExec, fixedNow.Add(-40*time.Minute))
+	e.catchup()
+	f, ok := e.last(idExec)
+	if !ok || !f.Backfill || !f.Headless || len(f.TurnEnds) != 1 {
+		t.Fatalf("exec run: %v %+v", ok, f)
+	}
+}
+
+// A caught-up fact with turns and no token record stays while a turn is
+// within turnWindow, after its rollout has gone, and is withdrawn once none is.
+func TestCatchupFactWithTurnsAndNoUseAgesOutWithItsTurns(t *testing.T) {
+	e := newEnv(t)
+	e.add("worker.jsonl", idWorker, fixedNow.Add(-55*time.Minute))
+	e.catchup()
+	if f, ok := e.last(idWorker); !ok || len(f.Spend.Spans) != 0 || len(f.TurnEnds) != 1 {
+		t.Fatalf("caught up: %v %+v", ok, f)
+	}
+	if err := os.Remove(e.paths[idWorker]); err != nil {
+		t.Fatal(err)
+	}
+	e.a.now = func() time.Time { return at(11, 5).Add(turnWindow - time.Minute) }
+	e.rescan()
+	if f, ok := e.last(idWorker); !ok || !f.Backfill {
+		t.Fatalf("gone with its turn still in the window: %v %+v", ok, f)
+	}
+	e.a.now = func() time.Time { return at(11, 5).Add(turnWindow + time.Minute) }
+	e.rescan()
+	if _, ok := e.last(idWorker); ok {
+		t.Error("still there with its only turn out of the window")
+	}
+	if e.r.obs[idWorker] != nil {
+		t.Error("the entry stays")
 	}
 }
 
@@ -665,17 +819,32 @@ func TestRunWithoutCodexSaysDone(t *testing.T) {
 }
 
 // A catch-up whose time was up before it began reads nothing and still says
-// done, so the page's pending mark ends.
+// done, so the page's pending mark ends; its done says it was cut, so the
+// page can say items may be missing (review of #152, round 4, finding 30).
+// One that read everything says it was not.
 func TestRunCatchupOutOfTimeStillSaysDone(t *testing.T) {
-	old := catchupBudget
-	catchupBudget = -time.Second
-	t.Cleanup(func() { catchupBudget = old })
-	e := newEnv(t)
-	e.add("spend.jsonl", idWorker, fixedNow.Add(-30*time.Minute))
-	for _, f := range flatten(runUntilBackfillDone(t, e.a)) {
-		if sf, ok := f.(model.SessionFact); ok && sf.Backfill {
-			t.Errorf("a fact from a catch-up out of time: %+v", sf)
-		}
+	for _, outOfTime := range []bool{false, true} {
+		t.Run(fmt.Sprint("out of time ", outOfTime), func(t *testing.T) {
+			if outOfTime {
+				old := catchupBudget
+				catchupBudget = -time.Second
+				t.Cleanup(func() { catchupBudget = old })
+			}
+			e := newEnv(t)
+			e.add("spend.jsonl", idWorker, fixedNow.Add(-30*time.Minute))
+			read, cut := false, false
+			for _, f := range flatten(runUntilBackfillDone(t, e.a)) {
+				switch f := f.(type) {
+				case model.SessionFact:
+					read = read || f.Backfill
+				case model.BackfillDone:
+					cut = f.Cut
+				}
+			}
+			if read == outOfTime || cut != outOfTime {
+				t.Errorf("caught up %v, done says cut %v", read, cut)
+			}
+		})
 	}
 }
 

@@ -40,7 +40,7 @@ func (p *provider) Evidence(ctx context.Context, fr model.ForgeRepo, branches []
 		return ev, nil
 	}
 	p.mu.Lock()
-	until := p.backoff[repo]
+	until := p.backoff[backoffKey(repo)]
 	now := p.now()
 	p.mu.Unlock()
 	if now.Before(until) {
@@ -63,7 +63,7 @@ func (p *provider) Evidence(ctx context.Context, fr model.ForgeRepo, branches []
 		}
 		if note == "rate limited" {
 			p.mu.Lock()
-			p.backoff[repo] = p.now().Add(rateLimitBackoff)
+			p.backoff[backoffKey(repo)] = p.now().Add(rateLimitBackoff)
 			p.mu.Unlock()
 			return ev, errRateLimited
 		}

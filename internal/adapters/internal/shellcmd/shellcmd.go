@@ -707,7 +707,8 @@ func scanPRs(out string) prScan {
 			continue
 		}
 		if m := prURLRe.FindStringSubmatch(t); m != nil {
-			if n, err := strconv.Atoi(m[3]); err == nil && n > 0 {
+			// The pattern lets a name of "." or ".." through; Valid does not.
+			if n, err := strconv.Atoi(m[3]); err == nil && n > 0 && model.GitHubRepo(m[1]+"/"+m[2]).Valid() {
 				ref := model.PRRef{Repo: model.GitHubRepo(m[1] + "/" + m[2]), Number: n}
 				switch {
 				case refusal:

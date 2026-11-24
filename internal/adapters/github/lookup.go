@@ -65,14 +65,16 @@ type provider struct {
 	now     func() time.Time
 	found   func(string) string
 
-	mu         sync.Mutex
-	cache      map[string]cached    // by lookup key
-	backoff    map[string]time.Time // repo → no gh calls before this time
-	inflight   map[string]*flight   // by lookup key: a gh call under way
-	health     source.State         // from the last lookup; "" until one ran
-	healthNote string
-	probed     time.Time
-	probe      source.Status
+	mu      sync.Mutex
+	cache   map[string]cached    // by lookup key
+	backoff map[string]time.Time // repo → no gh calls before this time
+	// issuesUntil: no issue lists before this time (GitHub rate-limited one).
+	issuesUntil time.Time
+	inflight    map[string]*flight // by lookup key: a gh call under way
+	health      source.State       // from the last lookup; "" until one ran
+	healthNote  string
+	probed      time.Time
+	probe       source.Status
 }
 
 // New returns the GitHub pull request provider.
@@ -188,7 +190,7 @@ func (p *provider) Lookup(ctx context.Context, fr model.ForgeRepo, numbers []int
 	p.mu.Lock()
 	now := p.now()
 	c, hit := p.cache[key]
-	until := p.backoff[repo]
+	until := p.backoff[backoffKey(repo)]
 	p.mu.Unlock()
 	if hit && now.Sub(c.at) < cacheFor {
 		return slices.Clone(c.prs), nil
@@ -252,7 +254,7 @@ func (p *provider) fetch(ctx context.Context, key, repo, owner, name string, num
 		}
 		if note == "rate limited" {
 			p.mu.Lock()
-			p.backoff[repo] = p.now().Add(rateLimitBackoff)
+			p.backoff[backoffKey(repo)] = p.now().Add(rateLimitBackoff)
 			p.mu.Unlock()
 			if hit {
 				return slices.Clone(c.prs), nil

@@ -3,57 +3,105 @@ package core
 import (
 	"cmp"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"slices"
 	"time"
 
+	"github.com/IZZY-Agency/sitboard/internal/app"
 	"github.com/IZZY-Agency/sitboard/internal/contract"
 	"github.com/IZZY-Agency/sitboard/internal/model"
 	"github.com/IZZY-Agency/sitboard/internal/state"
 )
 
-// catchupWindow is how far back catch-up reaches, whatever the marker says.
+// catchupWindow is how far back catch-up reaches.
 // The adapters keep turn times for the same 7 days.
 const catchupWindow = 7 * 24 * time.Hour
 
 // maxCatchupItems caps one answer. A week of a busy coordinator's turns can
 // run into hundreds; past the cap the oldest items are left out, and Total
-// says how many there were.
-const maxCatchupItems = 1000
+// says how many there were. A variable for tests.
+var maxCatchupItems = 1000
 
-// learnedItem is when the board first listed an item, and the item's own time
-// (kept to prune it once it falls out of the window).
+// learnedItem is a catch-up item the board knows: its own time (kept to prune
+// it once it falls out of the window), its key in the state file and whether
+// it is read.
 type learnedItem struct {
-	at      time.Time
-	learned time.Time
-	id      string // its key in the state file (state.CatchupKey)
+	at   time.Time
+	id   string // its key in the state file (state.CatchupKey)
+	read bool
 }
 
-// Catchup lists what the board learned after the marker, up to catchupWindow
-// back: finished turns, pull requests opened and merged, and artifacts
-// published, newest first by the time each happened. It is built only from
-// facts the board already holds: the turn and publish times the adapters read
-// from the records, and what GitHub said about each session's own pull
-// requests. Never prompt text: an item carries names, a title, a time and a
-// link.
+// listedItem is an item of a list, with its key in the learned map.
+type listedItem struct {
+	item contract.CatchupItem
+	key  string
+}
+
+// shownList is a list the page was given: its id, its AsOf and the keys of
+// the items it showed. "Caught up" on it marks those read, and nothing else.
+type shownList struct {
+	id   string
+	asOf time.Time
+	keys []string      // keys in the learned map
+	ids  []learnedItem // each item's key in the state file and own time, so marking needs nothing the board may have forgotten since
+}
+
+// maxShownLists is how many of this run's newest lists can be marked read: a
+// tab whose list is older than these marks nothing, and is told to load the
+// list again (ErrCatchupStale). A variable for tests.
+var maxShownLists = 16
+
+// maxCatchupRead is how many acknowledged items the state file keeps; an
+// acknowledgement that would pass it is refused whole (ErrCatchupFull). A
+// variable for tests.
+var maxCatchupRead = state.MaxCatchupRead
+
+// ErrCatchupStale (app.ErrCatchupStale): the list to mark read is not one of
+// this run's newest lists (made before a restart, or too long ago). Nothing
+// was marked.
+var ErrCatchupStale = app.ErrCatchupStale
+
+// ErrCatchupFull (app.ErrCatchupFull): marking the list read would keep more acknowledged items
+// than the state file holds. Nothing was marked: its items stay unread.
+var ErrCatchupFull = app.ErrCatchupFull
+
+// newListRun is this run's part of every list id: random, so a list from
+// another run, whatever its clock said, never names one of this run's.
+func newListRun() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("t%x", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b[:])
+}
+
+// Catchup lists the unread items, up to catchupWindow back: finished turns,
+// pull requests opened and merged, and artifacts published, newest first by
+// the time each happened. It is built only from facts the board already
+// holds: the turn and publish times the adapters read from the records, and
+// what GitHub said about each session's own pull requests. Never prompt text:
+// an item carries names, a title, a time and a link.
 //
-// Read or unread is decided by when the board learned an item, not by when it
-// happened, so a merge GitHub reports a minute late, or after an outage,
-// still shows after the owner marked a newer turn read:
-//   - An item learns its time the first time a list includes it: that list's
-//     AsOf. Each list's AsOf is later than the one before, so the AsOf the
-//     page sends back covers exactly what that list held.
-//   - An item that happened before this run of sitboard started takes its own
-//     time instead, so a restart does not list again what an earlier run's
-//     marker already covered; unless the earlier run saved it as still unread
-//     (learned after a marker that is later than the item: see saveUnread).
-//     Left uncovered: something that happened before the marker but that no
-//     run learned before this one (a merge GitHub reported only after a
-//     restart).
-//   - Once a list was made or the marker moved in this run, every clock tick
-//     also learns what arrived since (learnTick), so what came after
-//     "Caught up" is saved as unread even if no list showed it before a stop.
+// The invariant: an item is read only when a list that showed it was marked
+// read ("Caught up"), and once marked it stays read across restarts while it
+// is in the window. So:
+//   - Marking a list read (MarkCatchupRead) adds exactly the items it showed to
+//     the acknowledged set the state file keeps (state.CatchupRead), in one
+//     write; nothing else ever adds to it, and only items older than the
+//     window leave it. Items a full list left out, those another tab showed,
+//     those learned since, those whose source is late or not read yet after a
+//     restart: all stay unread.
+//   - A list is named by an id of this run (List); a list of another run, or
+//     one no longer remembered, marks nothing (ErrCatchupStale).
+//   - No cap marks anything read: an acknowledgement that would pass the
+//     file's cap is refused whole (ErrCatchupFull).
+//   - The catch-up marker an older build (0.4.0) left is dropped when the
+//     state file is opened (state.Open): what it covered is unread once. A
+//     file that holds acknowledgements is written as a version older builds
+//     refuse.
 func (b *Board) Catchup(context.Context) (contract.Catchup, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -62,50 +110,45 @@ func (b *Board) Catchup(context.Context) (contract.Catchup, error) {
 	if !asOf.After(b.lastAsOf) {
 		asOf = b.lastAsOf.Add(time.Nanosecond)
 	}
-	var marker time.Time
-	if b.opts.State != nil {
-		marker = b.opts.State.CatchupMarker()
-	}
-	// After the marker too: what this list learns must be unread, even on a
-	// clock that reads the same as when the marker was set.
-	if !asOf.After(marker) {
-		asOf = marker.Add(time.Nanosecond)
-	}
 	b.lastAsOf = asOf
-	b.listed = true
-	c := contract.Catchup{AsOf: asOf.UTC(), Unsaved: b.opts.StateInMemory, Pending: b.backfillPendingLocked()}
+	b.listSeq++
+	id := fmt.Sprintf("%s-%d", b.listRun, b.listSeq)
+	c := contract.Catchup{List: id, AsOf: asOf.UTC(), Unsaved: b.opts.State != nil && b.opts.State.InMemory(), Pending: b.backfillPendingLocked(), Partial: len(b.backfillCut) > 0}
 	if b.opts.State != nil {
-		c.Marker = marker.UTC()
+		c.Marker = b.markedAt.UTC()
 	}
-	c.Items = b.collectLocked(now, asOf, marker)
-	c.Total = len(c.Items)
-	if len(c.Items) > maxCatchupItems {
-		c.Items = c.Items[:maxCatchupItems]
+	rows := b.collectLocked(now)
+	c.Total = len(rows)
+	shown := rows[:min(len(rows), maxCatchupItems)]
+	c.Items = make([]contract.CatchupItem, 0, len(shown))
+	keys := make([]string, 0, len(shown))
+	ids := make([]learnedItem, 0, len(shown))
+	for _, r := range shown {
+		c.Items = append(c.Items, r.item)
+		keys = append(keys, r.key)
+		ids = append(ids, b.learned[r.key])
+	}
+	b.shownLists = append(b.shownLists, shownList{id: id, asOf: asOf, keys: keys, ids: ids})
+	if n := len(b.shownLists); n > maxShownLists {
+		b.shownLists = slices.Clone(b.shownLists[n-maxShownLists:])
 	}
 	return c, nil
 }
 
-// collectLocked lists the unread items, newest first, learning the new ones
-// at asOf. Callers hold b.mu.
-func (b *Board) collectLocked(now, asOf, marker time.Time) []contract.CatchupItem {
-	items := []contract.CatchupItem{}
+// collectLocked lists the unread items, newest first, learning the new ones.
+// Callers hold b.mu.
+func (b *Board) collectLocked(now time.Time) []listedItem {
+	items := []listedItem{}
 	from := now.Add(-catchupWindow)
 	in := func(at time.Time) bool { return at.After(from) && !at.After(now) }
 	unread := func(key string, at time.Time) bool {
 		l, ok := b.learned[key]
 		if !ok {
-			l = learnedItem{at: at, learned: asOf, id: state.CatchupKey(key)}
-			// Before this run started and already covered by the marker it
-			// started with: read then, read now, unless the last run saved it
-			// as unread. Anything else is learned now, even when it happened
-			// before the start: a session read in the background after
-			// "Caught up" was pressed is still unread.
-			if _, saved := b.startUnread[l.id]; !saved && !at.After(b.runStart) && !at.After(b.startMarker) {
-				l.learned = at
-			}
+			l = learnedItem{at: at, id: state.CatchupKey(key)}
+			_, l.read = b.readSet[l.id]
 			b.learned[key] = l
 		}
-		return l.learned.After(marker)
+		return !l.read
 	}
 
 	onBoard := make(map[model.SessionKey]string, len(b.cardKeys))
@@ -156,7 +199,7 @@ func (b *Board) collectLocked(now, asOf, marker time.Time) []contract.CatchupIte
 		for _, at := range s.TurnEnds {
 			key := fmt.Sprintf("turn|%s|%s|%d", s.Key.Tool, s.Key.ID, at.UnixNano())
 			if in(at) && unread(key, at) {
-				items = append(items, item(at, contract.CatchupTurnFinished, ttl))
+				items = append(items, listedItem{item(at, contract.CatchupTurnFinished, ttl), key})
 			}
 		}
 		for _, pr := range prs {
@@ -174,7 +217,7 @@ func (b *Board) collectLocked(now, asOf, marker time.Time) []contract.CatchupIte
 				it := item(at, kind, clean(pr.Title))
 				p := pagePR(pr)
 				it.PullRequest = &p
-				items = append(items, it)
+				items = append(items, listedItem{it, key})
 			}
 			add(pr.OpenedAt, contract.CatchupPROpened)
 			if pr.State == model.PRStateMerged {
@@ -194,7 +237,7 @@ func (b *Board) collectLocked(now, asOf, marker time.Time) []contract.CatchupIte
 			}
 			it := item(a.PublishedAt, contract.CatchupArtifactPublished, clean(a.Title))
 			it.Artifact = &contract.Artifact{Title: clean(a.Title), URL: a.URL}
-			items = append(items, it)
+			items = append(items, listedItem{it, key})
 		}
 	}
 	for key, l := range b.learned {
@@ -203,7 +246,8 @@ func (b *Board) collectLocked(now, asOf, marker time.Time) []contract.CatchupIte
 		}
 	}
 
-	slices.SortFunc(items, func(a, o contract.CatchupItem) int {
+	slices.SortFunc(items, func(ra, ro listedItem) int {
+		a, o := ra.item, ro.item
 		return cmp.Or(
 			o.At.Compare(a.At),
 			cmp.Compare(slices.Index(contract.CatchupKinds, a.Kind), slices.Index(contract.CatchupKinds, o.Kind)),
@@ -217,78 +261,13 @@ func (b *Board) collectLocked(now, asOf, marker time.Time) []contract.CatchupIte
 	return items
 }
 
-// unreadLocked is what to save as unread although it happened before marker:
-// the items learned after it, and those the last run saved that this run has
-// not learned yet (a session not read again yet). Callers hold b.mu.
-func (b *Board) unreadLocked(marker time.Time) map[string]time.Time {
-	out := map[string]time.Time{}
-	known := make(map[string]bool, len(b.learned))
-	for _, l := range b.learned {
-		known[l.id] = true
-		if l.learned.After(marker) && !l.at.After(marker) {
-			out[l.id] = l.at
-		}
-	}
-	for id, at := range b.startUnread {
-		if !known[id] {
-			out[id] = at
-		}
-	}
-	return out
-}
-
-// learnTick learns what arrived since the last list or tick and saves what
-// is unread although older than the marker, in one write, when it holds an
-// item the file does not. Nothing is learned before the first list or mark
-// of this run: until then the first list learns all of it.
-func (b *Board) learnTick() {
-	if b.opts.State == nil {
-		return
-	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if !b.listed || b.closed {
-		return
-	}
-	now := b.now()
-	marker := b.opts.State.CatchupMarker()
-	// After every list made (none of them held these) and after the marker.
-	at := now
-	for _, t := range []time.Time{b.lastAsOf, marker} {
-		if !at.After(t) {
-			at = t.Add(time.Nanosecond)
-		}
-	}
-	// The next list comes after it too, whatever the clock does next, so
-	// "Caught up" on that list covers what it learned here.
-	b.lastAsOf = at
-	b.collectLocked(now, at, marker)
-	unread := b.unreadLocked(marker)
-	news := false
-	for id := range unread {
-		if _, ok := b.unreadSaved[id]; !ok {
-			news = true
-			break
-		}
-	}
-	if !news {
-		return
-	}
-	b.writeMu.Lock()
-	defer b.writeMu.Unlock()
-	if err := b.opts.State.SetCatchup(marker, unread); err != nil {
-		logf("could not save the unread catch-up items: %v", err)
-		return
-	}
-	b.unreadSaved = unread
-}
-
-// MarkCatchupRead moves the catch-up marker to upTo: the AsOf of the list the
-// owner was shown. It is clamped to the newest list made (a forged or skewed
-// time cannot cover what no list held; before any list in this run, to now),
-// and it never moves back (a second tab with an older list cannot bring read
-// items back).
-func (b *Board) MarkCatchupRead(upTo time.Time) error {
+// MarkCatchupRead marks read the items list showed, and nothing else: it adds
+// them to the acknowledged set and saves it in one write, then turns them
+// read. Marking a list again, or an older tab's list after a newer one, is
+// harmless. A list that is not one of this run's newest (maxShownLists)
+// marks nothing: ErrCatchupStale. One that would pass the file's cap marks
+// nothing either: ErrCatchupFull. A save that fails marks nothing.
+func (b *Board) MarkCatchupRead(list string) error {
 	if b.opts.State == nil {
 		return errors.New("core: no state store")
 	}
@@ -296,51 +275,68 @@ func (b *Board) MarkCatchupRead(upTo time.Time) error {
 	defer b.mu.Unlock()
 	b.writeMu.Lock()
 	defer b.writeMu.Unlock()
-	at, limit := upTo.Round(0), b.lastAsOf
-	if limit.IsZero() {
-		limit = b.now()
+	i := slices.IndexFunc(b.shownLists, func(l shownList) bool { return l.id == list })
+	if list == "" || i < 0 {
+		return ErrCatchupStale
 	}
-	if at.After(limit) {
-		at = limit
+	l := b.shownLists[i]
+	from := b.now().Add(-catchupWindow)
+	next := make(map[string]time.Time, len(b.readSet)+len(l.keys))
+	for id, at := range b.readSet {
+		if at.After(from) { // older: out of the window, never listed again
+			next[id] = at
+		}
 	}
-	if !at.After(b.opts.State.CatchupMarker()) {
-		return nil
+	added := false
+	for _, li := range l.ids {
+		if !li.at.After(from) { // out of the window: the file would drop it, so it takes no room
+			continue
+		}
+		if _, ok := next[li.id]; !ok {
+			next[li.id] = li.at
+			added = true
+		}
 	}
-	// The marker and what stays unread behind it, in one write.
-	unread := b.unreadLocked(at)
-	if err := b.opts.State.SetCatchup(at, unread); err != nil {
-		return err
+	markedAt := b.markedAt
+	if l.asOf.After(markedAt) {
+		markedAt = l.asOf
 	}
-	b.listed, b.unreadSaved = true, unread
+	if !added && markedAt.Equal(b.markedAt) {
+		return nil // marked before: nothing new
+	}
+	if len(next) > maxCatchupRead {
+		return ErrCatchupFull
+	}
+	if err := b.opts.State.SetCatchupRead(next, markedAt); err != nil {
+		return err // not saved: nothing marked, so the page's "Nothing was lost" holds
+	}
+	b.readSet, b.markedAt = next, markedAt
+	for _, k := range l.keys {
+		if li, ok := b.learned[k]; ok {
+			li.read = true
+			b.learned[k] = li
+		}
+	}
 	return nil
 }
 
-// backfillPendingLocked: Claude Code is present and its adapter has not yet
-// read the sessions that had ended before this start. Callers hold b.mu.
+// backfillPendingLocked: Claude Code or Codex is present and its adapter has
+// not yet read the sessions that had ended before this start. Callers hold
+// b.mu.
 func (b *Board) backfillPendingLocked() bool {
 	for _, s := range b.sources {
-		if s.Kind == contract.SourceClaude {
-			return s.State == contract.SourceOK && !b.backfilled[contract.SourceClaude]
+		if (s.Kind == contract.SourceClaude || s.Kind == contract.SourceCodex) && s.State == contract.SourceOK && !b.backfilled[s.Kind] {
+			return true
 		}
 	}
 	return false
 }
 
-// spendPendingLocked: the spend days may still grow: Claude Code's older
-// sessions are being read (as for the catch-up panel), or Codex is present
-// and has not yet read the threads that had ended before this start. The
-// catch-up panel itself lists no Codex session, so it does not wait for Codex.
-// Callers hold b.mu.
+// spendPendingLocked: the spend days may still grow, while the sessions that
+// had ended before this start are still being read (as for the catch-up
+// panel). Callers hold b.mu.
 func (b *Board) spendPendingLocked() bool {
-	if b.backfillPendingLocked() {
-		return true
-	}
-	for _, s := range b.sources {
-		if s.Kind == contract.SourceCodex {
-			return s.State == contract.SourceOK && !b.backfilled[contract.SourceCodex]
-		}
-	}
-	return false
+	return b.backfillPendingLocked()
 }
 
 // mayCatchUpLocked: a session's history counts when its id has the safe form,

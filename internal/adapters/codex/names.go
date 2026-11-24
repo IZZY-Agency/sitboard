@@ -2,6 +2,7 @@ package codex
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -107,16 +108,74 @@ func (n *names) update(keep func(id string) bool) bool {
 			}
 			continue
 		}
-		if len(l.Name) > maxName {
-			cut := maxName
-			for cut > 0 && !utf8.RuneStart(l.Name[cut]) {
-				cut--
-			}
-			l.Name = l.Name[:cut]
-		}
+		l.Name = capName(l.Name)
 		if n.byID[l.ID] != l.Name {
 			n.byID[l.ID] = l.Name
 			changed = true
 		}
 	}
+}
+
+// maxLookupBytes bounds one lookup of titles (lookupTitles): the index is a
+// line per title and rename, so this is far more than any real one holds.
+const maxLookupBytes = 256 << 20
+
+// lookupTitles reads the index once, from its start, for the titles of the
+// threads in want (the last line of an id wins), apart from the registry's
+// own read and its state: it runs off the registry goroutine, within ctx and
+// maxLookupBytes. A title is only what the index holds; an id with no line is
+// not in the result.
+func lookupTitles(ctx context.Context, path string, want map[string]bool) map[string]string {
+	out := map[string]string{}
+	if len(want) == 0 {
+		return out
+	}
+	fi, err := os.Lstat(path)
+	if err != nil || !fi.Mode().IsRegular() {
+		return out
+	}
+	f, err := openRegular(path)
+	if err != nil {
+		return out
+	}
+	defer func() { _ = f.Close() }()
+	r := bufio.NewReaderSize(io.LimitReader(f, maxLookupBytes), maxIndexLine)
+	skipping := false
+	for lines := 0; ; lines++ {
+		if lines%1024 == 0 && ctx.Err() != nil {
+			return out
+		}
+		chunk, err := r.ReadSlice('\n')
+		if errors.Is(err, bufio.ErrBufferFull) {
+			skipping = true
+			continue
+		}
+		if err != nil {
+			return out // the end, or an incomplete last line
+		}
+		if skipping {
+			skipping = false
+			continue
+		}
+		var l struct {
+			ID   string `json:"id"`
+			Name string `json:"thread_name"`
+		}
+		if json.Unmarshal(chunk, &l) != nil || !want[l.ID] {
+			continue
+		}
+		out[l.ID] = capName(l.Name)
+	}
+}
+
+// capName cuts a name to maxName bytes at a character boundary.
+func capName(name string) string {
+	if len(name) <= maxName {
+		return name
+	}
+	cut := maxName
+	for cut > 0 && !utf8.RuneStart(name[cut]) {
+		cut--
+	}
+	return name[:cut]
 }

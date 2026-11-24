@@ -131,7 +131,7 @@
       {/if}
     </span>
     <div class="acts">
-      <button type="button" class="done" disabled={!count || cu.marking} onclick={caughtUp}>{cu.marking ? 'Saving…' : 'Caught up'}</button>
+      <button type="button" class="done" disabled={!count || cu.marking || !cu.canMark} onclick={caughtUp}>{cu.marking ? 'Saving…' : 'Caught up'}</button>
       <button type="button" class="close" onclick={() => onclose('button')}>Close<span class="key" aria-hidden="true">Esc</span></button>
     </div>
   </div>
@@ -157,8 +157,11 @@
   {#if data?.pending}
     <p class="msg note">Still reading the sessions that ended before sitboard started: more may appear here.</p>
   {/if}
+  {#if data?.partial}
+    <p class="msg note">Some sessions that ended before sitboard started were too large or too slow to read in full: items from them may be missing here.</p>
+  {/if}
   {#if data?.unsaved}
-    <p class="msg note">Nothing here is saved: sitboard runs with <span class="flag">--no-state</span>, so after every start this lists the last 7 days again.</p>
+    <p class="msg note">Nothing here is saved: sitboard runs with <span class="flag">--no-state</span>, or could not write its state file when it started, so what you mark read lasts until it stops.</p>
   {/if}
 
   <div class="body">

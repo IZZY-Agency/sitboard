@@ -3,6 +3,7 @@ package codex
 import (
 	"bufio"
 	"bytes"
+	"container/heap"
 	"context"
 	"encoding/json"
 	"errors"
@@ -29,6 +30,9 @@ const (
 	maxPending  = 1000
 	maxWord     = 64 // model ids and effort words longer than this are dropped
 )
+
+// liveReadCap is readCap for a tailer made by newTailer; tests set it lower.
+var liveReadCap int64 = readCap
 
 // threadIDRe is a Codex thread id: a UUID, lowercase as Codex writes it.
 var threadIDRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
@@ -132,9 +136,13 @@ type derived struct {
 
 // tailer reads a rollout from a remembered offset.
 type tailer struct {
-	id        string // the thread's id: only its own token records count
-	spendOnly bool   // a spawned thread: only its token records are read
-	sawRecord bool   // a valid token record of the thread was read from this file
+	id        string    // the thread's id: only its own token records count
+	spendOnly bool      // a spawned thread: only its token records are read
+	startup   bool      // the start-up read of an ended session: no status, no approval waits, no agterm spawns
+	started   time.Time // the thread's own session_meta time, once read
+	forked    bool      // another thread's session_meta followed its own: a fork's copied history comes before it
+	foreign   bool      // its first session_meta is another thread's: nothing in the file is read as this one's
+	sawRecord bool      // a valid token record of the thread was read from this file
 	path      string
 	off       int64
 	info      os.FileInfo
@@ -144,13 +152,48 @@ type tailer struct {
 	opened    bool            // the file was opened once: the readCap jump is done
 	stale     bool            // the last read failed or was cut short: read again, from t.off
 	cap       int64           // how far before its end a file first opened is read from
+	whole     bool            // a file first opened larger than cap is not read at all: errTooLarge
+	turns     turnHeap        // the newest maxTurns turn ends in the window, oldest on top; d.TurnEnds is it sorted
+	turnsSet  bool            // turns changed since d.TurnEnds was last set from it
+}
+
+// turnHeap is a min-heap of turn end times.
+type turnHeap []time.Time
+
+func (h turnHeap) Len() int           { return len(h) }
+func (h turnHeap) Less(i, j int) bool { return h[i].Before(h[j]) }
+func (h turnHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *turnHeap) Push(x any)        { *h = append(*h, x.(time.Time)) }
+func (h *turnHeap) Pop() any {
+	old := *h
+	x := old[len(old)-1]
+	*h = old[:len(old)-1]
+	return x
+}
+
+// syncTurns sets d.TurnEnds, in time order, from the heap when it changed.
+func (t *tailer) syncTurns() {
+	if !t.turnsSet {
+		return
+	}
+	t.turnsSet = false
+	if len(t.turns) == 0 {
+		t.d.TurnEnds = nil
+		return
+	}
+	t.d.TurnEnds = slices.Clone([]time.Time(t.turns))
+	slices.SortFunc(t.d.TurnEnds, time.Time.Compare)
 }
 
 func newTailer(path string) *tailer {
-	return &tailer{path: path, asking: map[string]bool{}, cap: readCap}
+	return &tailer{path: path, asking: map[string]bool{}, cap: liveReadCap}
 }
 
 var errNotRegular = errors.New("codex: rollout is not a regular file")
+
+// errTooLarge: a tailer that reads only whole files (whole) met one larger
+// than its cap, as its own stat sees it.
+var errTooLarge = errors.New("codex: rollout too large to read whole")
 
 // update reads what was appended since the last call and reports whether the
 // derived facts may have changed. A file whose size and modification time are
@@ -161,6 +204,7 @@ func (t *tailer) update(ctx context.Context, now time.Time) (changed bool, err e
 		if err != nil {
 			t.stale = true // a read that failed or was cut short is repeated from t.off, not from a jump
 		}
+		t.syncTurns()
 	}()
 	fi, err := os.Lstat(t.path)
 	if err != nil {
@@ -172,13 +216,18 @@ func (t *tailer) update(ctx context.Context, now time.Time) (changed bool, err e
 	if t.info != nil && (!os.SameFile(t.info, fi) || fi.Size() < t.off) {
 		// Replaced or cut short: what was derived is not this file's.
 		t.off, t.d, t.skipCut, t.opened, t.sawRecord = 0, derived{}, false, false, false
+		t.started, t.forked, t.foreign, t.turns, t.turnsSet = time.Time{}, false, false, nil, false // a replacement's fork boundary is its own
 		clear(t.asking)
 		changed = true
 	}
 	if !changed && !t.stale && t.info != nil && fi.Size() == t.info.Size() && fi.ModTime().Equal(t.info.ModTime()) {
 		return t.prune(now), nil
 	}
-	if !t.opened {
+	first := !t.opened
+	if first {
+		if t.whole && fi.Size() > t.cap {
+			return false, errTooLarge
+		}
 		t.opened = true
 		if fi.Size() > t.cap {
 			t.off, t.skipCut = fi.Size()-t.cap, true
@@ -196,10 +245,28 @@ func (t *tailer) update(ctx context.Context, now time.Time) (changed bool, err e
 	if ofi, err := f.Stat(); err != nil || !os.SameFile(ofi, fi) {
 		return changed, errNotRegular
 	}
+	if first {
+		// The head, read through this descriptor before anything else, holds
+		// the thread's own session_meta and, in a fork, its parent's after it:
+		// read so, the copied history (in a tail past a jump too) is known as
+		// the parent's. A head that cannot be read whole may hide a fork: then
+		// nothing from before the thread's own start (or, without it, before
+		// now) is taken as its own.
+		if !t.headMetas(f, now) {
+			t.forked = true
+			if t.started.IsZero() {
+				t.started = now
+			}
+		}
+	}
 	if _, err := f.Seek(t.off, io.SeekStart); err != nil {
 		return changed, err
 	}
-	r := bufio.NewReaderSize(f, 256<<10)
+	var src io.Reader = f
+	if t.whole { // past the cap by one byte at most: grown since the stat, it is too large
+		src = io.LimitReader(f, t.cap+1-t.off)
+	}
+	r := bufio.NewReaderSize(src, 256<<10)
 	var long []byte
 	skipping, lineLen := false, int64(0)
 	for n := 1; ; n++ {
@@ -219,6 +286,9 @@ func (t *tailer) update(ctx context.Context, now time.Time) (changed bool, err e
 			}
 			continue
 		case errors.Is(err, io.EOF): // an incomplete last line waits for the next update
+			if t.whole && t.off+lineLen > t.cap {
+				return changed, errTooLarge
+			}
 			return t.prune(now) || changed, nil
 		case err != nil:
 			return changed, err
@@ -239,18 +309,82 @@ func (t *tailer) update(ctx context.Context, now time.Time) (changed bool, err e
 	}
 }
 
+// maxHeadMetas is how many lines at a rollout's head are looked at for its
+// session_meta lines: the thread's own, then, in a fork, its parent's.
+const maxHeadMetas = 4
+
+// headMetas reads the first maxHeadMetas lines of a rollout opened for the
+// first time and takes the session_meta lines among them: the thread's own
+// first, then, in a fork, its parent's (up to three lines after it). whole is
+// whether it read each of them (a short file's all) and the first is the
+// thread's own session_meta: a line longer than maxMetaLine, or one that is
+// not JSON, could be a fork's parent's. A first line that is another thread's
+// session_meta makes the file foreign: nothing in it is the thread's.
+func (t *tailer) headMetas(f *os.File, now time.Time) (whole bool) {
+	if t.spendOnly || t.id == "" {
+		return true // no turn or pull request is read from it
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return false
+	}
+	// Whole lines, wherever a jump landed: one it cuts is still read here.
+	r := bufio.NewReaderSize(io.LimitReader(f, maxHeadMetas*maxMetaLine), 64<<10)
+	for i := range maxHeadMetas {
+		b, err := readLine(r, maxMetaLine)
+		if errors.Is(err, io.EOF) && i > 0 {
+			return true // a short file: the rest is read as it is written
+		}
+		var l line
+		if err != nil || json.Unmarshal(bytes.TrimSpace(b), &l) != nil {
+			return false
+		}
+		if l.Type == "session_meta" {
+			t.sessionMeta(l.Payload, parseTS(l.Timestamp, now))
+		}
+		if i == 0 && t.started.IsZero() {
+			return false
+		}
+	}
+	return true
+}
+
+// errLineTooLong: readLine met a line longer than its limit.
+var errLineTooLong = errors.New("codex: line too long")
+
+// readLine reads one whole line of at most limit bytes; a longer line is
+// errLineTooLong, and an unfinished one an error.
+func readLine(r *bufio.Reader, limit int) ([]byte, error) {
+	var b []byte
+	for {
+		chunk, err := r.ReadSlice('\n')
+		if len(b)+len(chunk) > limit {
+			return nil, errLineTooLong
+		}
+		b = append(b, chunk...)
+		switch {
+		case errors.Is(err, bufio.ErrBufferFull):
+			continue
+		case err != nil:
+			return nil, err
+		}
+		return b, nil
+	}
+}
+
 // prune drops turn ends older than turnWindow and spend older than spendKeep.
 func (t *tailer) prune(now time.Time) bool {
 	spans := t.pruneSpans(now)
 	cut := now.Add(-turnWindow)
-	i := 0
-	for i < len(t.d.TurnEnds) && t.d.TurnEnds[i].Before(cut) {
-		i++
+	dropped := false
+	for len(t.turns) > 0 && t.turns[0].Before(cut) {
+		heap.Pop(&t.turns)
+		dropped = true
 	}
-	if i == 0 {
+	if !dropped {
 		return spans
 	}
-	t.d.TurnEnds = slices.Clone(t.d.TurnEnds[i:])
+	t.turnsSet = true
+	t.syncTurns()
 	return true
 }
 
@@ -286,10 +420,10 @@ func (t *tailer) consume(b []byte, now time.Time) {
 		return
 	}
 	var l line
-	if json.Unmarshal(b, &l) != nil {
+	if t.foreign || json.Unmarshal(b, &l) != nil {
 		return
 	}
-	if t.spendOnly { // a spawned thread, or a catch-up read: its token records, nothing else
+	if t.spendOnly { // a spawned thread, followed live or caught up: its token records, nothing else
 		if l.Type == "token_usage_record" {
 			t.record(l.Payload, parseTS(l.Timestamp, now))
 		}
@@ -301,6 +435,8 @@ func (t *tailer) consume(b []byte, now time.Time) {
 	}
 	var p payload
 	switch l.Type {
+	case "session_meta":
+		t.sessionMeta(l.Payload, at)
 	case "token_usage_record":
 		t.record(l.Payload, at)
 	case "turn_context":
@@ -320,19 +456,24 @@ func (t *tailer) consume(b []byte, now time.Time) {
 		}
 		switch p.Type {
 		case "task_started", "turn_started":
-			t.setStatus(model.StatusBusy, at)
-		case "task_complete", "turn_complete", "turn_aborted":
-			t.setStatus(model.StatusFinished, at)
-			clear(t.asking)
-			if !at.IsZero() && len(t.d.TurnEnds) < maxTurns {
-				t.d.TurnEnds = append(t.d.TurnEnds, at)
+			if !t.startup {
+				t.setStatus(model.StatusBusy, at)
 			}
+		case "task_complete", "turn_complete", "turn_aborted":
+			if !t.startup {
+				t.setStatus(model.StatusFinished, at)
+				clear(t.asking)
+			}
+			t.turnEnd(at, now)
 		case "item_completed":
-			if p.Item.Type == "CommandExecution" {
+			if p.Item.Type == "CommandExecution" && !t.inherited(at) {
 				t.command(p.Item.Cmd, p.Item.Output, at)
 			}
 		}
 	case "response_item":
+		if t.startup { // approval waits are live state; an ended session has none
+			return
+		}
 		if json.Unmarshal(l.Payload, &p) != nil || p.CallID == "" || len(p.CallID) > 128 {
 			return
 		}
@@ -357,6 +498,53 @@ func (t *tailer) consume(b []byte, now time.Time) {
 			}
 		}
 	}
+}
+
+// sessionMeta notes the thread's own session_meta (its first) and, after it,
+// another thread's: a fork repeats its parent's, followed by the parent's
+// history, which is not the fork's own.
+func (t *tailer) sessionMeta(raw json.RawMessage, at time.Time) {
+	var m struct {
+		ID string `json:"id"`
+	}
+	if t.id == "" || json.Unmarshal(raw, &m) != nil {
+		return
+	}
+	switch {
+	case m.ID != t.id && t.started.IsZero():
+		t.foreign = true // another thread's rollout
+	case m.ID == t.id && t.started.IsZero():
+		t.started = at
+	case m.ID != t.id && !t.started.IsZero():
+		t.forked = true
+	}
+}
+
+// inherited: an event from before the thread's own start, in a rollout that
+// holds another thread's session_meta after its own, is a fork's copy of its
+// parent's history. Nothing of it is the fork's turn or command.
+func (t *tailer) inherited(at time.Time) bool {
+	return t.forked && !t.started.IsZero() && at.Before(t.started)
+}
+
+// turnEnd records a finished turn: not one outside turnWindow, nor a fork's
+// copy, and once maxTurns are held the oldest by time go first, whatever order
+// they were written in, so that a long rollout's expired turns cannot crowd
+// out its recent ones.
+func (t *tailer) turnEnd(at, now time.Time) {
+	if at.IsZero() || at.Before(now.Add(-turnWindow)) || t.inherited(at) {
+		return
+	}
+	switch {
+	case len(t.turns) < maxTurns:
+		heap.Push(&t.turns, at)
+	case at.After(t.turns[0]):
+		t.turns[0] = at
+		heap.Fix(&t.turns, 0)
+	default:
+		return // older than every turn held
+	}
+	t.turnsSet = true
 }
 
 func (t *tailer) setStatus(s model.Status, at time.Time) {
@@ -406,7 +594,7 @@ func (t *tailer) command(raw json.RawMessage, out string, at time.Time) {
 		// both ends of the window (the core widens it by two minutes).
 		t.d.CreatedPRs, t.d.PushedPRs = shellcmd.AddMergeRequests(t.d.CreatedPRs, t.d.PushedPRs, shellcmd.MergeRequests(out, k), at, at, maxPRs)
 	}
-	if len(cmd.Runs("agtermctl", "session", "new")) > 0 {
+	if !t.startup && len(cmd.Runs("agtermctl", "session", "new")) > 0 {
 		for _, n := range cmd.SpawnNames() {
 			t.d.SpawnedNames = addCapped(t.d.SpawnedNames, n, maxSpawns)
 		}

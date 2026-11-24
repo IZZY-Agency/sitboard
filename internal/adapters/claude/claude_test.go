@@ -29,18 +29,19 @@ const (
 
 // env is a temp home with Claude Code's folders and a fake process table.
 type env struct {
-	t      *testing.T
-	home   string
-	mu     sync.Mutex
-	procs  map[int]string // pid → lstart; nil map with psFail means ps failed
-	psBad  bool
-	reads  []int          // pids whose arguments and environment were read
-	launch map[int]string // pid → effort level it was launched with
-	tmux   map[int]model.TmuxPane
-	ttys   map[int]string            // pid → its terminal, as psTTY returns it
-	owns   func(model.TmuxPane) bool // tmux's answer to TmuxOwns; nil: no TmuxOwns
-	asked  []model.TmuxPane          // the panes TmuxOwns was asked about
-	scans  int                       // calls of starts: one per scan
+	t         *testing.T
+	home      string
+	mu        sync.Mutex
+	procs     map[int]string // pid → lstart; nil map with psFail means ps failed
+	psBad     bool
+	reads     []int          // pids whose arguments and environment were read
+	launch    map[int]string // pid → effort level it was launched with
+	tmux      map[int]model.TmuxPane
+	ttys      map[int]string            // pid → its terminal, as psTTY returns it
+	owns      func(model.TmuxPane) bool // tmux's answer to TmuxOwns; nil: no TmuxOwns
+	asked     []model.TmuxPane          // the panes TmuxOwns was asked about
+	printFlag bool                      // the process 4242 was started with -p
+	scans     int                       // calls of starts: one per scan
 }
 
 func (e *env) tty(_ context.Context, pid int) string {
@@ -103,6 +104,7 @@ func (e *env) proc(pid int) procFacts {
 	f := procFacts{LaunchEffort: e.launch[pid], Tmux: e.tmux[pid]}
 	if pid == 4242 {
 		f.TermID = termCoord
+		f.Headless = e.printFlag
 	}
 	return f
 }
@@ -517,12 +519,12 @@ func TestReadsOnlyTheAgtermVariable(t *testing.T) {
 }
 
 // Arguments and an environment full of other material leave only the agterm
-// id and the level in what the adapter keeps: the raw strings are dropped.
+// id, the level and the -p flag in what the adapter keeps: the raw strings are dropped.
 func TestProcFactsKeepOnlyTheLevel(t *testing.T) {
 	id := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 	args := []string{"claude", "--model", "secret-model-arg", "-p", "a secret prompt --effort low", "--effort", "HIGH", "--settings", "/secret/path.json", "--", "--effort", "max"}
 	env := []string{"API_TOKEN=secret-token", "CLAUDE_EFFORT=max", "CLAUDE_CODE_OTHER=secret-other", "AGTERM_SESSION_ID=" + id, "PWD=/secret/folder"}
-	want := procFacts{TermID: strings.ToUpper(id), LaunchEffort: "high"}
+	want := procFacts{TermID: strings.ToUpper(id), LaunchEffort: "high", Headless: true}
 	for _, got := range []procFacts{procFactsFromProcArgs2(procArgs2(args, env)), procFactsFromLinux(nul(args), nul(env))} {
 		if got != want {
 			t.Fatalf("kept %+v, want %+v", got, want)
@@ -912,5 +914,26 @@ func TestFirstSessionKeptUntilTheProcessEnds(t *testing.T) {
 	r.rescan(ctx)
 	if len(r.firsts) != 0 {
 		t.Fatalf("firsts = %v after the pid was reused", r.firsts)
+	}
+}
+
+// printFlag is -p or --print before "--", and nothing else.
+func TestPrintFlag(t *testing.T) {
+	for args, want := range map[string]bool{
+		"claude":                               false,
+		"claude -p x":                          true,
+		"claude --print x":                     true,
+		"claude --model m -p":                  true,
+		"claude -- -p":                         false,
+		"claude --effort high":                 false,
+		"claude --append-system-prompt-file f": false,
+	} {
+		var a [][]byte
+		for _, w := range strings.Fields(args) {
+			a = append(a, []byte(w))
+		}
+		if got := printFlag(a); got != want {
+			t.Errorf("%q: %v, want %v", args, got, want)
+		}
 	}
 }

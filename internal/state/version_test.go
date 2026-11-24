@@ -17,16 +17,16 @@ func TestA010FileOpens(t *testing.T) {
 	}
 	file := filepath.Join(t.TempDir(), "state.json")
 	mustWriteFile(t, file, data)
-	s, err := Open(file)
+	at := time.Date(2026, 11, 17, 10, 0, 0, 0, time.UTC)
+	s, err := OpenAt(file, func() time.Time { return at.Add(24 * time.Hour) }) // a day after it was written
 	if err != nil {
 		t.Fatal(err)
 	}
-	at := time.Date(2026, 11, 17, 10, 0, 0, 0, time.UTC)
 	if got, ok := s.SeenAt("claude:11111111-2222-3333-4444-555555555555"); !ok || !got.Equal(at) {
 		t.Errorf("seen %v %v", got, ok)
 	}
-	if got := s.CatchupMarker(); !got.Equal(at.Add(-time.Hour)) {
-		t.Errorf("marker %v", got)
+	if b, _ := os.ReadFile(file); strings.Contains(string(b), "catchupMarker") {
+		t.Errorf("the old marker was kept: %s", b)
 	}
 }
 
@@ -49,8 +49,8 @@ func TestA020FileOpens(t *testing.T) {
 	if got, ok := s.SeenAt("claude:11111111-2222-3333-4444-555555555555"); !ok || !got.Equal(at) {
 		t.Errorf("seen %v %v", got, ok)
 	}
-	if got := s.CatchupMarker(); !got.Equal(at.Add(-time.Hour)) {
-		t.Errorf("marker %v", got)
+	if b, _ := os.ReadFile(file); strings.Contains(string(b), "catchupMarker") {
+		t.Errorf("the old marker was kept: %s", b)
 	}
 	if got := s.Umbrellas(); len(got) != 1 || !got["/home/dev/work"].Equal(at) {
 		t.Errorf("umbrellas %v", got)
@@ -90,7 +90,7 @@ func TestOnlySitboardStateFilesOpen(t *testing.T) {
 		"a huge version":        {`{"version":99999999999999999999,"seen":{}}`, "newer sitboard (file version 99999999999999999999,"},
 		"a huge negative":       {`{"version":-99999999999999999999,"seen":{}}`, "version -99999999999999999999 is not one"},
 		"an array":              {`[1]`, "not a valid state file"},
-		"a newer version":       {`{"version":3,"seen":{}}`, "newer sitboard (file version 3,"},
+		"a newer version":       {`{"version":4,"seen":{}}`, "newer sitboard (file version 4,"},
 		"version 2":             {`{"version":2,"seen":{},"grouping":{"/home/dev/broad":"never"}}`, ""},
 		"version 2, no setting": {`{"version":2,"seen":{}}`, ""},
 		"version 1":             {`{"version":1,"seen":{}}`, ""},

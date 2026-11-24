@@ -17,6 +17,10 @@ The working repository is private. The public repository,
 | `tap.sh` | Writes the formula into the tap checkout from the published release, and commits. |
 | `*_test.sh` | The tests of these scripts; `make check` runs them. |
 
+`make check` also runs the export's gates at the pull request (`make export-gates`), so a refused file kind (`KINDS`), an oversized or private file, an ignored tracked file, or a pointer to `docs/` or the website's folder in a code comment fails there and not at release time. It runs `PUBLISH_GATES_ONLY=1 scripts/publish.sh`: no target at all (no public checkout, no new repository, nothing probed or written), no network (git may not fetch a missing object), no commit. The tracked files are staged in publish.sh's own scratch repository, the same gates run, and `check-private.sh` runs from the staged copy, with the deny-list, or with `--no-denylist` when `PRIVATE_FLAGS` is exactly that (any other value is refused: `--help` would make the scanner exit 0 unscanned). A search that cannot finish (a grep or sed error) fails the gate, in a real export as well. Only the staged snapshot decides: its `.gitignore` and its `check-private.sh`, so an edit that is only in the worktree neither passes nor refuses it. The tests set `PRIVATE_FLAGS` per case, so `make check PRIVATE_FLAGS=--no-denylist` (CI, and the release's clean copy) does not weaken them. The clean-copy `make check` and `make build` stay release-only (they would run this step again); when the release runs that clean copy, whose own `make check` runs this step, the rehearsal switches (`PUBLISH_TEST_*`, `PUBLISH_GATES_ONLY`, `PUBLISH_IDENT`) do not reach it.
+
+publish.sh refuses an exported path with a control character (a newline, a tab), keeps everything it writes in one scratch folder under `TMPDIR` (made absolute, and named by an explicit template: macOS `mktemp -d` alone ignores `TMPDIR`), gives every `check-private.sh` run and the clean copy a `TMPDIR` inside it, and removes it on exit, Ctrl-C or SIGTERM (its traps are set before the folder exists). An interrupted write is undone in two phases: the paths the write had begun (recorded as each one starts) are removed, never through a link on the way, and then the old index and files are checked out; the removal is never replayed once the restore has started. If either phase fails, it says so, prunes nothing, keeps that folder and writes `recover.sh` there: `bash <folder>/recover.sh` ignores the calling shell's git environment, refuses unless the target is the same folder and repository (path and inode), and finishes only the phases not yet done. A gates-only run reads `RELEASE_VERSION` from the staged Makefile.
+
 The release tests run on macOS through `make check`. To run them on Linux as well, commit first, then:
 
 ```sh
@@ -41,6 +45,8 @@ There is one release gate, in `publish.sh`, and its history scan runs on the pub
 ## Releasing a version
 
 The version lives in one place: `RELEASE_VERSION` in the Makefile. `CHANGELOG.md` must open with its `## <version>` entry; `make check` enforces that. Every script below ignores your global and system git config and hooks, and none of them pushes.
+
+Before step 1, run **`make audit`**: govulncheck on the Go code and `npm audit` on the packages of the web page and of the website (it needs the network, so `make check` does not run it). A finding stops the release until the dependency, or Go itself, is updated.
 
 1. **Export.** In a clean private tree, with a clone of the public repository next to it (its origin exactly `https://github.com/IZZY-Agency/sitboard.git`):
 

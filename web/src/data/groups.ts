@@ -9,6 +9,7 @@
 // its parts. The first project of a duplicated id wins.
 import { ColumnValues, type Card, type Column, type Counts, type Project, type Snapshot } from '../contract.gen';
 import { clean } from './text';
+import { openIssuesOf } from './issues';
 
 type S = Pick<Snapshot, 'cards' | 'projects'>;
 
@@ -92,6 +93,8 @@ export interface PartEntry {
   dots: Dot[];
   more: number;
   note: string;
+  /** Open issues of this part's repository; null when not known. */
+  issues: number | null;
 }
 
 export interface Top {
@@ -113,6 +116,8 @@ export interface RailProject {
   more: number;
   note: string;
   parts: PartEntry[];
+  /** Open issues of the project and its parts; null when not known. */
+  issues: number | null;
 }
 
 export interface RailGroup {
@@ -147,7 +152,7 @@ function entriesOf(top: Top): PartEntry[] {
   }
   const entry = (p: Project, own: boolean): PartEntry => {
     const cards = mine.get(p.id) ?? [];
-    return { id: p.id, name: clean(p.name), count: cards.length, own, ...dotsOf(cards), note: tileNote(cards) };
+    return { id: p.id, name: clean(p.name), count: cards.length, own, ...dotsOf(cards), note: tileNote(cards), issues: openIssuesOf([p]) };
   };
   const list = [entry(top.project, true), ...top.parts.map((p) => entry(p, false))].filter((e) => e.count > 0);
   if (!list.some((e) => !e.own)) return [];
@@ -202,6 +207,7 @@ export function grouping(s: S): Grouping {
       ...dotsOf(t.cards),
       note: tileNote(t.cards, t.entries.filter((e) => !e.own).length),
       parts: t.entries,
+      issues: openIssuesOf([t.project, ...t.parts]),
     });
     groups.set(key, g);
   }
@@ -275,6 +281,26 @@ export function validSel(s: S | Grouping, sel: Sel): Sel {
   return sel.kind === 'all' || filterCards(g, sel).length > 0 ? sel : ALL;
 }
 
+/** The projects a selection covers: each top-level project with its parts, or the one part. */
+export function projectsOf(s: S | Grouping, sel: Sel): Project[] {
+  const g = asGrouping(s);
+  const own = (t: Top) => [t.project, ...t.parts];
+  switch (sel.kind) {
+    case 'all':
+      return g.tops.flatMap(own);
+    case 'top': {
+      const t = g.topById.get(sel.id);
+      return t ? own(t) : [];
+    }
+    case 'part': {
+      const p = g.byId.get(sel.id);
+      return p ? [p] : [];
+    }
+    case 'area':
+      return g.tops.filter((t) => g.groupOf.get(t.id) === sel.key).flatMap(own);
+  }
+}
+
 /** The selection in words: "all projects", "mainapp", "mainapp / web", an area. */
 export function selName(s: S | Grouping, sel: Sel): string {
   const g = asGrouping(s);
@@ -315,9 +341,11 @@ export interface Tile {
   note: string;
   needs: boolean;
   hasParts: boolean;
+  /** Open issues of the tile's projects; null when not known. */
+  issues: number | null;
 }
 
-function tileOf(sel: Sel, key: string, name: string, cards: readonly Card[], parts: number): Tile {
+function tileOf(sel: Sel, key: string, name: string, cards: readonly Card[], parts: number, projects: readonly Project[]): Tile {
   return {
     sel,
     key,
@@ -327,16 +355,17 @@ function tileOf(sel: Sel, key: string, name: string, cards: readonly Card[], par
     note: tileNote(cards, parts),
     needs: cards.some((c) => c.column === 'needs_you'),
     hasParts: parts > 0,
+    issues: openIssuesOf(projects),
   };
 }
 
 /** The tiles band: all projects, a tile per project with work in hand, and the idle box. */
 export function tileBand(s: S | Grouping): { all: Tile; active: Tile[]; idle: Tile[] } {
   const g = asGrouping(s);
-  const tile = (t: Top) => tileOf({ kind: 'top', id: t.id }, t.id, t.name, t.cards, t.entries.filter((e) => !e.own).length);
+  const tile = (t: Top) => tileOf({ kind: 'top', id: t.id }, t.id, t.name, t.cards, t.entries.filter((e) => !e.own).length, [t.project, ...t.parts]);
   return {
     // The overview is not marked: someone nearly always needs you somewhere.
-    all: { ...tileOf(ALL, 'all', 'all projects', g.cards, 0), needs: false },
+    all: { ...tileOf(ALL, 'all', 'all projects', g.cards, 0, projectsOf(g, ALL)), needs: false },
     active: g.tops.filter((t) => t.cards.some((c) => c.column !== 'idle')).map(tile),
     idle: g.tops.filter((t) => t.cards.every((c) => c.column === 'idle')).map(tile),
   };

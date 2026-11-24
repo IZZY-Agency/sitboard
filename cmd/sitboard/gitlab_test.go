@@ -43,6 +43,8 @@ func (f *fakeGlab) Host(_ context.Context, host string) error {
 
 func (f *fakeGlab) Failing(string) string { return "" }
 
+func (f *fakeGlab) Subfolder(string) string { return "" }
+
 func (f *fakeGlab) asked() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()

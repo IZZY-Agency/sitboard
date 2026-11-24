@@ -22,6 +22,9 @@ type Result struct {
 	// forks, may be missing, so a branch with none here is not known to have
 	// none.
 	BranchesComplete bool
+	// Wrong and Unverified are numbers asked for that are not in MRs for a
+	// reason other than not existing (see source.PartialLookup).
+	Wrong, Unverified []int
 }
 
 // Lookup returns the merge requests of the project path on host with the
@@ -38,24 +41,31 @@ func (p *Provider) Lookup(ctx context.Context, host, path string, iids []int, br
 	if p.off {
 		return Result{}, errNotAsked
 	}
-	if !ValidHost(host) || !ValidPath(path) {
+	if !model.ValidGitLabSite(host) || !ValidPath(path) {
 		return Result{}, errInvalidArg
 	}
+	// host and path are as the project's addresses carry them; glab is
+	// asked by host name, and the API by the path without the subfolder.
+	site, web := host, path
+	host = model.GitLabHostname(site)
 	nums, brs := cleanIIDs(iids), cleanBranches(branches)
 	if len(nums) == 0 && len(brs) == 0 {
 		return Result{BranchesComplete: true}, nil
 	}
-	key := cacheKey(host, path, nums, brs)
 	if p.glab() == "" {
 		p.setHealth(source.StateMissing, "glab not found")
 		return Result{}, errNoGlab
 	}
 
-	proj := host + "\x00" + path + "\x00"
+	proj := site + "\x00" + web + "\x00"
 	p.mu.Lock()
 	now := p.now()
 	h, current := p.answerLocked(host, knownFor)
 	st := p.stampLocked(host)
+	// The mount is part of the key: a cached answer is of the project as the
+	// host's subfolder then said it is, never of the same web path under
+	// another one.
+	key := cacheKey(site, web, nums, brs) + "\x00#" + h.subfolder
 	c, hit := p.cache[key]
 	until := p.backoff[host]
 	gen := p.forgotten[proj]
@@ -67,9 +77,13 @@ func (p *Provider) Lookup(ctx context.Context, host, path string, iids []int, br
 		return Result{}, errNowhere
 	case !h.known:
 		return Result{}, errNotKnown
-	case h.subfolder:
-		return Result{}, errSubfolder
 	}
+	path, ok := apiPath(web, h.subfolder)
+	if !ok {
+		// Not an address on this GitLab: nothing is asked.
+		return Result{}, fmt.Errorf("gitlab: %w", source.ErrRepoNotFound)
+	}
+	w := where{host: host, path: path, site: site, web: web}
 	if hit && now.Sub(c.at) < cacheFor {
 		return cloneResult(c.res), nil
 	}
@@ -81,10 +95,10 @@ func (p *Provider) Lookup(ctx context.Context, host, path string, iids []int, br
 	var all []found
 	seen := map[int]bool{}
 	for k := 0; k*maxIIDs < len(nums) || k*maxBranches < len(brs); k++ {
-		pa, err := p.query(ctx, host, path, chunk(nums, k, maxIIDs), chunk(brs, k, maxBranches))
+		pa, err := p.query(ctx, w, chunk(nums, k, maxIIDs), chunk(brs, k, maxBranches))
 		switch {
 		case errors.Is(err, errNoProject):
-			p.forget(host, path)
+			p.forget(site, web)
 			return Result{}, fmt.Errorf("gitlab: %w", source.ErrRepoNotFound)
 		case errors.Is(err, errIncomplete):
 			p.setHostHealth(host, "GitLab answered only part of a lookup")
@@ -98,6 +112,16 @@ func (p *Provider) Lookup(ctx context.Context, host, path string, iids []int, br
 		case err != nil:
 			return p.failed(err, host)
 		}
+		for _, n := range pa.wrong {
+			if !slices.Contains(res.Wrong, n) {
+				res.Wrong = append(res.Wrong, n)
+			}
+		}
+		for _, n := range pa.unverified {
+			if !slices.Contains(res.Unverified, n) {
+				res.Unverified = append(res.Unverified, n)
+			}
+		}
 		for _, f := range pa.mrs {
 			if !seen[f.mr.IID] {
 				seen[f.mr.IID] = true
@@ -109,14 +133,17 @@ func (p *Provider) Lookup(ctx context.Context, host, path string, iids []int, br
 		}
 	}
 	slices.SortFunc(all, func(x, y found) int { return x.mr.IID - y.mr.IID })
-	mrs, limited, err := p.withClosing(ctx, host, all, st)
+	mrs, limited, err := p.withClosing(ctx, host, site+"\x00"+h.subfolder, all, st)
 	if err != nil {
 		return p.failed(err, host)
 	}
 	res.MRs = mrs
-	if limited {
+	switch {
+	case limited:
 		p.setHostHealth(host, noteRateLimited)
-	} else {
+	case len(res.Unverified) > 0:
+		p.setHostHealth(host, "GitLab answered only part of a lookup")
+	default:
 		p.setHostHealth(host, "")
 		p.setHealth(source.StateOK, "")
 	}
@@ -128,11 +155,23 @@ func (p *Provider) Lookup(ctx context.Context, host, path string, iids []int, br
 	}
 	// An overlapping lookup that found the project gone, or the login gone,
 	// since this one started wins: this older answer is returned, not cached.
-	if p.forgotten[proj] == gen && p.stampLocked(host) == st {
+	if len(res.Unverified) == 0 && p.forgotten[proj] == gen && p.stampLocked(host) == st { // an unsettled answer is asked again
 		p.cache[key] = cached{at: p.now(), res: cloneResult(res)}
 	}
 	p.mu.Unlock()
 	return res, nil
+}
+
+// apiPath is web, a project path as its addresses carry it, as the API
+// knows it: without sub, the host's GitLab subfolder ("" for none), in
+// front. ok=false when web does not start with sub: no project on this
+// GitLab has that address.
+func apiPath(web, sub string) (string, bool) {
+	if sub == "" {
+		return web, true
+	}
+	p, ok := strings.CutPrefix(web, sub+"/")
+	return p, ok && ValidPath(p)
 }
 
 // chunk is the k-th slice of at most n items of in, or nil.
@@ -166,20 +205,20 @@ var errUnexpected = errors.New("gitlab: unexpected answer from glab")
 // refuses the approval fields is asked again without them. An answer with
 // data and errors is read by parseAnswer, which keeps it only when the
 // errors touch nothing but a pipeline or an approval.
-func (p *Provider) query(ctx context.Context, host, path string, nums []int, brs []string) (parsed, error) {
-	q := shape{iids: len(nums) > 0, branches: len(brs) > 0, approvals: p.approvalsOn(host)}
-	out, err := p.graphql(ctx, host, path, nums, brs, q.approvals)
+func (p *Provider) query(ctx context.Context, w where, nums []int, brs []string) (parsed, error) {
+	q := shape{iids: len(nums) > 0, branches: len(brs) > 0, approvals: p.approvalsOn(w.host)}
+	out, err := p.graphql(ctx, w.host, w.path, nums, brs, q.approvals)
 	if q.approvals && lacksApproval(err) {
 		p.mu.Lock()
-		p.noApproval[host] = p.now()
+		p.noApproval[w.host] = p.now()
 		p.mu.Unlock()
 		q.approvals = false
-		out, err = p.graphql(ctx, host, path, nums, brs, q.approvals)
+		out, err = p.graphql(ctx, w.host, w.path, nums, brs, q.approvals)
 	}
 	if err != nil {
 		var ee *runner.ExitError
 		if errors.As(err, &ee) {
-			pa, perr := parseAnswer(ee.Stdout, host, path, q)
+			pa, perr := parseAnswer(ee.Stdout, w, q)
 			switch {
 			case perr == nil:
 				return pa, nil
@@ -189,7 +228,7 @@ func (p *Provider) query(ctx context.Context, host, path string, nums []int, brs
 		}
 		return parsed{}, err
 	}
-	pa, err := parseAnswer(out, host, path, q)
+	pa, err := parseAnswer(out, w, q)
 	if err != nil && !errors.Is(err, errNoProject) && !errors.Is(err, errIncomplete) {
 		return parsed{}, errUnexpected
 	}
@@ -276,13 +315,13 @@ var (
 // when the login was found gone since the lookup started. A call that
 // finds the login gone (callFailure.loggedOut) ends the lookup: err, and
 // no merge request is returned.
-func (p *Provider) withClosing(ctx context.Context, host string, found []found, st authStamp) (mrs []MergeRequest, limited bool, err error) {
+func (p *Provider) withClosing(ctx context.Context, host, scope string, found []found, st authStamp) (mrs []MergeRequest, limited bool, err error) {
 	mrs = make([]MergeRequest, 0, len(found))
 	calls := 0
 	stop := false
 	for _, f := range found {
 		mr := f.mr
-		k := host + "\x00" + strconv.Itoa(f.projectID) + "\x00" + strconv.Itoa(mr.IID)
+		k := scope + "\x00" + strconv.Itoa(f.projectID) + "\x00" + strconv.Itoa(mr.IID)
 		p.mu.Lock()
 		now := p.now()
 		cl, ok := p.closes[k]
@@ -380,6 +419,7 @@ func cacheKey(host, path string, nums []int, brs []string) string {
 func cloneResult(in Result) Result {
 	out := in
 	out.MRs = slices.Clone(in.MRs)
+	out.Wrong, out.Unverified = slices.Clone(in.Wrong), slices.Clone(in.Unverified)
 	for i := range out.MRs {
 		out.MRs[i].ClosingIssues = slices.Clone(out.MRs[i].ClosingIssues)
 	}

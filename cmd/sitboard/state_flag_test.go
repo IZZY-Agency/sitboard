@@ -110,7 +110,7 @@ func TestStateFlagRunsOnItsOwnFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer unlock()
-	if err := st.SetCatchupMarker(time.Now()); err != nil {
+	if err := st.SetSeen("card", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(file); err != nil {
@@ -162,9 +162,6 @@ func TestNoStateWritesNothing(t *testing.T) {
 	}
 	defer unlock()
 	if err := st.SetSeen("card", time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.SetCatchupMarker(time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := st.SeenAt("card"); !ok {
@@ -264,13 +261,13 @@ func TestStateFlagFollowsLinks(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer unlock()
-	if err := st.SetCatchupMarker(time.Now()); err != nil {
+	if err := st.SetSeen("card", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
 		t.Fatalf("the link was replaced: %v %v", fi, err)
 	}
-	if b, _ := os.ReadFile(target); !strings.Contains(string(b), "catchupMarker") {
+	if b, _ := os.ReadFile(target); !strings.Contains(string(b), `"card"`) {
 		t.Errorf("the target was not written: %s", b)
 	}
 

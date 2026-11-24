@@ -17,6 +17,7 @@ type procFacts struct {
 	TermID       string         // agterm session id, "" when none
 	Tmux         model.TmuxPane // zero when none
 	LaunchEffort string         // one of model.EffortLevels, "" when none was given
+	Headless     bool           // started with -p / --print: a headless run
 }
 
 // The environment variables read from a live session's process.
@@ -36,7 +37,7 @@ var terminalIDRe = regexp.MustCompile(`^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f
 // pickProcFacts reads the facts from a process's arguments (the first is the
 // program) and its KEY=VALUE environment entries.
 func pickProcFacts(args, env [][]byte) procFacts {
-	return procFacts{TermID: pickAgtermID(env), Tmux: pickTmux(env), LaunchEffort: launchEffort(args, env)}
+	return procFacts{TermID: pickAgtermID(env), Tmux: pickTmux(env), LaunchEffort: launchEffort(args, env), Headless: printFlag(args)}
 }
 
 // pickTmux returns the tmux pane from a list of KEY=VALUE entries, or zero
@@ -92,6 +93,22 @@ func envValue(env [][]byte, key string) ([]byte, bool) {
 		}
 	}
 	return nil, false
+}
+
+// printFlag: the arguments (the first is the program) hold -p or --print
+// before any "--": claude -p, a run with no person at it. Only this yes or
+// no is kept, never an argument (a prompt can be one).
+func printFlag(args [][]byte) bool {
+	for i := 1; i < len(args); i++ {
+		a := args[i]
+		if bytes.Equal(a, []byte("--")) {
+			return false
+		}
+		if bytes.Equal(a, []byte("-p")) || bytes.Equal(a, []byte("--print")) {
+			return true
+		}
+	}
+	return false
 }
 
 // launchEffort is the effort level a claude process was started with, as

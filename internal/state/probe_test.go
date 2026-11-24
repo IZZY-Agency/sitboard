@@ -117,9 +117,6 @@ func TestMemoryStoreKeepsEverythingAndWritesNothing(t *testing.T) {
 	if err := s.SetSeen("card", now); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetCatchupMarker(now); err != nil {
-		t.Fatal(err)
-	}
 	if err := s.TouchUmbrellas([]string{"/w/a", "/w/b"}, now); err != nil {
 		t.Fatal(err)
 	}
@@ -129,8 +126,8 @@ func TestMemoryStoreKeepsEverythingAndWritesNothing(t *testing.T) {
 	if at, ok := s.SeenAt("card"); !ok || !at.Equal(now) {
 		t.Errorf("seen %v %v", at, ok)
 	}
-	if !s.CatchupMarker().Equal(now) {
-		t.Errorf("marker %v", s.CatchupMarker())
+	if !s.InMemory() {
+		t.Error("a memory store says it is saved")
 	}
 	if u := s.Umbrellas(); len(u) != 1 {
 		t.Errorf("umbrellas %v", u)

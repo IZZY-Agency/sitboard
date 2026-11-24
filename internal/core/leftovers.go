@@ -3,6 +3,8 @@ package core
 import (
 	"cmp"
 	"context"
+	"errors"
+	"fmt"
 	"maps"
 	"path/filepath"
 	"slices"
@@ -33,6 +35,11 @@ type leftoverRepo struct {
 	// unclear: a GitHub repo whose origin has more than one address: never
 	// looked at, and the list says it is incomplete.
 	unclear bool
+	// checkoutsOnly: a repo on the board not on GitHub (another forge, or
+	// no origin). Nothing from it is offered and no forge is asked about it;
+	// its checkouts are read all the same (local git only), so a worktree of
+	// another repo that holds one is held back.
+	checkoutsOnly bool
 }
 
 // leftoverSession is an open session that has nothing left to do: in Idle
@@ -76,22 +83,28 @@ func (b *Board) startLeftoversLocked(ctx context.Context, now time.Time) {
 		return
 	}
 	repos, sessions, live := b.leftoverInputsLocked()
+	unread := b.leftoverUnreadLocked()
+	scope := b.leftoverScopeLocked()
 	if len(repos) == 0 {
 		// No repo on the board (yet: they resolve in the background):
-		// nothing is left over, and the ten minutes do not start.
-		if b.leftovers.State != contract.LeftoversReady || len(b.leftovers.Items) > 0 || len(b.leftovers.Held) > 0 || b.leftovers.Partial {
-			b.leftovers = contract.Leftovers{State: contract.LeftoversReady, AsOf: now.UTC(), Items: []contract.Leftover{}, Held: []contract.HeldCount{}}
+		// nothing is left over, and the ten minutes do not start. A folder
+		// git has not answered about may be in any repo: not checked.
+		partial := len(unread) > 0
+		if b.leftovers.State != contract.LeftoversReady || len(b.leftovers.Items) > 0 || len(b.leftovers.Held) > 0 || b.leftovers.Partial != partial {
+			b.leftovers = contract.Leftovers{State: contract.LeftoversReady, AsOf: now.UTC(), Items: []contract.Leftover{}, Held: []contract.HeldCount{}, Partial: partial}
 		}
+		b.leftoverScope = scope // the board as it is now: not due again until it changes
 		return
 	}
 	b.leftoverAt = now
 	b.leftoverSaw = b.mergedPRsLocked()
+	b.leftoverScope = scope
 	b.leftoverBusy = true
 	b.resolving.Add(1)
 	go func() {
 		defer b.resolving.Done()
 		lctx, cancel := context.WithTimeout(ctx, leftoverTimeout)
-		list := b.lookForLeftovers(lctx, repos, sessions, live)
+		list := b.lookForLeftovers(lctx, repos, sessions, live, len(unread) > 0)
 		cancel()
 		list.AsOf = now.UTC()
 		b.mu.Lock()
@@ -100,17 +113,62 @@ func (b *Board) startLeftoversLocked(ctx context.Context, now time.Time) {
 		if b.closed || ctx.Err() != nil {
 			return
 		}
+		if !slices.Equal(b.leftoverScopeLocked(), scope) {
+			// A repo joined, left or changed, or git's answer about a folder
+			// came or went, while the look ran: it did not see the board as
+			// it is now. The next look comes within a minute.
+			list.Partial = true
+		}
 		b.leftovers = list
 		b.rebuildLocked()
 	}()
 }
 
 // leftoversDueLocked: ten minutes since the last look, or a minute when a
-// session in the list has closed since or the board saw a pull request
-// merge. Callers hold b.mu.
+// session in the list has closed since, the board saw a pull request merge,
+// or the repos on the board are not the ones the last look started from.
+// Callers hold b.mu.
 func (b *Board) leftoversDueLocked(now time.Time) bool {
 	gap := since(b.leftoverAt, now)
-	return gap >= leftoversEvery || gap >= leftoversSoonest && (b.leftoverSessionGoneLocked() || b.newMergeLocked())
+	return gap >= leftoversEvery || gap >= leftoversSoonest &&
+		(b.leftoverSessionGoneLocked() || b.newMergeLocked() || !slices.Equal(b.leftoverScopeLocked(), b.leftoverScope))
+}
+
+// leftoverUnreadLocked returns the folders of the sessions that are on the
+// board, or will be once git answers, that git has not answered about: the
+// lookup is still under way (such a session has no card yet), or it failed.
+// Such a folder may be in any repo, a GitHub clone too, and any of that
+// repo's checkouts may be anywhere: the list is incomplete, and a worktree
+// that could hide a checkout is held back. Callers hold b.mu.
+func (b *Board) leftoverUnreadLocked() []string {
+	var out []string
+	for _, s := range b.sessions {
+		f := s.Folder
+		if _, resolved := b.repos[f]; f != "" && b.onceResolvedLocked(s) && (!resolved || b.repoFailed[f]) {
+			out = append(out, f)
+		}
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
+}
+
+// leftoverScopeLocked is what a look covers, sorted: each repo on the board
+// as git answered about it (main checkout, origin, whether it is clear), and
+// each folder git has not answered about. Callers hold b.mu.
+func (b *Board) leftoverScopeLocked() []string {
+	set := map[string]bool{}
+	for _, f := range b.leftoverUnreadLocked() {
+		set["unread\x00"+f] = true
+	}
+	for _, s := range b.sessions {
+		f := s.Folder
+		if _, resolved := b.repos[f]; !resolved || f == "" || b.repoFailed[f] || b.plain[f] || !b.onceResolvedLocked(s) {
+			continue
+		}
+		r := b.repos[f]
+		set[fmt.Sprintf("repo\x00%s\x00%s\x00%s\x00%v", r.MainRoot, r.Remote.Forge, r.Remote.Key(), r.OriginUnclear)] = true
+	}
+	return slices.Sorted(maps.Keys(set))
 }
 
 // mergedPRsLocked is the set of merged pull requests the board knows, from
@@ -192,10 +250,19 @@ func (b *Board) leftoverInputsLocked() ([]leftoverRepo, []leftoverSession, []str
 		repo := b.repoLocked(s.Folder)
 		// GitHub only: there is no evidence from any other forge yet, so a
 		// GitLab repo is never looked at (nothing is offered for removal).
+		// Every repo's checkouts are read all the same.
 		onGitHub := repo.Remote.Forge == model.ForgeGitHub && repo.Remote.Valid()
-		if (onGitHub || repo.OriginUnclear) && filepath.IsAbs(repo.MainRoot) {
-			if _, seen := repos[repo.MainRoot]; !seen {
-				repos[repo.MainRoot] = leftoverRepo{root: repo.MainRoot, remote: repo.Remote, projectID: c.ProjectID, unclear: repo.OriginUnclear}
+		if filepath.IsAbs(repo.MainRoot) && !b.plain[s.Folder] {
+			only := !onGitHub && !repo.OriginUnclear
+			r, seen := repos[repo.MainRoot]
+			switch {
+			case !seen:
+				repos[repo.MainRoot] = leftoverRepo{root: repo.MainRoot, remote: repo.Remote, projectID: c.ProjectID, unclear: repo.OriginUnclear, checkoutsOnly: only}
+			case r.checkoutsOnly != only || r.remote != repo.Remote:
+				// Two of its folders disagree about its origin (it changed
+				// between git's answers): not looked at, not checked.
+				r.unclear, r.checkoutsOnly = true, false
+				repos[repo.MainRoot] = r
 			}
 		}
 		// Evidence from GitHub only, for every change the session created: one
@@ -271,8 +338,10 @@ func (b *Board) allMergedLocked(refs []model.PRRef) (model.PullRequest, bool) {
 }
 
 // lookForLeftovers runs git and gh outside the lock and builds the list.
-func (b *Board) lookForLeftovers(ctx context.Context, repos []leftoverRepo, sessions []leftoverSession, live []string) contract.Leftovers {
-	list := contract.Leftovers{State: contract.LeftoversReady, Items: []contract.Leftover{}, Held: []contract.HeldCount{}}
+// unresolved: git has not answered about the folder of some session on the
+// board.
+func (b *Board) lookForLeftovers(ctx context.Context, repos []leftoverRepo, sessions []leftoverSession, live []string, unresolved bool) contract.Leftovers {
+	list := contract.Leftovers{State: contract.LeftoversReady, Items: []contract.Leftover{}, Held: []contract.HeldCount{}, Partial: unresolved}
 	var procs []model.Proc
 	known := false
 	if b.opts.Folders != nil {
@@ -285,14 +354,27 @@ func (b *Board) lookForLeftovers(ctx context.Context, repos []leftoverRepo, sess
 	// them beneath it is held back.
 	invs := make([]*model.RepoInventory, len(repos))
 	var checkouts []string
+	checkoutsUnknown := unresolved // some repo's checkouts were not all listed
 	for i, r := range repos {
 		checkouts = append(checkouts, r.root)
 		inv, err := git.Inventory(ctx, r.root)
+		if err != nil && !inv.WorktreesListed {
+			checkoutsUnknown = true
+		}
 		// The checkouts it registered count even when the rest of it could
 		// not be read (a partial clone, say): one may sit inside a worktree
 		// of another repo.
 		for _, w := range inv.Worktrees {
 			checkouts = append(checkouts, w.Path)
+		}
+		if r.checkoutsOnly {
+			// Only its checkouts count: the list is incomplete when they
+			// could not all be listed, or when its origin is on GitHub now
+			// (whatever failed after git read it).
+			if err != nil && !inv.WorktreesListed || !inv.Origin.IsZero() || inv.OriginUnclear {
+				list.Partial = true
+			}
+			continue
 		}
 		if err != nil || r.unclear || inv.Origin != r.remote {
 			// This repo could not be looked at, its origin names more than
@@ -348,7 +430,7 @@ func (b *Board) lookForLeftovers(ctx context.Context, repos []leftoverRepo, sess
 			}
 		}
 		items, hs := leftover.Scan(ctx, git, leftover.Repo{Root: r.root, PRs: ev.PRs, Incomplete: ev.Incomplete, Bases: ev.Bases,
-			Procs: procs, ProcsKnown: known, Sessions: sit, LiveDirs: live, Checkouts: checkouts}, inv)
+			Procs: procs, ProcsKnown: known, Sessions: sit, LiveDirs: live, Checkouts: checkouts, CheckoutsUnknown: checkoutsUnknown}, inv)
 		for _, h := range hs {
 			held[contract.HeldReason(h.Reason)]++
 			heldTrees = append(heldTrees, h.Worktrees...)
@@ -443,6 +525,9 @@ func (b *Board) lookForLeftovers(ctx context.Context, repos []leftoverRepo, sess
 		return cmp.Or(c.MergedAt.Compare(a.MergedAt), cmp.Compare(a.PullRequest.Repo, c.PullRequest.Repo),
 			cmp.Compare(a.PullRequest.Number, c.PullRequest.Number))
 	})
+	// A check with no answer, or the look's own time ran out: not all of it
+	// was checked.
+	list.Partial = list.Partial || git.unread || ctx.Err() != nil
 	return list
 }
 
@@ -504,6 +589,10 @@ func ownProcs(procs []model.Proc, pid int) map[int]bool {
 type scanGit struct {
 	source.RepoInventory
 	trees map[string]treeAnswer
+	// unread: a check got no answer: a worktree's files could not be read,
+	// or a call ran out of time. What it would have decided is held back,
+	// and the list is incomplete.
+	unread bool
 }
 
 type treeAnswer struct {
@@ -517,7 +606,16 @@ func (g *scanGit) TreeStatus(ctx context.Context, dir string) (model.TreeStatus,
 	}
 	st, err := g.RepoInventory.TreeStatus(ctx, dir)
 	g.trees[dir] = treeAnswer{st: st, err: err}
+	g.unread = g.unread || err != nil
 	return st, err
+}
+
+// IsAncestor: a commit that is not in the repo is an answer (the scan holds
+// that work back as unknown); a call cut short is none.
+func (g *scanGit) IsAncestor(ctx context.Context, root, a, b string) (bool, error) {
+	yes, err := g.RepoInventory.IsAncestor(ctx, root, a, b)
+	g.unread = g.unread || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
+	return yes, err
 }
 
 // onCleanDefault: the session's folder is in its repo's main checkout (no

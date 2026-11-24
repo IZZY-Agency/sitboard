@@ -25,8 +25,9 @@
 #     and none may be, ignoring case: inside a .claude, .codex or docs folder,
 #     in the website's top-level folder, .env*, a key or certificate store, a
 #     credentials file (.npmrc, .netrc, .pypirc, id_rsa and kin), a database,
-#     an editor swap or backup file, CLAUDE.md or AGENTS.md; tracked files
-#     that .gitignore ignores are refused too
+#     an editor swap or backup file, CLAUDE.md or AGENTS.md, or a path with a
+#     control character (a newline, a tab); tracked files that .gitignore
+#     ignores are refused too
 #   - a target that is, contains or sits inside the private repository
 #     (compared by file identity, so another spelling of the path does not
 #     help), shares its git folder, or holds its history (a clone of it)
@@ -73,14 +74,43 @@
 #   PUBLISH_TEST_REMOTE=/abs  a stand-in for the public repository: the
 #                             target's origin must be exactly this local
 #                             folder, and committing runs as for real
+#   PUBLISH_GATES_ONLY=1 scripts/publish.sh      (no target, no other switch)
+#                             `make check`'s run: stage the tracked files in
+#                             the scratch repository and run the fast gates
+#                             (kinds, sizes, ignore rules, docs/ and website
+#                             pointers, check-private from the staged copy),
+#                             then stop. There is no target: nothing is probed
+#                             or written, nothing is committed, no remote is
+#                             read and git may not fetch (a missing object
+#                             fails the gate). The clean-copy `make check` is
+#                             skipped (it would run this again). The private
+#                             tree may be dirty; only the staged snapshot
+#                             decides (its .gitignore, its scanner, its
+#                             Makefile's RELEASE_VERSION).
+#                             PRIVATE_FLAGS may be empty or --no-denylist
+#                             (CI), nothing else.
 #   PUBLISH_TEST_INTERRUPT_AFTER=N  (with either) stop the write into the
 #                             target after N files, as Ctrl-C would
+# None of these reach the clean copy's own make check (which runs the gates
+# only). Scratch files live in one folder under TMPDIR (made absolute), and
+# every scanner and the clean copy get a TMPDIR inside it; the traps that
+# remove it on exit, Ctrl-C or SIGTERM are set before it exists. An
+# interrupted write puts the target back (removing only the paths it began,
+# never through a link), or says it could not, keeps that folder, prunes
+# nothing and writes recover.sh there to finish by hand.
 # All git calls ignore the user's global and system git config and hooks.
 set -euo pipefail
 
 usage='usage: publish.sh <public-checkout> [--commit | --update "<subject>"]'
-TARGET_ARG="${1:?$usage}"
-MODE="${2:-}"
+GATES_ONLY="${PUBLISH_GATES_ONLY:-0}"
+case "$GATES_ONLY" in 0|1) ;; *) echo "publish: PUBLISH_GATES_ONLY must be 0 or 1" >&2; exit 2 ;; esac
+if [ "$GATES_ONLY" = 1 ]; then
+  [ $# -eq 0 ] || { echo "publish: PUBLISH_GATES_ONLY=1 takes no arguments (it has no target)" >&2; exit 2; }
+  TARGET_ARG="" MODE=""
+else
+  TARGET_ARG="${1:?$usage}"
+  MODE="${2:-}"
+fi
 ARG="${3:-}"
 fail() { echo "publish FAILED: $*" >&2; exit 1; }
 step() { echo "==> $*"; }
@@ -92,12 +122,19 @@ case "$MODE" in
 esac
 TEST_TARGET="${PUBLISH_TEST_TARGET:-0}"
 TEST_REMOTE="${PUBLISH_TEST_REMOTE:-}"
+[ "$GATES_ONLY" != 1 ] || [ -z "$TEST_REMOTE${PUBLISH_TEST_INTERRUPT_AFTER:-}" ] || fail "PUBLISH_GATES_ONLY=1 takes no rehearsal switch"
 REHEARSAL=0
 if [ "$TEST_TARGET" = 1 ] || [ -n "$TEST_REMOTE" ]; then REHEARSAL=1; fi
 
-# The target is resolved against the caller's folder, before anything moves.
-[ -d "$TARGET_ARG" ] || fail "$TARGET_ARG is not a directory"
-TARGET="$(cd "$TARGET_ARG" && pwd -P)"
+# TMPDIR, and the target, are resolved against the caller's folder, before
+# anything moves: every temporary folder below, and every child's, is absolute.
+TMPDIR="${TMPDIR:-/tmp}"
+TMPDIR="$(cd "$TMPDIR" && pwd -P)" || fail "TMPDIR is not a folder"
+export TMPDIR
+if [ "$GATES_ONLY" != 1 ]; then
+  [ -d "$TARGET_ARG" ] || fail "$TARGET_ARG is not a directory"
+  TARGET="$(cd "$TARGET_ARG" && pwd -P)"
+fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "$ROOT"
@@ -107,6 +144,9 @@ unset GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_DIR GIT_WORK_TREE GI
       GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE GIT_COMMON_DIR
 while IFS= read -r v; do unset "$v"; done < <(env | sed -n 's/^\(GIT_CONFIG_[A-Za-z0-9_]*\)=.*/\1/p')
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+# A gates-only run reads this repository and nothing else: git may not fetch a
+# missing object on demand (a partial clone) or use any transport.
+if [ "$GATES_ONLY" = 1 ]; then export GIT_NO_LAZY_FETCH=1 GIT_ALLOW_PROTOCOL=none GIT_TERMINAL_PROMPT=0; fi
 
 CANONICAL_URL="https://github.com/IZZY-Agency/sitboard.git"
 FETCH_URL="$CANONICAL_URL"
@@ -148,7 +188,9 @@ KINDS=(
   ".github=sitboard-banner.svg"
   "cmd:.go"
   "internal:.go .json .txt"
-  "internal=server/dist/.keep"
+  # The list of facts README and the website are built from (public, so
+  # readers can check the claims against the code); no other YAML.
+  "internal=server/dist/.keep facts/facts.yaml"
   "scripts:.md .mjs .sh .tmpl"
   "test:.go"
   "testdata:.json .jsonl .md .txt"
@@ -215,35 +257,129 @@ push_cmd() {  # [tag]
     "$TARGET" "$CANONICAL_URL" "$(tgit rev-parse HEAD)" "${1:+ refs/tags/$1}"
 }
 
-WORK="$(mktemp -d)" || fail "could not create a scratch folder"
-WORK="$(cd "$WORK" && pwd -P)"
-case "$WORK" in /?*) ;; *) fail "bad scratch folder: $WORK" ;; esac
+# sq <string>: the string in single quotes, for a command printed for a human.
+sq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
 writing=0
-# restore_target puts the target's files and index back as they were before
-# the write step began: whatever it wrote is removed, the old files checked out.
+keep_work=0
+WORK=""
+# safe_rm <top> <path>: removes <top>/<path> if it is a file or a link. A
+# missing path, or a real folder (never one the write created), is left alone.
+# Returns 1, removing nothing, when the path could lead outside <top>: a link
+# on the way, or a ., .. or .git part.
+safe_rm() {
+  local top="$1" rel="$2" pre="" rest="$2"
+  case "/$rel/" in *//*|*/./*|*/../*|*/.git/*) return 1 ;; esac
+  while [ "${rest#*/}" != "$rest" ]; do
+    pre="$pre${rest%%/*}"
+    rest="${rest#*/}"
+    if [ -L "$top/$pre" ]; then return 1; fi
+    [ -d "$top/$pre" ] || return 0
+    pre="$pre/"
+  done
+  if [ -d "$top/$rel" ] && [ ! -L "$top/$rel" ]; then return 0; fi
+  rm -f -- "$top/$rel"
+}
+# restore_tree: the target's index and files as they were before the write.
+restore_tree() { tgit read-tree "$pre_tree" && tgit checkout-index -a -f; }
+# restore_target puts the target back as it was before the write step began,
+# in two phases. Removal: each path the write had begun ($WORK/written, one per
+# line: the export refuses control characters) is removed with safe_rm; when
+# all are gone, $WORK/removed marks the phase done, and it is never replayed
+# (a partial restore may have put an old link back). Restore: the old index
+# and files. Anything that fails keeps the scratch folder, prunes nothing and
+# writes recover.sh there, which redoes only the phases not yet done.
 restore_target() {
-  if [ -s "$WORK/exported.stage" ]; then
-    while IFS= read -r f; do rm -f -- "${TARGET:?}/${f:?}"; done < "$WORK/exported.stage"
+  local f ok=1
+  if [ ! -e "$WORK/removed" ]; then
+    if [ -s "$WORK/written" ]; then
+      while IFS= read -r f; do safe_rm "$TARGET" "$f" || ok=0; done < "$WORK/written" || ok=0
+    fi
+    if [ "$ok" = 1 ]; then : > "$WORK/removed" || ok=0; fi
   fi
-  tgit read-tree "$pre_tree" && tgit checkout-index -a -f
-  find "$TARGET" -mindepth 1 -type d -empty -not -path "$TARGET/.git" -not -path "$TARGET/.git/*" -delete 2>/dev/null || true
-  tgit prune --expire=now 2>/dev/null || true   # the blobs the write had stored
-  echo "publish: interrupted while writing; the target was put back as it was" >&2
+  if [ "$ok" = 1 ] && restore_tree; then
+    find "$TARGET" -mindepth 1 -type d -empty -not -path "$TARGET/.git" -not -path "$TARGET/.git/*" -delete 2>/dev/null || true
+    tgit prune --expire=now 2>/dev/null || true   # the blobs the write had stored
+    echo "publish: interrupted while writing; the target was put back as it was" >&2
+    return 0
+  fi
+  keep_work=1
+  write_recover > "$WORK/recover.sh" 2>/dev/null || true
+  {
+    echo "publish: interrupted while writing, and the target could NOT be put back: it may be partly written"
+    echo "    the tree it had before is $pre_tree (not pruned); the files the write began are listed in $(sq "$WORK/written") (kept)"
+    echo "    finish by hand: bash $(sq "$WORK/recover.sh")"
+    echo "    then remove the scratch folder: rm -rf $(sq "$WORK")"
+  } >&2
+  return 1
 }
+# write_recover: recover.sh, for a human to finish a restore that failed. It
+# runs with publish.sh's git environment (no GIT_DIR, GIT_WORK_TREE or config
+# from the caller's shell) and target options, refuses unless the target is the
+# same folder and repository (path and inode of both), and then runs the phases
+# restore_target had not finished, with the same functions.
+write_recover() {
+  echo '#!/usr/bin/env bash'
+  echo '# Written by publish.sh: finishes putting the target back after an interrupted write.'
+  echo 'set -euo pipefail'
+  echo 'unset GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE \'
+  echo '      GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE GIT_COMMON_DIR GIT_CEILING_DIRECTORIES GIT_DISCOVERY_ACROSS_FILESYSTEM'
+  echo 'while IFS= read -r v; do unset "$v"; done < <(env | sed -n '"'"'s/^\(GIT_CONFIG_[A-Za-z0-9_]*\)=.*/\1/p'"'"')'
+  echo 'export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1'
+  echo "TARGET=$(sq "$TARGET")"
+  echo "WORK=$(sq "$WORK")"
+  echo "pre_tree=$pre_tree"
+  echo "target_id=$(sq "$target_id")"
+  declare -f tgit safe_rm restore_tree target_identity
+  echo 'cd "$TARGET"'
+  echo '[ "$(target_identity)" = "$target_id" ] || { echo "recover: $TARGET is not the checkout publish.sh wrote to (path, folder or repository changed): nothing done" >&2; exit 1; }'
+  echo 'if [ ! -e "$WORK/removed" ]; then'
+  echo '  while IFS= read -r f; do safe_rm "$TARGET" "$f" || { echo "recover: $f could lead outside the target (a link on the way): nothing more done" >&2; exit 1; }; done < "$WORK/written"'
+  echo '  : > "$WORK/removed"'
+  echo 'fi'
+  echo 'restore_tree'
+  echo 'find "$TARGET" -mindepth 1 -type d -empty -not -path "$TARGET/.git" -not -path "$TARGET/.git/*" -delete'
+  echo 'tgit prune --expire=now'
+  echo 'echo "recover: the target was put back; remove the scratch folder: rm -rf $WORK"'
+}
+# target_identity: the target's top level and git folder, by path and inode.
+target_identity() {
+  local top gd
+  top="$(tgit rev-parse --show-toplevel)" && gd="$(tgit rev-parse --absolute-git-dir)" || return 1
+  printf '%s %s %s %s' "$top" "$(ls -di "$top" | awk '{print $1}')" "$gd" "$(ls -di "$gd" | awk '{print $1}')"
+}
+pending=""
 on_exit() {
-  if [ "$writing" = 1 ]; then restore_target; fi
-  rm -rf "${WORK:?}"
+  if [ "$writing" = 1 ]; then restore_target || true; fi
+  [ "$keep_work" = 1 ] && return
+  case "$WORK" in /?*) rm -rf "$WORK" ;; esac
 }
+# The scratch folder is made while a signal only sets $pending: whenever it
+# arrives, WORK names the folder before the signal is acted on, so the cleanup
+# always knows what to remove.
 trap on_exit EXIT
+trap 'pending=130' INT
+trap 'pending=143' TERM
+# An explicit template: macOS mktemp -d would ignore TMPDIR (made absolute above).
+raw_work="$(mktemp -d "$TMPDIR/publish.XXXXXX")" || fail "could not create a scratch folder"
+WORK="$raw_work"
 trap 'exit 130' INT
 trap 'exit 143' TERM
+[ -z "$pending" ] || exit "$pending"
+WORK="$(cd "$raw_work" && pwd -P)" || { WORK="$raw_work"; fail "could not enter the scratch folder"; }
+case "$WORK" in /?*) ;; *) WORK="$raw_work"; fail "bad scratch folder: $WORK" ;; esac
+# TMPDIR of every scanner and of the clean copy: the cleanup above covers it.
+mkdir "$WORK/tmp" || fail "could not create a scratch folder"
 
 # --- preflight: the source ---------------------------------------------------------
-if [ "$TEST_TARGET" != 1 ]; then
+if [ "$TEST_TARGET" != 1 ] && [ "$GATES_ONLY" != 1 ]; then
   [ -z "$(pgit status --porcelain --untracked-files=no)" ] || fail "the private working tree is not clean"
 fi
-[ -f scripts/check-private.sh ] || fail "scripts/check-private.sh is missing"
-version="$(pgit show HEAD:Makefile | sed -n 's/^RELEASE_VERSION := \([^ ]*\)$/\1/p')"
+# (a gates-only run needs the staged scanner, checked after staging)
+[ "$GATES_ONLY" = 1 ] || [ -f scripts/check-private.sh ] || fail "scripts/check-private.sh is missing"
+# A gates-only run judges what is staged; a release, the commit it exports.
+version_src=HEAD:Makefile
+[ "$GATES_ONLY" != 1 ] || version_src=:Makefile
+version="$(pgit show "$version_src" | sed -n 's/^RELEASE_VERSION := \([^ ]*\)$/\1/p')"
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "RELEASE_VERSION in the Makefile is '${version:-missing}', not a release version"
 
 ident=""
@@ -352,6 +488,11 @@ while IFS= read -r -d '' entry; do
   rest="${entry#* }"
   blob="${rest%% *}"
   f="${entry#*$'\t'}"
+  # No control character (a newline, a tab, an escape) in an exported path:
+  # every list of paths below is one per line, and a terminal shows them as is.
+  if [ "$(printf '%s' "$f" | LC_ALL=C tr -d '\000-\037\177')" != "$f" ]; then
+    bad="$bad$(printf '%q' "$f"): a control character in the path (a newline, a tab, ...)"$'\n'; continue
+  fi
   # Bytes, not characters (LC_ALL=C): a path that is not UTF-8 is lowercased
   # whole, so the checks below see all of it.
   lc="$(printf '%s' "$f" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
@@ -381,14 +522,17 @@ while IFS= read -r -d '' entry; do
   if [ "$all" != "$nonul" ] && [[ " ${BINARY_ALLOWED[*]} " != *" $f "* ]]; then
     bad="$bad$f: binary content (BINARY_ALLOWED in scripts/publish.sh)"$'\n'
   fi
-  size="$(pgit cat-file -s "$blob")"
+  size="$(pgit cat-file -s "$blob")" || fail "could not read the size of $f (a missing object fails the gate)"
   if [ "$size" -gt "$MAX_BYTES" ] && [[ " ${SIZE_EXCEPTIONS[*]-} " != *" $f "* ]]; then
     bad="$bad$f: $size bytes, more than $MAX_BYTES (SIZE_EXCEPTIONS in scripts/publish.sh)"$'\n'
   fi
 done < "$WORK/export"
 [ -z "$bad" ] || { printf '%s' "$bad" >&2; fail "forbidden files in the export set (above)"; }
-ignored="$(pgit ls-files -ci --exclude-standard -- "${ALLOWLIST[@]}")"
-[ -z "$ignored" ] || { echo "$ignored" >&2; fail "tracked files that .gitignore ignores are in the export set (above)"; }
+# (a gates-only run judges the staged .gitignore, below, not the worktree's)
+if [ "$GATES_ONLY" != 1 ]; then
+  ignored="$(pgit ls-files -ci --exclude-standard -- "${ALLOWLIST[@]}")"
+  [ -z "$ignored" ] || { echo "$ignored" >&2; fail "tracked files that .gitignore ignores are in the export set (above)"; }
+fi
 
 if [ "$MODE" = --commit ]; then
   missing=""
@@ -398,7 +542,8 @@ if [ "$MODE" = --commit ]; then
   [ -z "$missing" ] || fail "the README and CHANGELOG describe project tiles and the side rail, but the export lacks:$missing (merge the grouping UI first)"
 fi
 
-# --- preflight: the target -----------------------------------------------------------
+# --- preflight: the target (a gates-only run has none) --------------------------------
+if [ "$GATES_ONLY" != 1 ]; then
 target_top="$(git -C "$TARGET" rev-parse --show-toplevel 2>/dev/null)" || fail "$TARGET is not a git checkout"
 [ "$target_top" -ef "$TARGET" ] || fail "$TARGET is inside a checkout ($target_top), not the checkout root"
 root_top="$(pgit rev-parse --show-toplevel)"
@@ -497,6 +642,8 @@ else
   [ -z "$others" ] || fail "the target has other local branches: $others"
 fi
 
+fi
+
 # An --update subject is free text: it may not name a private commit or
 # object, a private branch or tag, or a docs/ path.
 if [ "$MODE" = --update ]; then
@@ -566,6 +713,8 @@ write_tree() {
     rest="${entry#* }"
     blob="${rest%% *}"
     f="${entry#*$'\t'}"
+    # the target write records each path before it begins (the rollback's list)
+    if [ "$g" = tgit ]; then printf '%s\n' "$f" >> "$WORK/written"; fi
     mkdir -p -- "$dir/$(dirname "$f")"
     pgit cat-file blob "$blob" > "$dir/$f" || fail "could not read $f from the index"
     if [ "$mode" = 100755 ]; then chmod 755 "$dir/$f"; else chmod 644 "$dir/$f"; fi
@@ -582,26 +731,63 @@ write_tree() {
     || { diff "$WORK/exported.sorted" "$WORK/staged.sorted" >&2 || true; fail "the staged files are not exactly the exported files"; }
 }
 write_tree "$STAGE" sgit
-cp "$WORK/exported" "$WORK/exported.stage"   # what the target write may create
+
+# The ignore rules the public tree carries apply to the public tree: tracked
+# files its .gitignore ignores are refused. A real export also checked this
+# worktree's rules above; a gates-only run judges these alone (its worktree
+# may differ from what is staged), and needs the staged scanner.
+[ -f "$STAGE/scripts/check-private.sh" ] || fail "the staged snapshot has no scripts/check-private.sh"
+ignored="$(sgit ls-files -ci --exclude-standard)" || fail "could not check the staged files against .gitignore"
+[ -z "$ignored" ] || { echo "$ignored" >&2; fail "staged files that the exported .gitignore ignores (above)"; }
 
 # No pointer to a docs/ file the snapshot does not carry: a path that starts
 # docs/ (after any ./ or ../) at a word boundary; inside a URL it is not one.
+# scan <outfile> <pattern>: the matches (file:line:text) of a search over the
+# staged tree. grep's "no match" (1) is the clean answer; any other status is a
+# search that could not finish, and a search that did not finish is not clean.
+scan() {
+  local out="$1" rc=0
+  # a failed cd has its own status (99), never grep's "no match" (1)
+  (cd "$STAGE" || exit 99; LC_ALL=C grep -rIonE --exclude-dir=.git "$2" .) > "$out.raw" || rc=$?
+  [ "$rc" -le 1 ] || fail "searching the staged tree failed (grep status $rc): the gate cannot say it is clean"
+  sed 's|^\./||' "$out.raw" > "$out" || fail "could not read the search result"
+}
 dead=""
+scan "$WORK/docs-hits" '(^|[^A-Za-z0-9._/-])(\./|\.\./)*docs/[A-Za-z0-9._/-]*[A-Za-z0-9_-]'
 while IFS= read -r hit; do
   ref="${hit#*:*:}"
   ref="docs/${ref#*docs/}"
   [ -e "$STAGE/$ref" ] || dead="$dead${hit%%:*}:$(cut -d: -f2 <<<"$hit"): $ref is not exported"$'\n'
-done < <(cd "$STAGE" && LC_ALL=C grep -rIonE --exclude-dir=.git '(^|[^A-Za-z0-9._/-])(\./|\.\./)*docs/[A-Za-z0-9._/-]*[A-Za-z0-9_-]' . \
-           | sed 's|^\./||' || true)
+done < "$WORK/docs-hits"
 [ -z "$dead" ] || { printf '%s' "$dead" >&2; fail "the public tree points at docs/ files it does not carry: say the fact where it is used"; }
 # No reference to the website's folder (with or without a leading / or any
 # ./ or ../; inside a URL such as https://host/<folder>/ it is not one).
-site_refs="$(cd "$STAGE" && LC_ALL=C grep -rIonE --exclude-dir=.git "(^|[^A-Za-z0-9._/-])(\\./|\\.\\./|/)*$SITE_DIR/" . | sed 's|^\./||' || true)"
-[ -z "$site_refs" ] || { echo "$site_refs" >&2; fail "the public tree refers to the website's folder (above): the website is not published here"; }
+scan "$WORK/site-hits" "(^|[^A-Za-z0-9._/-])(\\./|\\.\\./|/)*$SITE_DIR/"
+[ ! -s "$WORK/site-hits" ] || { cat "$WORK/site-hits" >&2; fail "the public tree refers to the website's folder (above): the website is not published here"; }
 
 step "gate: scripts/check-private.sh with the deny-list"
-(cd "$STAGE" && bash "$ROOT/scripts/check-private.sh") \
+# A gates-only run (no real export) runs the staged copy of the scanner, so a
+# worktree edit cannot stand in for what would be exported, and takes one flag
+# at most: --no-denylist (CI has no deny-list). Any other value, --help
+# included, would let the scanner exit 0 without scanning. A real export
+# always runs with the deny-list, whatever the environment says.
+cp_script="$ROOT/scripts/check-private.sh"
+cp_flags=()
+if [ "$GATES_ONLY" = 1 ]; then
+  cp_script="$STAGE/scripts/check-private.sh"
+  case "${PRIVATE_FLAGS:-}" in
+    "") ;;
+    --no-denylist) cp_flags=(--no-denylist) ;;
+    *) fail "PRIVATE_FLAGS may be empty or --no-denylist in a gates-only run" ;;
+  esac
+fi
+(cd "$STAGE" && env TMPDIR="$WORK/tmp" bash "$cp_script" ${cp_flags[@]+"${cp_flags[@]}"}) \
   || fail "the public tree failed check-private (above); fix it in the private repository"
+
+if [ "$GATES_ONLY" = 1 ]; then
+  step "gates passed (stage only: the clean copy was not built, nothing was written)"
+  exit 0
+fi
 
 step "gate: a clean copy passes make check and make build"
 build="$WORK/build"
@@ -615,6 +801,8 @@ git -C "$build" -c core.hooksPath=/dev/null -c user.name=publish-gate -c user.em
 # and its level would come along (GNU make then also prints "Entering
 # directory" lines, which would push the result out of the summary below).
 if ! (cd "$build" && unset MAKEFLAGS MFLAGS GNUMAKEFLAGS MAKEFILES MAKELEVEL \
+  PUBLISH_TEST_TARGET PUBLISH_TEST_REMOTE PUBLISH_TEST_INTERRUPT_AFTER PUBLISH_GATES_ONLY PUBLISH_IDENT \
+  && export TMPDIR="$WORK/tmp" \
   && env -u CI make check PRIVATE_FLAGS=--no-denylist && make build) > "$WORK/build.log" 2>&1; then
   tail -40 "$WORK/build.log" >&2
   fail "the exported tree does not pass make check / make build (log above): something it needs is not exported"
@@ -630,7 +818,7 @@ elif [ "$MODE" = --commit ]; then
 fi
 if [ -n "$MODE" ]; then
   step "gate: the commit message, with the deny-list"
-  bash "$ROOT/scripts/check-private.sh" --text "$msg" || fail "the commit message failed check-private (above)"
+  env TMPDIR="$WORK/tmp" bash "$ROOT/scripts/check-private.sh" --text "$msg" || fail "the commit message failed check-private (above)"
 fi
 
 # --- only now: replace the public tree -------------------------------------------------
@@ -642,6 +830,8 @@ step "writing the snapshot into $TARGET"
 # If anything stops the write (an error, Ctrl-C, a kill), the target's files
 # and index are put back as they were.
 pre_tree="$(tgit write-tree)"
+target_id="$(target_identity)" || fail "could not read the target's identity"
+: > "$WORK/written"
 writing=1
 tgit ls-files -z | (cd "$TARGET" && xargs -0 rm -f --)
 find "$TARGET" -mindepth 1 -type d -empty -not -path "$TARGET/.git" -not -path "$TARGET/.git/*" -delete
@@ -696,7 +886,7 @@ check_commit() {  # [tag]
   who="$(tgit log -1 --format='%an <%ae>|%cn <%ce>|%G?')"
   [ "$who" = "$ident|$ident|N" ] || { undo "${1:-}"; fail "the new commit carried $who: undone"; }
   step "gate: check-private.sh --history with the deny-list"
-  if ! (cd "$TARGET" && bash "$ROOT/scripts/check-private.sh" --history); then
+  if ! (cd "$TARGET" && env TMPDIR="$WORK/tmp" bash "$ROOT/scripts/check-private.sh" --history); then
     undo "${1:-}"
     fail "the new commit failed check-private --history (above): undone; the staged tree is kept"
   fi

@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -29,34 +31,58 @@ func TestSnapshotEndpointReturnsBoardSnapshot(t *testing.T) {
 // openStream starts a real server and reads its event stream line by line.
 func openStream(t *testing.T, h *harness) (lines <-chan string, cancel func()) {
 	t.Helper()
+	srv := streamServer(h)
+	resp, end := openOn(t, srv) //nolint:bodyclose // end closes it
+	if resp.StatusCode != http.StatusOK {
+		end()
+		srv.Close()
+		t.Fatalf("events status %d", resp.StatusCode)
+	}
+	return readLines(resp.Body), func() {
+		end()
+		srv.Close()
+	}
+}
+
+// streamServer starts a real server for h, whose event stream tests open with
+// openOn as often as they need.
+func streamServer(h *harness) *httptest.Server {
 	srv := httptest.NewUnstartedServer(nil)
 	srv.Start()
 	srv.Config.Handler = New(Options{Board: h.board, Jumper: h.jumper, Token: testToken, Addr: srv.Listener.Addr().String(), Assets: testAssets})
+	return srv
+}
+
+// openOn opens srv's event stream, as a tab of the page does; end closes it.
+func openOn(t *testing.T, srv *httptest.Server) (resp *http.Response, end func()) {
+	t.Helper()
 	ctx, stop := context.WithCancel(context.Background())
 	r, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+contract.PathEvents, nil)
 	_, port, _ := strings.Cut(srv.Listener.Addr().String(), ":")
 	r.AddCookie(&http.Cookie{Name: CookieName(port), Value: testToken})
-	resp, err := http.DefaultClient.Do(r) //nolint:bodyclose // closed by the returned cancel
+	resp, err := srv.Client().Do(r) //nolint:bodyclose // closed by the returned end
 	if err != nil {
+		stop()
 		t.Fatal(err)
 	}
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("events status %d", resp.StatusCode)
+	return resp, func() {
+		stop()
+		_ = resp.Body.Close()
 	}
+}
+
+// readLines reads body line by line until it ends.
+func readLines(body io.Reader) <-chan string {
 	out := make(chan string, 64)
 	go func() {
 		defer close(out)
-		sc := bufio.NewScanner(resp.Body)
+		sc := bufio.NewScanner(body)
 		sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 		for sc.Scan() {
 			out <- sc.Text()
 		}
 	}()
-	return out, func() {
-		stop()
-		_ = resp.Body.Close()
-		srv.Close()
-	}
+	return out
 }
 
 func nextData(t *testing.T, lines <-chan string, within time.Duration) contract.Snapshot {
@@ -76,9 +102,16 @@ func nextData(t *testing.T, lines <-chan string, within time.Duration) contract.
 				if event != contract.EventSnapshot {
 					t.Fatalf("event %q", event)
 				}
+				// Strictly: a field the stream sends beyond contract.Snapshot
+				// (what Sends declares for it) fails, as for the other paths.
 				var s contract.Snapshot
-				if err := json.Unmarshal([]byte(v), &s); err != nil {
-					t.Fatal(err)
+				dec := json.NewDecoder(strings.NewReader(v))
+				dec.DisallowUnknownFields()
+				if err := dec.Decode(&s); err != nil {
+					t.Fatalf("the stream sends something other than contract.Snapshot: %v", err)
+				}
+				if dec.More() {
+					t.Fatal("the stream sends more than one value in a data line")
 				}
 				return s
 			}
@@ -168,6 +201,81 @@ func TestCatchupAndLeftoversEndpoints(t *testing.T) {
 		wantStatus(t, w, http.StatusOK)
 		if !strings.Contains(w.Body.String(), `"items":[]`) {
 			t.Fatalf("%s: %s", p, w.Body.String())
+		}
+	}
+}
+
+func TestIssuesEndpointIsAGet(t *testing.T) {
+	h := newHarness()
+	w := h.do(req(http.MethodGet, contract.PathIssues, ""))
+	wantStatus(t, w, http.StatusOK)
+	if !strings.Contains(w.Body.String(), `"repos":[]`) {
+		t.Fatalf("%s", w.Body.String())
+	}
+	wantStatus(t, h.do(req(http.MethodPost, contract.PathIssues, "{}")), http.StatusMethodNotAllowed)
+}
+
+// Every path that sends the page data says what it sends (route.sends), and
+// what it sends decodes into that type with no field left over: the facts
+// test discloses every field of those types, so a new path or a new field
+// cannot reach the page unnamed.
+func TestEveryDataPathSaysWhatItSends(t *testing.T) {
+	h := newHarness()
+	for path, rt := range routes(Options{}) {
+		switch {
+		case rt.method == http.MethodGet && rt.sends == nil:
+			t.Errorf("%s: a GET path that does not say what it sends", path)
+		case rt.method != http.MethodGet && rt.sends != nil:
+			t.Errorf("%s: a %s path that says it sends data", path, rt.method)
+		}
+		if rt.sends == nil || path == contract.PathEvents { // the stream: TestEventsSendSnapshotOnChange
+			continue
+		}
+		w := h.do(req(http.MethodGet, path, ""))
+		wantStatus(t, w, http.StatusOK)
+		dec := json.NewDecoder(strings.NewReader(w.Body.String()))
+		dec.DisallowUnknownFields()
+		v := reflect.New(reflect.TypeOf(rt.sends)).Interface()
+		if err := dec.Decode(v); err != nil {
+			t.Errorf("%s sends something other than %T: %v", path, rt.sends, err)
+		}
+	}
+	if got := Sends(); len(got) == 0 || reflect.TypeOf(got[contract.PathEvents]) != reflect.TypeOf(contract.Snapshot{}) {
+		t.Errorf("Sends() = %v", got)
+	}
+}
+
+// A path that says it answers with a status only sends no body when it
+// succeeds: data it sent would reach the page without the facts test
+// seeing it. Each such path is called here with a request it accepts; a new
+// status-only path must be added.
+func TestStatusOnlyPathsSendNoBody(t *testing.T) {
+	accepted := map[string]struct {
+		h    func() *harness
+		body string
+	}{
+		contract.PathJump:            {newHarness, cardBody(cardA)},
+		contract.PathSeen:            {newHarness, cardBody(cardA)},
+		contract.PathCatchupRead:     {newHarness, `{"upTo":"2026-11-17T09:55:00Z"}`},
+		contract.PathForgetGrouping:  {newForgetHarness, projectBody(groupP)},
+		contract.PathGroupingSetting: {newForgetHarness, settingBody(groupP, string(contract.GroupingNever))},
+	}
+	for path, rt := range routes(Options{}) {
+		if rt.sends != nil {
+			continue
+		}
+		c, ok := accepted[path]
+		if !ok {
+			t.Errorf("%s: a status-only path this test does not call", path)
+			continue
+		}
+		w := c.h().do(req(rt.method, path, c.body))
+		if w.Code < 200 || w.Code > 299 {
+			t.Errorf("%s: status %d for an accepted request; body %q", path, w.Code, w.Body.String())
+			continue
+		}
+		if w.Body.Len() != 0 {
+			t.Errorf("%s: a status-only path sent %q", path, w.Body.String())
 		}
 	}
 }

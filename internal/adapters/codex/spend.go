@@ -177,11 +177,12 @@ func (r *registry) keep(id string, f model.SessionFact) bool {
 }
 
 // tendObserved ages the store: a kept fact loses the spans older than
-// spendKeep (and is withdrawn with none left); a spawned thread's entry goes
-// once its spans have aged out and the card it counts on is gone. Then the
-// store is held to maxObserved.
+// spendKeep, and is withdrawn with none left and no turn end within
+// turnWindow (a caught-up thread can have turns and no token record); a
+// spawned thread's entry goes once its spans have aged out and the card it
+// counts on is gone. Then the store is held to maxObserved.
 func (r *registry) tendObserved(now time.Time) {
-	cut := spendCut(now)
+	cut, turnCut := spendCut(now), now.Add(-turnWindow)
 	for _, id := range slices.Sorted(maps.Keys(r.obs)) {
 		o := r.obs[id]
 		if f := o.fact; f != nil {
@@ -190,12 +191,15 @@ func (r *registry) tendObserved(now time.Time) {
 				continue
 			}
 			kept := slices.DeleteFunc(slices.Clone(f.Spend.Spans), func(sp model.SpendSpan) bool { return sp.At.Before(cut) })
-			if len(kept) == len(f.Spend.Spans) {
-				continue
-			}
-			if len(kept) == 0 {
+			turns := slices.ContainsFunc(f.TurnEnds, func(at time.Time) bool { return !at.Before(turnCut) })
+			// A pull request lives as long as the forge lookup of an ended session does.
+			prs := len(f.CreatedPRs)+len(f.PushedPRs) > 0 && !f.EndedAt.Before(turnCut)
+			if len(kept) == 0 && !turns && !prs {
 				delete(r.obs, id)
 				r.emit(model.SessionGone{Key: f.Key})
+				continue
+			}
+			if len(kept) == len(f.Spend.Spans) {
 				continue
 			}
 			nf := *f

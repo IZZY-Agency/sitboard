@@ -10,6 +10,8 @@
     catchups,
     leftover,
     leftovers,
+    issue,
+    issues,
   }: {
     scenario: string;
     scenarios: readonly string[];
@@ -18,8 +20,10 @@
     catchups: readonly string[];
     leftover: string;
     leftovers: readonly string[];
+    issue: string;
+    issues: readonly string[];
   } = $props();
-  const q = (s: string, c: string, l: boolean, lo = leftover) => `?s=${s}&c=${c}&l=${lo}${l ? '&live=1' : ''}`;
+  const q = (s: string, c: string, l: boolean, lo = leftover, i = issue) => `?s=${s}&c=${c}&l=${lo}&i=${i}${l ? '&live=1' : ''}`;
 </script>
 
 <div class="bar" data-harness={marker}>
@@ -35,6 +39,10 @@
   <span>leftovers:</span>
   {#each leftovers as l (l)}
     <a href={q(scenario, catchup, live, l)} aria-current={l === leftover ? 'page' : undefined}>{l}</a>
+  {/each}
+  <span>issues:</span>
+  {#each issues as i (i)}
+    <a href={q(scenario, catchup, live, leftover, i)} aria-current={i === issue ? 'page' : undefined}>{i}</a>
   {/each}
 </div>
 

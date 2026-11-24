@@ -31,11 +31,16 @@ func (s *Source) Probe(ctx context.Context) source.Status {
 // host glab is logged in to, gitlab.com included. An error wrapping
 // source.ErrNotLoggedIn is a definite no (glab is not logged in to it, or it
 // is github.com), and one wrapping source.ErrNoLogins too says glab is
-// logged in to no host at all; one wrapping source.ErrUnsupported says GitLab sits under a
-// subfolder there; any other error is no answer (glab missing, out of time,
+// logged in to no host at all; any other error is no answer (glab missing, out of time,
 // the host rate limited), to be asked again later.
+//
+// host may carry a web port ("host:8443"): glab is asked by the host name,
+// and the answer is the one for that name.
 func (s *Source) Host(ctx context.Context, host string) error {
-	h, err := s.p.host(ctx, host)
+	if !model.ValidGitLabSite(host) {
+		return errInvalidArg
+	}
+	h, err := s.p.host(ctx, model.GitLabHostname(host))
 	switch {
 	case err != nil:
 		return err
@@ -43,15 +48,27 @@ func (s *Source) Host(ctx context.Context, host string) error {
 		return errNowhere
 	case !h.known:
 		return errNotKnown
-	case h.subfolder:
-		return errSubfolder
 	}
 	return nil
 }
 
+// Subfolder is glab's subfolder setting for host (its web port, if any, set
+// aside), "" for none or when its login check is not current. It makes no
+// call: the check that Host runs read it.
+func (s *Source) Subfolder(host string) string {
+	s.p.mu.Lock()
+	defer s.p.mu.Unlock()
+	h, current := s.p.answerLocked(model.GitLabHostname(host), knownFor)
+	if !current || !h.known {
+		return ""
+	}
+	return h.subfolder
+}
+
 // Failing is the page's line for the last failed call about host, "" when
-// its last call answered.
-func (s *Source) Failing(host string) string { return s.p.Failing(host) }
+// its last call answered. Like Host, it is the one for host's name: calls
+// go, and their failures are kept, by the name without a web port.
+func (s *Source) Failing(host string) string { return s.p.Failing(model.GitLabHostname(host)) }
 
 // Lookup returns the merge requests of repo with the given numbers, plus the
 // newest ones whose source branch is one of branches, as pull requests. A
@@ -71,6 +88,9 @@ func (s *Source) Lookup(ctx context.Context, repo model.ForgeRepo, numbers []int
 		if pr, ok := pullRequest(mr); ok {
 			out = append(out, pr)
 		}
+	}
+	if len(res.Wrong) > 0 || len(res.Unverified) > 0 {
+		return out, &source.PartialLookup{Wrong: res.Wrong, Unverified: res.Unverified}
 	}
 	return out, nil
 }

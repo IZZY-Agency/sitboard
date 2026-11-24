@@ -108,7 +108,12 @@ if [[ "$scope" == "branch" ]] && ((pull_refs)); then
   exit 2
 fi
 
-tmp="$(mktemp -d)" || { echo "check-private: cannot create a temp folder" >&2; exit 2; }
+# An explicit template: macOS mktemp -d prefers its own temp folder to TMPDIR,
+# and a caller (publish.sh) gives TMPDIR so its own cleanup covers this one.
+tmp_raw="$(mktemp -d "${TMPDIR:-/tmp}/check-private.XXXXXX")" || { echo "check-private: cannot create a temp folder" >&2; exit 2; }
+# Absolute before any cd (a relative TMPDIR gives a relative path): the scan
+# and its cleanup must find the folder from the repository's top level too.
+tmp="$(cd "$tmp_raw" && pwd -P)" || { rm -rf "$tmp_raw"; echo "check-private: cannot enter the temp folder" >&2; exit 2; }
 # Read parents as commits record them, never as .git/info/grafts says. A path
 # that never exists, not /dev/null: git prints a deprecation hint for any
 # grafts file it can open.

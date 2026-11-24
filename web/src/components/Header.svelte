@@ -35,7 +35,7 @@
   const live = $derived.by(() => {
     switch (conn) {
       case 'live':
-        return { text: generatedAt ? `Live · ${clock(generatedAt)}` : 'Live', kind: 'live' };
+        return { text: generatedAt ? `Live · ${clock(generatedAt)}` : 'Live', kind: 'on' };
       case 'reconnecting':
         return { text: 'Reconnecting', kind: 'warn' };
       case 'unreachable':
@@ -151,23 +151,60 @@
       justify-self: end;
     }
   }
+  /* The Live chip has the box of the header's other chips (Spend, Catch-up,
+     Notify): 44 px tall, 12 px aside, the same type. */
   .live {
     display: inline-flex;
     align-items: center;
     gap: 7px;
-    padding: 3px 8px;
+    min-height: 44px;
+    padding: 0 12px;
     font-size: var(--text-xs);
     font-weight: 700;
     letter-spacing: 0.1em;
     text-transform: uppercase;
-    border: 1px solid var(--amber-edge);
-    background: var(--amber-soft);
-    color: var(--amber);
+    white-space: nowrap;
+    border: 1px solid var(--border);
   }
   .live .dot {
+    position: relative;
     width: 6px;
     height: 6px;
-    background: var(--amber);
+  }
+  /* Connected: green, and the dot breathes with a ring that grows out of it
+     and fades. Only this state moves; the ring is drawn over the chip, so
+     nothing shifts. base.css stops it under reduced motion. */
+  .live.on {
+    border-color: var(--working-edge);
+    background: var(--working-soft);
+    color: var(--state-working);
+  }
+  .live.on .dot {
+    background: var(--state-working);
+    animation: live-dot 2s ease-in-out infinite;
+  }
+  .live.on .dot::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border: 1px solid var(--state-working);
+    opacity: 0;
+    animation: live-ring 2s ease-out infinite;
+  }
+  @keyframes live-dot {
+    50% {
+      opacity: 0.45;
+    }
+  }
+  @keyframes live-ring {
+    0% {
+      opacity: 0.7;
+      transform: scale(1);
+    }
+    100% {
+      opacity: 0;
+      transform: scale(2.6);
+    }
   }
   .live.warn {
     border-color: var(--failing-line);

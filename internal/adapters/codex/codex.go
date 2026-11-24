@@ -38,6 +38,7 @@ import (
 	"context"
 	"log"
 	"maps"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -167,10 +168,7 @@ func (a *adapter) rollouts() []rolloutFile {
 	// A file is looked at when it changed within turnWindow, or since the first
 	// displayed local midnight when that is earlier (a week with a clock change
 	// is longer than turnWindow: the first hour of its oldest day matters).
-	since := now.Add(-turnWindow)
-	if c := firstDisplayedMidnight(now); c.Before(since) {
-		since = c
-	}
+	since := catchupSince(now)
 	// Codex names the day folders by local date: from a day before the
 	// window to a day after today (a clock change), one calendar day at a time.
 	l := now.Local()
@@ -286,10 +284,11 @@ func (a *adapter) Run(ctx context.Context, emit func(model.Fact)) error {
 	}
 	discovering := make(chan found, 1)
 	go func() {
-		files, cut := a.olderRollouts(dctx, firstDisplayedMidnight(a.now()))
+		files, cut := a.olderRollouts(dctx, catchupSince(a.now()))
 		discovering <- found{files, cut}
 	}()
 	var reading chan catchupResult
+	cut := false                   // the catch-up read stopped at a bound (BackfillDone)
 	cont := make(chan struct{}, 1) // a chunk is due
 	ticker := time.NewTicker(a.tick)
 	defer ticker.Stop()
@@ -312,6 +311,7 @@ func (a *adapter) Run(ctx context.Context, emit func(model.Fact)) error {
 		case res := <-reading:
 			reading = nil
 			r.applyCatchup(res)
+			cut = res.cut
 			if res.cut {
 				log.Printf("codex: the catch-up of ended sessions was cut by a bound")
 			}
@@ -320,7 +320,7 @@ func (a *adapter) Run(ctx context.Context, emit func(model.Fact)) error {
 			if r.publishCatchup() {
 				cont <- struct{}{}
 			} else {
-				emit(model.BackfillDone{Kind: string(source.KindCodex)})
+				emit(model.BackfillDone{Kind: string(source.KindCodex), Cut: cut})
 			}
 		case <-ticker.C:
 			r.tailAll(ctx)
@@ -497,6 +497,13 @@ func (r *registry) walkRollouts(ctx context.Context, want map[string]bool) (foun
 	return found, true
 }
 
+// nameWanted: the session index title of thread id is kept, for a session
+// the board would show (the terminal client and codex exec).
+func (r *registry) nameWanted(id string) bool {
+	s := r.sessions[id]
+	return s != nil && s.metaOK && s.meta.showable()
+}
+
 // rescan lists the rollouts, asks who holds which lock, and updates every
 // session.
 func (r *registry) rescan(ctx context.Context) {
@@ -510,10 +517,7 @@ func (r *registry) rescan(ctx context.Context) {
 		present[f.id] = true
 		r.note(f, now)
 	}
-	r.names.update(func(id string) bool {
-		s := r.sessions[id]
-		return s != nil && s.metaOK && s.meta.showable()
-	})
+	r.names.update(r.nameWanted)
 
 	// Only the locks of threads that may become cards are asked about: those
 	// whose first line is not read yet and those of the terminal client and
@@ -845,11 +849,21 @@ func (r *registry) tailAll(ctx context.Context) {
 }
 
 // read reads what a session's rollout grew by.
+//
+// A thread read at start (catchup.go) that turns live is read again, fresh
+// and whole, with no cap (that read took it under catchupFileCap; only what
+// it grew by since is more), and nothing that read found is carried into its
+// turns or pull requests: a live read near the end of a large rollout would
+// miss the earlier part, and history kept from another read could belong to a
+// file replaced or rewritten since.
 func (r *registry) read(ctx context.Context, id string, s *sess) {
-	if s.t == nil {
+	if s.t == nil || (s.carryParts != nil && s.t.cap != math.MaxInt64) {
 		s.t = newTailer(s.path)
 		s.t.id = id
 		s.t.spendOnly = s.meta.Parent != "" // a spawned thread: its token records only
+		if s.carryParts != nil {
+			s.t.cap = math.MaxInt64
+		}
 	}
 	// An unreadable rollout keeps what was read; the tailer reads it again
 	// from where it stopped next time.
@@ -926,6 +940,7 @@ func (r *registry) fact(id string, s *sess) model.SessionFact {
 	if s.t != nil {
 		d = s.t.d
 	}
+
 	f := model.SessionFact{
 		Key:          model.SessionKey{Tool: model.ToolCodex, ID: id},
 		Name:         r.names.byID[id],

@@ -6,6 +6,7 @@ import Harness from './Harness.svelte';
 import { initial, SCENARIOS, step, type Scenario } from './scenarios';
 import { CATCHUPS, catchupClient, type CatchupCase } from './catchup';
 import { LEFTOVERS, leftoversClient, leftoversSummary, type LeftoversCase } from './leftovers';
+import { ISSUES, issuesClient, issuesSnapshot, type IssuesCase } from './issues';
 import { saveSwitch, type Permission } from '../src/data/notify';
 import type { Feed, FeedState } from '../src/data/client';
 import type { Actions } from '../src/data/actions';
@@ -21,8 +22,11 @@ const cu = (CATCHUPS as readonly string[]).includes(params.get('c') ?? '') ? (pa
 
 const lc = (LEFTOVERS as readonly string[]).includes(params.get('l') ?? '') ? (params.get('l') as LeftoversCase) : 'few';
 
+const ic = (ISSUES as readonly string[]).includes(params.get('i') ?? '') ? (params.get('i') as IssuesCase) : 'few';
+
 let current = initial(sc);
 if (current) current.leftovers = leftoversSummary(lc, current.projects);
+if (current) issuesSnapshot(ic, current);
 let push: ((s: FeedState) => void) | null = null;
 
 const feed: Feed = {
@@ -101,7 +105,7 @@ const actions: Actions = {
   },
 };
 
-mount(Harness, { target: document.getElementById('harness')!, props: { scenario: sc, scenarios: SCENARIOS, live: liveMode, catchup: cu, catchups: CATCHUPS, leftover: lc, leftovers: LEFTOVERS } });
+mount(Harness, { target: document.getElementById('harness')!, props: { scenario: sc, scenarios: SCENARIOS, live: liveMode, catchup: cu, catchups: CATCHUPS, leftover: lc, leftovers: LEFTOVERS, issue: ic, issues: ISSUES } });
 // ?n= sets the Notify switch's state for pictures: off, asking (click it), on,
 // denied or none. A stand-in for the browser's permission; no notification is
 // ever shown by the harness.
@@ -117,4 +121,4 @@ const permission: Permission | undefined = n
 if (n === 'on') saveSwitch(true);
 else if (n) saveSwitch(false);
 
-mount(App, { target: document.getElementById('app')!, props: { feed, actions, catchup: catchupClient(cu), leftovers: leftoversClient(lc, current?.projects ?? []), ...(permission ? { permission } : {}) } });
+mount(App, { target: document.getElementById('app')!, props: { feed, actions, catchup: catchupClient(cu), leftovers: leftoversClient(lc, current?.projects ?? []), issues: issuesClient(ic, current?.projects ?? []), ...(permission ? { permission } : {}) } });

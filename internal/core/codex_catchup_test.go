@@ -16,12 +16,13 @@ import (
 	"github.com/IZZY-Agency/sitboard/internal/source"
 )
 
-// The real Codex watcher's start-up facts into the real board (#114): an
-// ended terminal thread's rollout, older than a quarter hour and with no lock
-// folder to tell its liveness, is read once; its use is in the day and the
-// project, the days are pending until the watcher says it is done, and there
-// is no card and no catch-up item.
-func TestCodexCatchupReachesTheBoardAsDaysWithNoCard(t *testing.T) {
+// The real Codex watcher's start-up facts into the real board (#114, #135):
+// an ended terminal thread's rollout, older than a quarter hour and with no
+// lock folder to tell its liveness, is read once; its use is in the day and
+// the project, its finished turn is in Catch-up under its title, as an ended
+// Claude Code session's is, the days and the panel are pending until the
+// watcher says it is done, and there is no card.
+func TestCodexCatchupReachesTheBoardAsDaysAndCatchupWithNoCard(t *testing.T) {
 	const id = "11111111-1111-4111-8111-111111111111"
 	raw, err := os.ReadFile(filepath.Join("..", "..", "testdata", "fixtures", "codex", "0.171.0", "spend.jsonl"))
 	if err != nil {
@@ -69,6 +70,23 @@ func TestCodexCatchupReachesTheBoardAsDaysWithNoCard(t *testing.T) {
 	if err := os.Chtimes(p, now.Add(-2*time.Hour), now.Add(-2*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
+	// A `codex exec` run that ended too, with a finished turn of its own and
+	// no token record: Catch-up leaves it out, as it does a claude -p run.
+	execRaw, err := os.ReadFile(filepath.Join("..", "..", "testdata", "fixtures", "codex", "0.171.0", "exec.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pe := filepath.Join(dir, "rollout-2026-11-20T11-10-00-33333333-3333-4333-8333-333333333333.jsonl")
+	if err := os.WriteFile(pe, execRaw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(pe, now.Add(-2*time.Hour), now.Add(-2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	index := `{"id":"` + id + `","thread_name":"Sample title","updated_at":"2026-11-20T11:22:01Z"}` + "\n"
+	if err := os.WriteFile(filepath.Join(home, "session_index.jsonl"), []byte(index), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	e.board.SetSources([]source.Status{{Kind: source.KindCodex, State: source.StateOK}})
 	if !e.board.Snapshot().Spend.Pending {
@@ -78,11 +96,13 @@ func TestCodexCatchupReachesTheBoardAsDaysWithNoCard(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done, ran := make(chan struct{}), make(chan error, 1)
-	pendingBeforeDone := false
+	pendingBeforeDone, panelPendingBeforeDone := false, false
 	go func() {
 		ran <- w.Run(ctx, func(f model.Fact) {
 			if _, ok := f.(model.BackfillDone); ok {
 				pendingBeforeDone = e.board.Snapshot().Spend.Pending
+				c, err := e.board.Catchup(context.Background())
+				panelPendingBeforeDone = err == nil && c.Pending
 			}
 			e.board.applySync(f)
 			if _, ok := f.(model.BackfillDone); ok {
@@ -101,8 +121,8 @@ func TestCodexCatchupReachesTheBoardAsDaysWithNoCard(t *testing.T) {
 	}
 
 	snap := e.board.Snapshot()
-	if !pendingBeforeDone {
-		t.Error("not pending until the watcher said it was done")
+	if !pendingBeforeDone || !panelPendingBeforeDone {
+		t.Errorf("days pending %v, panel pending %v until the watcher said it was done", pendingBeforeDone, panelPendingBeforeDone)
 	}
 	if snap.Spend.Pending {
 		t.Error("still pending after the watcher said it was done")
@@ -110,8 +130,17 @@ func TestCodexCatchupReachesTheBoardAsDaysWithNoCard(t *testing.T) {
 	if len(snap.Cards) != 0 {
 		t.Errorf("cards %+v; an ended thread is no card", snap.Cards)
 	}
-	if c := catchup(t, e.board); len(c.Items) != 0 {
-		t.Errorf("catch-up items %+v", c.Items)
+	c := catchup(t, e.board)
+	if c.Pending {
+		t.Error("the panel still pending after the watcher said it was done")
+	}
+	if len(c.Items) != 1 {
+		t.Fatalf("catch-up items %+v, want the terminal thread's one finished turn and none of the exec run", c.Items)
+	}
+	it := c.Items[0]
+	if it.Kind != contract.CatchupTurnFinished || !it.At.Equal(time.Date(2026, 11, 20, 11, 22, 0, 0, time.UTC)) ||
+		it.CardID != "" || it.ProjectName != "alpha" || it.AgentName != "Sample title" {
+		t.Errorf("catch-up item %+v, want the turn finished at 11:22 by Sample title in alpha, with no card", it)
 	}
 	var codexTotal contract.Tokens
 	var project contract.Tokens

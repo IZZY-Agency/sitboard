@@ -148,15 +148,21 @@ export function today(sum: SpendSummary, now: number): SpendDay | null {
   return sum.days.find((d) => d.day === localDay(now)) ?? null;
 }
 
-/** The header button's figure: today's money, or its tokens and "no price" when nothing is priced, then Codex's tokens beside it; "…" is added while older sessions are still being read. */
-export function todayText(sum: SpendSummary, now: number): string {
+/** The header button's figure in its parts: today's money, or its tokens and "no price" when nothing is priced, then Codex's tokens; "…" is added to the last while older sessions are still being read. Each part stays on one line; the button may wrap between them. */
+export function todayParts(sum: SpendSummary, now: number): string[] {
   const d = today(sum, now);
-  const parts = d
-    ? [hasSpend(d.spend) ? moneyText(d.spend) || `${tokensText(d.spend)} · no price` : '', hasTokens(d.codex) ? codexText(d.codex) : '']
-    : [];
-  const fig = parts.filter(Boolean).join(' · ');
-  if (!sum.pending) return fig;
-  return fig ? `${fig} …` : '…';
+  const parts = (
+    d ? [hasSpend(d.spend) ? moneyText(d.spend) || `${tokensText(d.spend)} · no price` : '', hasTokens(d.codex) ? codexText(d.codex) : ''] : []
+  ).filter(Boolean);
+  if (!sum.pending) return parts;
+  if (!parts.length) return ['…'];
+  parts[parts.length - 1] += ' …';
+  return parts;
+}
+
+/** The header button's figure as one line: "≈ $15.48 + unpriced · Codex 12 k out". */
+export function todayText(sum: SpendSummary, now: number): string {
+  return todayParts(sum, now).join(' · ');
 }
 
 /** Today's figure as a screen reader says it; "" when nothing was used today. */

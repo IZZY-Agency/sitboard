@@ -578,31 +578,40 @@ func TestParseRemote(t *testing.T) {
 	scp := "git" + "@" // kept apart so the private scan does not read an address
 	cases := []struct {
 		raw, host, path string
+		bare            bool
 	}{
-		{scp + "gitlab.com:example-org/example-repo.git", "gitlab.com", "example-org/example-repo"},
-		{scp + "example.com:example-org/sub/team/example-repo", "example.com", "example-org/sub/team/example-repo"},
-		{"ssh://" + scp + "example.com:2222/example-org/example-repo.git", "example.com", "example-org/example-repo"},
-		{"https://GitLab.com/example-org/example-repo/", "gitlab.com", "example-org/example-repo"},
-		{"https://oauth2:secret@example.com/example-org/example-repo.git", "example.com", "example-org/example-repo"},
-		{"git://example.com/example-org/example-repo", "example.com", "example-org/example-repo"},
-		{"https://example.com:8443/example-org/example-repo", "", ""}, // web port: refused
-		{"https://example.com/example-repo", "", ""},                  // one segment
-		{"https://example.com/example-org/../example-repo", "", ""},
-		{"https://example.com/example-org/a..b", "", ""},
-		{"file://example.com/example-org/example-repo", "", ""},                       // ..
-		{"https://example.com/-org/example-repo", "", ""},                             // option-like
-		{"https://example.com/example-org/example-repo?x=1", "", ""},                  // query
-		{"file:///srv/example-org/example-repo", "", ""},                              // not a web host
-		{"ext::sh -c touch% /tmp/x", "", ""},                                          // helper
-		{"/srv/example-org/example-repo", "", ""},                                     // local path
-		{"localhost:example-org/example-repo", "", ""},                                // no dot in host
-		{scp + "example.com:example-org/example-repo.git.git", "", ""},                // .git name
-		{"https://example.com/example-org/" + strings.Repeat("a/", 21) + "b", "", ""}, // too deep
+		{scp + "gitlab.com:example-org/example-repo.git", "gitlab.com", "example-org/example-repo", true},
+		{scp + "example.com:example-org/sub/team/example-repo", "example.com", "example-org/sub/team/example-repo", true},
+		{"ssh://" + scp + "example.com:2222/example-org/example-repo.git", "example.com", "example-org/example-repo", true}, // the git port is dropped
+		{"https://GitLab.com/example-org/example-repo/", "gitlab.com", "example-org/example-repo", false},
+		{"https://oauth2:secret@example.com/example-org/example-repo.git", "example.com", "example-org/example-repo", false},
+		{"git://example.com/example-org/example-repo", "example.com", "example-org/example-repo", true},
+		{"https://example.com:8443/example-org/example-repo", "example.com:8443", "example-org/example-repo", false}, // web port kept
+		{"http://example.com:8080/example-org/example-repo.git", "example.com:8080", "example-org/example-repo", false},
+		{"https://example.com/gitlab/example-org/example-repo.git", "example.com", "gitlab/example-org/example-repo", false}, // a subfolder stays in the path
+		{"https://example.com:443/example-org/example-repo.git", "example.com", "example-org/example-repo", false},           // https's own port, written out
+		{"https://example.com:443/gitlab/example-org/example-repo", "example.com", "gitlab/example-org/example-repo", false},
+		{"http://example.com:443/example-org/example-repo", "", "", false},    // plain http on 443 is no https address GitLab writes
+		{"https://example.com:08443/example-org/example-repo", "", "", false}, // leading zero
+		{"https://example.com:70000/example-org/example-repo", "", "", false}, // past 65535
+		{"https://example.com:/example-org/example-repo", "", "", false},      // empty port
+		{"https://example.com/example-repo", "", "", false},                   // one segment
+		{"https://example.com/example-org/../example-repo", "", "", false},
+		{"https://example.com/example-org/a..b", "", "", false},
+		{"file://example.com/example-org/example-repo", "", "", false},                       // ..
+		{"https://example.com/-org/example-repo", "", "", false},                             // option-like
+		{"https://example.com/example-org/example-repo?x=1", "", "", false},                  // query
+		{"file:///srv/example-org/example-repo", "", "", false},                              // not a web host
+		{"ext::sh -c touch% /tmp/x", "", "", false},                                          // helper
+		{"/srv/example-org/example-repo", "", "", false},                                     // local path
+		{"localhost:example-org/example-repo", "", "", false},                                // no dot in host
+		{scp + "example.com:example-org/example-repo.git.git", "", "", false},                // .git name
+		{"https://example.com/example-org/" + strings.Repeat("a/", 21) + "b", "", "", false}, // too deep
 	}
 	for _, c := range cases {
-		host, path, ok := ParseRemote(c.raw)
-		if ok != (c.host != "") || host != c.host || path != c.path {
-			t.Errorf("ParseRemote(%q) = %q %q %v, want %q %q", c.raw, host, path, ok, c.host, c.path)
+		host, path, bare, ok := ParseRemote(c.raw)
+		if ok != (c.host != "") || host != c.host || path != c.path || bare != c.bare {
+			t.Errorf("ParseRemote(%q) = %q %q bare=%v %v, want %q %q bare=%v", c.raw, host, path, bare, ok, c.host, c.path, c.bare)
 		}
 	}
 }
@@ -681,8 +690,11 @@ func TestBuildQuery(t *testing.T) {
 	}
 }
 
+// plain is a project with no port and no subfolder, both ways the same.
+func plain(host, path string) where { return where{host: host, path: path, site: host, web: path} }
+
 func TestParseLookupFixture(t *testing.T) {
-	pa, err := parseAnswer(fixture(t, "lookup.json"), selfHosted, project, shape{iids: true, branches: true, approvals: true})
+	pa, err := parseAnswer(fixture(t, "lookup.json"), plain(selfHosted, project), shape{iids: true, branches: true, approvals: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -721,10 +733,10 @@ func TestParseLookupFixture(t *testing.T) {
 			t.Errorf("!%d project id %d", m.IID, f.projectID)
 		}
 	}
-	if _, err := parseAnswer(fixture(t, "project-null.json"), selfHosted, project, shape{iids: true, branches: true, approvals: true}); !errors.Is(err, errNoProject) {
+	if _, err := parseAnswer(fixture(t, "project-null.json"), plain(selfHosted, project), shape{iids: true, branches: true, approvals: true}); !errors.Is(err, errNoProject) {
 		t.Errorf("project null: %v", err)
 	}
-	if _, err := parseAnswer(fixture(t, "complexity-error.json"), selfHosted, project, shape{iids: true, branches: true, approvals: true}); err == nil || errors.Is(err, errNoProject) {
+	if _, err := parseAnswer(fixture(t, "complexity-error.json"), plain(selfHosted, project), shape{iids: true, branches: true, approvals: true}); err == nil || errors.Is(err, errNoProject) {
 		t.Errorf("errors without data: %v", err)
 	}
 }
@@ -1276,10 +1288,13 @@ func TestLookupAsksOnlyKnownHosts(t *testing.T) {
 	if _, err := p.Lookup(ctx, "other.example.com", project, []int{1}, nil); err == nil || f.count("graphql") != 0 {
 		t.Fatalf("a host glab has no login for is never asked: %v", err)
 	}
+	if _, err := p.Lookup(ctx, "github.com:8443", project, []int{1}, nil); err == nil || f.count("graphql") != 0 {
+		t.Fatal("github.com with a port is never asked")
+	}
 	if _, err := p.Lookup(ctx, "github.com", project, []int{1}, nil); err == nil || f.count("graphql") != 0 {
 		t.Fatal("github.com is never asked")
 	}
-	for _, bad := range []struct{ host, path string }{{"example.com:22", project}, {selfHosted, "x"}, {selfHosted, "-x/y"}} {
+	for _, bad := range []struct{ host, path string }{{"example.com:443", project}, {"example.com:0", project}, {"example.com:", project}, {"example.com/gitlab", project}, {selfHosted, "x"}, {selfHosted, "-x/y"}} {
 		if _, err := p.Lookup(ctx, bad.host, bad.path, []int{1}, nil); err == nil {
 			t.Errorf("Lookup(%q, %q) accepted", bad.host, bad.path)
 		}
@@ -1469,18 +1484,18 @@ func TestLookupNeverAnswersFromAnOldCache(t *testing.T) {
 // missing, makes the whole lookup a failure.
 func TestPartialAnswers(t *testing.T) {
 	q := shape{iids: true, approvals: true}
-	pa, err := parseAnswer(fixture(t, "partial-errors.json"), selfHosted, project, q)
+	pa, err := parseAnswer(fixture(t, "partial-errors.json"), plain(selfHosted, project), q)
 	if err != nil || len(pa.mrs) == 0 || pa.mrs[0].mr.Checks != model.ChecksUnknown {
 		t.Fatalf("pipeline error: %v %+v", err, pa.mrs)
 	}
 	withErr := func(path string) []byte {
 		return []byte(`{"errors":[{"message":"x","path":` + path + `}],"data":{"project":{"m":{"nodes":[` + node(1, "a", 1, 1, "opened") + `]}}}}`)
 	}
-	if pa, err := parseAnswer(withErr(`["project","m","nodes",0,"approvalsLeft"]`), selfHosted, project, q); err != nil || pa.mrs[0].mr.Approval != ApprovalUnknown {
+	if pa, err := parseAnswer(withErr(`["project","m","nodes",0,"approvalsLeft"]`), plain(selfHosted, project), q); err != nil || pa.mrs[0].mr.Approval != ApprovalUnknown {
 		t.Errorf("approval error: %v %+v", err, pa.mrs)
 	}
 	for _, path := range []string{`["project","m","nodes",0,"title"]`, `["project","m"]`, `["project"]`, `["project","m","nodes",0]`, `null`} {
-		if _, err := parseAnswer(withErr(path), selfHosted, project, q); !errors.Is(err, errIncomplete) {
+		if _, err := parseAnswer(withErr(path), plain(selfHosted, project), q); !errors.Is(err, errIncomplete) {
 			t.Errorf("error at %s: %v, want incomplete", path, err)
 		}
 	}
@@ -1493,14 +1508,14 @@ func TestPartialAnswers(t *testing.T) {
 		`{"errors":[{"message":"x","path":["project","m","nodes",-1,"headPipeline"]}],"data":{"project":{"m":{"nodes":[` + node(1, "a", 1, 1, "opened") + `]}}}}`,
 		`{"errors":[{"message":"x","path":["project","b","nodes",0,"approved"]}],"data":{"project":{"m":{"nodes":[` + node(1, "a", 1, 1, "opened") + `]},"b":{"nodes":[]}}}}`,
 	} {
-		if _, err := parseAnswer([]byte(body), selfHosted, project, q); !errors.Is(err, errIncomplete) {
+		if _, err := parseAnswer([]byte(body), plain(selfHosted, project), q); !errors.Is(err, errIncomplete) {
 			t.Errorf("an errored node that is gone: %v, want incomplete: %s", err, body)
 		}
 	}
-	if _, err := parseAnswer([]byte(`{"errors":[{"message":"x"}],"data":{"project":null}}`), selfHosted, project, q); !errors.Is(err, errIncomplete) {
+	if _, err := parseAnswer([]byte(`{"errors":[{"message":"x"}],"data":{"project":null}}`), plain(selfHosted, project), q); !errors.Is(err, errIncomplete) {
 		t.Errorf("a null project with errors is not a missing project: %v", err)
 	}
-	if _, err := parseAnswer(answerOf([]string{}, nil), selfHosted, project, shape{iids: true, branches: true}); !errors.Is(err, errIncomplete) {
+	if _, err := parseAnswer(answerOf([]string{}, nil), plain(selfHosted, project), shape{iids: true, branches: true}); !errors.Is(err, errIncomplete) {
 		t.Errorf("branches asked, no branch list: %v", err)
 	}
 	p, f, _ := newAdapter(t, Options{})
@@ -1657,22 +1672,197 @@ func TestLookupBatchesAndBranchPage(t *testing.T) {
 // never taken for the local branch of the same name.
 func TestForkProvenance(t *testing.T) {
 	pa, err := parseAnswer(answerOf([]string{node(9, "main", 2000, 1000, "opened")}, []string{node(10, "main", 1000, 1000, "opened")}),
-		selfHosted, project, shape{iids: true, branches: true, approvals: true})
+		plain(selfHosted, project), shape{iids: true, branches: true, approvals: true})
 	if err != nil || len(pa.mrs) != 2 || !pa.mrs[0].mr.FromFork || pa.mrs[1].mr.FromFork {
 		t.Fatalf("fork flags: %v %+v", err, pa.mrs)
 	}
 }
 
-// GitLab under a subfolder is not supported yet: said so, not asked.
+// withWebURL is node n with GitLab's webUrl set to u.
+func withWebURL(n, u string) string {
+	return strings.Replace(n, `"headPipeline":null}`, `"webUrl":`+strconv.Quote(u)+`,"headPipeline":null}`, 1)
+}
+
+// graphqlArgs is the --hostname and the path variable of each GraphQL call.
+func (f *fakeGlab) graphqlArgs() (hosts, paths []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, c := range f.calls {
+		if len(c) < 2 || c[0] != "api" || c[1] != "graphql" {
+			continue
+		}
+		for i, a := range c {
+			if a == "--hostname" && i+1 < len(c) {
+				hosts = append(hosts, c[i+1])
+			}
+			if v, ok := strings.CutPrefix(a, "path="); ok {
+				paths = append(paths, v)
+			}
+		}
+	}
+	return hosts, paths
+}
+
+// GitLab under a subfolder: a project's web path starts with the subfolder;
+// the API is asked without it (glab puts the subfolder into its own calls),
+// and the merge request keeps the web path, so its address is the one
+// GitLab serves. A path on that host without the subfolder is no project
+// there: not asked.
 func TestLookupSubfolderHost(t *testing.T) {
 	p, f, _ := newUnchecked(t)
-	f.sub = map[string]string{selfHosted: "gitlab"}
+	f.sub = map[string]string{selfHosted: "apps/gitlab"}
 	approve(t, p, selfHosted)
-	if _, err := p.Lookup(context.Background(), selfHosted, project, []int{1}, nil); !errors.Is(err, errSubfolder) || errors.Is(err, source.ErrRepoNotFound) || f.count("graphql") != 0 {
-		t.Errorf("subfolder host: %v, %d calls", err, f.count("graphql"))
+	f.graphql = ok(answerOf([]string{node(1, "a", 1000, 1000, "opened")}, nil))
+	res, err := p.Lookup(context.Background(), selfHosted, "apps/gitlab/"+project, []int{1}, nil)
+	if err != nil || len(res.MRs) != 1 {
+		t.Fatalf("subfolder host: %v %+v", err, res)
 	}
-	if !p.Known(context.Background(), selfHosted) {
-		t.Error("the host is still one glab is logged in to")
+	mr := res.MRs[0]
+	if mr.Host != selfHosted || mr.Path != "apps/gitlab/"+project || mr.URL != "https://"+selfHosted+"/apps/gitlab/"+project+"/-/merge_requests/1" {
+		t.Errorf("merge request %q %q %q", mr.Host, mr.Path, mr.URL)
+	}
+	if hosts, paths := f.graphqlArgs(); !slices.Equal(hosts, []string{selfHosted}) || !slices.Equal(paths, []string{project}) {
+		t.Errorf("asked %q about %q", hosts, paths)
+	}
+	for _, path := range []string{project, "apps/" + project, "apps/gitlab", "apps/gitlab/solo"} {
+		if _, err := p.Lookup(context.Background(), selfHosted, path, []int{1}, nil); !errors.Is(err, source.ErrRepoNotFound) {
+			t.Errorf("%s: %v, want not found", path, err)
+		}
+	}
+	if n := f.count("graphql"); n != 1 {
+		t.Errorf("%d GraphQL calls, want 1", n)
+	}
+}
+
+// A host with a web port: glab is asked by the host name, and a merge
+// request is kept only when GitLab's webUrl is exactly the address built
+// with that port. A site without a port is held to the same webUrl when it
+// comes (glab may route a portless reference to an instance on another
+// port); an explicit :443 in it is the same address; a port site gets no
+// merge request without a webUrl, and the answer is incomplete.
+func TestLookupWebPort(t *testing.T) {
+	p, f, _ := newAdapter(t, Options{})
+	site := selfHosted + ":8443"
+	addr := func(site string, n int) string {
+		return "https://" + site + "/" + project + "/-/merge_requests/" + strconv.Itoa(n)
+	}
+	f.graphql = ok(answerOf([]string{
+		withWebURL(node(1, "a", 1000, 1000, "opened"), addr(site, 1)),
+		withWebURL(node(2, "b", 1000, 1000, "opened"), addr(selfHosted+":9443", 2)), // another port
+		withWebURL(node(3, "c", 1000, 1000, "opened"), addr(selfHosted, 3)),         // none
+	}, nil))
+	res, err := p.Lookup(context.Background(), site, project, []int{1, 2, 3}, nil)
+	if err != nil || len(res.MRs) != 1 || res.MRs[0].IID != 1 || res.MRs[0].Host != site || res.MRs[0].URL != addr(site, 1) {
+		t.Fatalf("with a port: %v %+v", err, res.MRs)
+	}
+	if hosts, _ := f.graphqlArgs(); !slices.Equal(hosts, []string{selfHosted}) {
+		t.Errorf("--hostname %q", hosts)
+	}
+	// A port site: no webUrl, no merge request placed, and it is said so,
+	// beside what was settled in the same answer: a number GitLab put at
+	// another address is Wrong whatever else is unverified; the unsettled
+	// answer is not kept, so the next lookup asks again.
+	f.graphql = ok(answerOf([]string{
+		withWebURL(node(1, "a", 1000, 1000, "opened"), addr(site, 1)),
+		withWebURL(node(2, "b", 1000, 1000, "opened"), addr(selfHosted+":9443", 2)),
+		node(4, "d", 1000, 1000, "opened"),
+	}, nil))
+	calls := f.count("graphql")
+	for range 2 {
+		res, err = p.Lookup(context.Background(), site, project, []int{1, 2, 4}, nil)
+		if err != nil || len(res.MRs) != 1 || res.MRs[0].IID != 1 || !slices.Equal(res.Wrong, []int{2}) || !slices.Equal(res.Unverified, []int{4}) {
+			t.Fatalf("a mixed answer: %v %+v", err, res)
+		}
+	}
+	if n := f.count("graphql") - calls; n != 2 {
+		t.Errorf("%d calls for two lookups: an unsettled answer must not be cached", n)
+	}
+	src := &Source{p: p}
+	prs, err := src.Lookup(context.Background(), model.GitLabRepo(site, project), []int{1, 2, 4}, nil)
+	var part *source.PartialLookup
+	if !errors.As(err, &part) || len(prs) != 1 || !slices.Equal(part.Wrong, []int{2}) || !slices.Equal(part.Unverified, []int{4}) {
+		t.Errorf("source: %v %+v, want one pull request and a PartialLookup", err, prs)
+	}
+	// A portless site: a webUrl that names another port is another instance;
+	// none is accepted as before; an explicit :443 is the same address.
+	f.graphql = ok(answerOf([]string{
+		withWebURL(node(1, "a", 1000, 1000, "opened"), addr(site, 1)),
+		withWebURL(node(2, "b", 1000, 1000, "opened"), addr(selfHosted+":9443", 2)),
+		withWebURL(node(3, "c", 1000, 1000, "opened"), addr(selfHosted, 3)),
+		node(4, "d", 1000, 1000, "opened"),
+		withWebURL(node(5, "e", 1000, 1000, "opened"), addr(selfHosted+":443", 5)),
+		withWebURL(node(6, "f", 1000, 1000, "opened"), strings.Replace(addr(selfHosted, 6), "https", "http", 1)),
+	}, nil))
+	res, err = p.Lookup(context.Background(), selfHosted, project, []int{1, 2, 3, 4, 5, 6}, nil)
+	var got []int
+	for _, mr := range res.MRs {
+		got = append(got, mr.IID)
+		if mr.URL != addr(selfHosted, mr.IID) {
+			t.Errorf("!%d at %q", mr.IID, mr.URL)
+		}
+	}
+	if err != nil || !slices.Equal(got, []int{3, 4, 5}) {
+		t.Fatalf("without a port: %v, merge requests %v", err, got)
+	}
+	if _, err := p.Lookup(context.Background(), selfHosted+":443", project, []int{1}, nil); !errors.Is(err, errInvalidArg) {
+		t.Errorf(":443: %v", err)
+	}
+}
+
+// The closing issues of a merge request are kept by the site and mount they
+// were read from, not by the bare host name: another instance on the same
+// name at another port, with the same project id and number, never lends its
+// list. And a lookup cached under one mount is not served under another.
+func TestClosingAndCacheKeepSiteAndMount(t *testing.T) {
+	ctx := context.Background()
+	p, f, _ := newAdapter(t, Options{})
+	other := selfHosted + ":8443"
+	mrAt := func(site string) string {
+		return withWebURL(node(1, "a", 1000, 1000, "merged"), "https://"+site+"/"+project+"/-/merge_requests/1")
+	}
+	f.graphql = ok(answerOf([]string{mrAt(selfHosted)}, nil))
+	f.rest = func(string) ([]byte, error) { return []byte(`[{"iid":7,"project_id":1000}]`), nil }
+	res, err := p.Lookup(ctx, selfHosted, project, []int{1}, nil)
+	if err != nil || len(res.MRs) != 1 || !slices.Equal(res.MRs[0].ClosingIssues, []int{7}) {
+		t.Fatalf("first site: %v %+v", err, res.MRs)
+	}
+	f.graphql = ok(answerOf([]string{mrAt(other)}, nil))
+	f.rest = func(string) ([]byte, error) { return []byte(`[{"iid":9,"project_id":1000}]`), nil }
+	res, err = p.Lookup(ctx, other, project, []int{1}, nil)
+	if err != nil || len(res.MRs) != 1 || !slices.Equal(res.MRs[0].ClosingIssues, []int{9}) {
+		t.Fatalf("the other port inherited the list: %v %+v", err, res.MRs)
+	}
+	// One login per host name: a logout drops the answers of every port.
+	p.loggedOut(selfHosted)
+	p.mu.Lock()
+	left := len(p.cache) + len(p.closes) + len(p.closingFailed)
+	p.mu.Unlock()
+	if left != 0 {
+		t.Errorf("%d answers kept after the host name's logout", left)
+	}
+}
+
+// A mount that changed on a later check drops what was cached under the old
+// one: a web path that fits both mounts is a different API project under
+// each, so the answer cached for the first is never served for the second.
+func TestMountChangeDropsAnswers(t *testing.T) {
+	ctx := context.Background()
+	p, f, _ := newUnchecked(t)
+	f.sub = map[string]string{selfHosted: "apps"}
+	approve(t, p, selfHosted)
+	f.graphql = ok(answerOf([]string{node(1, "a", 1000, 1000, "opened")}, nil))
+	web := "apps/gitlab/" + project
+	if _, err := p.Lookup(ctx, selfHosted, web, []int{1}, nil); err != nil {
+		t.Fatal(err)
+	}
+	f.sub = map[string]string{selfHosted: "apps/gitlab"}
+	unchecked(p, selfHosted)
+	approve(t, p, selfHosted)
+	if _, err := p.Lookup(ctx, selfHosted, web, []int{1}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, paths := f.graphqlArgs(); !slices.Equal(paths, []string{"gitlab/" + project, project}) {
+		t.Errorf("asked about %q, want the project under each mount in turn", paths)
 	}
 }
 

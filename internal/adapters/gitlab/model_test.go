@@ -109,8 +109,43 @@ func TestSourceLookupRefusesOtherForges(t *testing.T) {
 	}
 }
 
-// Host tells a definite no (not logged in, a subfolder install) from no
-// answer, with the errors the core tells apart.
+// glab's subfolder setting is read as a run of at most 8 path segments, each
+// one a GitLab path could start with; anything else is no answer (the host
+// gets no lookups), never a half-read prefix.
+func TestSourceHostSubfolderIsValidated(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		sub  string
+		want string // "" = no answer
+	}{
+		{"gitlab", "gitlab"},
+		{"a/b/c/d/e/f/g/h", "a/b/c/d/e/f/g/h"}, // 8 segments
+		{"a/b/c/d/e/f/g/h/i", ""},              // 9
+		{"a..b", ""},                           // a dot run inside a segment
+		{"a/-b", ""},                           // an option-like segment
+		{"a b", ""},                            // a character no path has
+		{"a/b%2Fc", ""},
+	}
+	for _, c := range cases {
+		p, f, _ := newUnchecked(t)
+		s := &Source{p: p}
+		f.sub = map[string]string{selfHosted: c.sub}
+		err := s.Host(ctx, selfHosted)
+		if c.want == "" {
+			if err == nil || errors.Is(err, source.ErrNotLoggedIn) {
+				t.Errorf("subfolder %q: %v, want no answer", c.sub, err)
+			}
+			continue
+		}
+		if err != nil || s.Subfolder(selfHosted) != c.want {
+			t.Errorf("subfolder %q: %v, got %q", c.sub, err, s.Subfolder(selfHosted))
+		}
+	}
+}
+
+// Host tells a definite no (not logged in) from no answer, with the errors
+// the core tells apart. A subfolder install is a yes, its subfolder read
+// once; a host with a web port is answered for its name.
 func TestSourceHost(t *testing.T) {
 	ctx := context.Background()
 	p, _, _ := newUnchecked(t)
@@ -126,9 +161,33 @@ func TestSourceHost(t *testing.T) {
 
 	p, f, _ := newUnchecked(t)
 	s = &Source{p: p}
-	f.sub = map[string]string{selfHosted: "gitlab"}
-	if err := s.Host(ctx, selfHosted); !errors.Is(err, source.ErrUnsupported) || errors.Is(err, source.ErrNotLoggedIn) {
+	f.sub = map[string]string{selfHosted: "/apps/gitlab/\n"}
+	if s.Subfolder(selfHosted) != "" {
+		t.Errorf("subfolder before any check: %q", s.Subfolder(selfHosted))
+	}
+	if err := s.Host(ctx, selfHosted); err != nil {
 		t.Errorf("subfolder: %v", err)
+	}
+	if err := s.Host(ctx, selfHosted+":8443"); err != nil {
+		t.Errorf("with a port: %v", err)
+	}
+	if got := s.Subfolder(selfHosted + ":8443"); got != "apps/gitlab" || s.Subfolder(selfHosted) != got {
+		t.Errorf("subfolder %q", got)
+	}
+	if n := f.count("auth"); n != 1 {
+		t.Errorf("%d login checks for one host name, want 1", n)
+	}
+	for _, h := range []string{selfHosted + ":443", selfHosted + ":0", selfHosted + ":x", selfHosted + "/gitlab"} {
+		if err := s.Host(ctx, h); err == nil {
+			t.Errorf("%s: yes", h)
+		}
+	}
+
+	p, f, _ = newUnchecked(t)
+	s = &Source{p: p}
+	f.sub = map[string]string{selfHosted: "../x"}
+	if err := s.Host(ctx, selfHosted); err == nil || errors.Is(err, source.ErrNotLoggedIn) {
+		t.Errorf("unreadable subfolder: %v, want no answer", err)
 	}
 
 	p, f, _ = newUnchecked(t)
@@ -140,7 +199,7 @@ func TestSourceHost(t *testing.T) {
 	p, f, _ = newUnchecked(t)
 	s = &Source{p: p}
 	f.auth[selfHosted] = context.DeadlineExceeded
-	if err := s.Host(ctx, selfHosted); err == nil || errors.Is(err, source.ErrNotLoggedIn) || errors.Is(err, source.ErrUnsupported) {
+	if err := s.Host(ctx, selfHosted); err == nil || errors.Is(err, source.ErrNotLoggedIn) {
 		t.Errorf("out of time: %v", err)
 	}
 
@@ -153,7 +212,7 @@ func TestSourceHost(t *testing.T) {
 // The adapter's own errors keep their words and are the shared ones underneath.
 func TestErrorsAreTheSharedOnes(t *testing.T) {
 	for err, shared := range map[error]error{
-		errRateLimited: source.ErrRateLimited, errNotKnown: source.ErrNotLoggedIn, errSubfolder: source.ErrUnsupported,
+		errRateLimited: source.ErrRateLimited, errNotKnown: source.ErrNotLoggedIn,
 	} {
 		if !errors.Is(err, shared) || !errors.Is(err, err) {
 			t.Errorf("%v is not %v", err, shared)
@@ -224,5 +283,24 @@ func TestSourceProbe(t *testing.T) {
 	st = (&Source{p: p}).Probe(context.Background())
 	if st.Kind != source.KindGitLab || st.State != source.StateOff || len(f.calls) != 0 {
 		t.Errorf("off: %+v, %d calls", st, len(f.calls))
+	}
+}
+
+// On a board whose GitLab has a web port, a failed call shows on its line:
+// calls go, and fail, by the host name, so the line for the site and the line
+// for the name are one.
+func TestSourceFailingWithAWebPort(t *testing.T) {
+	ctx := context.Background()
+	p, f, _ := newAdapter(t, Options{})
+	s := &Source{p: p}
+	site := selfHosted + ":8443"
+	f.graphql = func([]string) ([]byte, error) {
+		return nil, &runner.ExitError{Code: 1, Stderr: []byte("glab: 429 Too Many Requests (HTTP 429)\n")}
+	}
+	if _, err := s.Lookup(ctx, model.GitLabRepo(site, project), []int{1}, nil); err == nil {
+		t.Fatal("a rate limit is an error")
+	}
+	if s.Failing(site) == "" || s.Failing(site) != s.Failing(selfHosted) {
+		t.Fatalf("line %q, for the name %q", s.Failing(site), s.Failing(selfHosted))
 	}
 }

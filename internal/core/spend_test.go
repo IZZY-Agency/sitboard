@@ -250,24 +250,27 @@ func TestCodexTokensSitBesideTheMoney(t *testing.T) {
 }
 
 // Codex's catch-up of its ended threads (#114) is read once at start: the
-// days are pending until Codex says it is done, as for Claude Code. The
-// catch-up panel lists no Codex item, so it does not wait for Codex.
+// days and the catch-up panel are pending until Codex says it is done, as for
+// Claude Code, since the panel lists those threads' turns (#135).
 func TestSpendSummaryPendingWhileCodexReadsEndedThreads(t *testing.T) {
 	e := newEnv(t)
 	e.board.SetSources([]source.Status{{Kind: source.KindCodex, State: source.StateOK}})
 	if !e.board.Snapshot().Spend.Pending {
 		t.Fatal("not pending before BackfillDone of Codex")
 	}
-	if catchup(t, e.board).Pending {
-		t.Fatal("the catch-up panel waits for Codex")
+	if !catchup(t, e.board).Pending {
+		t.Fatal("the catch-up panel does not wait for Codex")
 	}
 	e.board.applySync(model.BackfillDone{Kind: string(source.KindClaude)})
-	if !e.board.Snapshot().Spend.Pending {
+	if !e.board.Snapshot().Spend.Pending || !catchup(t, e.board).Pending {
 		t.Fatal("Claude Code's BackfillDone ended Codex's wait")
 	}
 	e.board.applySync(model.BackfillDone{Kind: string(source.KindCodex)})
 	if e.board.Snapshot().Spend.Pending {
 		t.Fatal("still pending after BackfillDone of Codex")
+	}
+	if catchup(t, e.board).Pending {
+		t.Fatal("the catch-up panel still pending after BackfillDone of Codex")
 	}
 	e.board.SetSources([]source.Status{{Kind: source.KindCodex, State: source.StateMissing}})
 	if e.board.Snapshot().Spend.Pending {

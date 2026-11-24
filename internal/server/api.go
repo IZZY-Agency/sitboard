@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/IZZY-Agency/sitboard/internal/app"
@@ -14,43 +15,41 @@ import (
 // server notice a client that went away. A variable so tests can shorten it.
 var heartbeat = 15 * time.Second
 
+// maxStreams caps the event streams one server holds open at once; each costs
+// a goroutine and an encoding of the snapshot on every change. The page opens
+// one per tab, and a browser opens at most six connections to one host (HTTP/1.1),
+// so this leaves room for several browsers and the moment of a reload, when
+// the old stream has not yet ended, and still bounds a client that leaks them.
+// The one past the cap gets 503 with Retry-After; the page then retries with
+// its backoff, as after any failed stream.
+const maxStreams = 32
+
 type route struct {
 	method string
-	h      http.HandlerFunc
+	// sends is the value the page receives from this path (its type is what
+	// counts), or nil for a path that answers with a status only. The facts
+	// test (internal/facts) checks that every field of every such type is
+	// disclosed, so a new path must say here what it sends.
+	sends any
+	h     http.HandlerFunc
+}
+
+// Sends lists, by API path, the value each path sends the page; a path that
+// answers with a status only is not listed.
+func Sends() map[string]any {
+	out := map[string]any{}
+	for path, rt := range routes(Options{}) {
+		if rt.sends != nil {
+			out[path] = rt.sends
+		}
+	}
+	return out
 }
 
 // api serves /api/. Each path has exactly one method: another method is 405,
 // an unknown path is 404.
 func api(opts Options) http.Handler {
-	routes := map[string]route{
-		contract.PathSnapshot: {http.MethodGet, func(w http.ResponseWriter, _ *http.Request) {
-			writeJSON(w, opts.Board.Snapshot())
-		}},
-		contract.PathEvents: {http.MethodGet, func(w http.ResponseWriter, r *http.Request) {
-			events(w, r, opts.Board)
-		}},
-		contract.PathCatchup: {http.MethodGet, func(w http.ResponseWriter, r *http.Request) {
-			c, err := opts.Board.Catchup(r.Context())
-			if err != nil {
-				http.Error(w, "catch-up unavailable", http.StatusInternalServerError)
-				return
-			}
-			writeJSON(w, c)
-		}},
-		contract.PathLeftovers: {http.MethodGet, func(w http.ResponseWriter, r *http.Request) {
-			l, err := opts.Board.Leftovers(r.Context())
-			if err != nil {
-				http.Error(w, "leftovers unavailable", http.StatusInternalServerError)
-				return
-			}
-			writeJSON(w, l)
-		}},
-		contract.PathJump:            {http.MethodPost, jump(opts)},
-		contract.PathSeen:            {http.MethodPost, seen(opts)},
-		contract.PathCatchupRead:     {http.MethodPost, catchupRead(opts)},
-		contract.PathForgetGrouping:  {http.MethodPost, forgetGrouping(opts)},
-		contract.PathGroupingSetting: {http.MethodPost, groupingSetting(opts)},
-	}
+	routes := routes(opts)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rt, ok := routes[r.URL.Path]
 		if !ok {
@@ -64,6 +63,55 @@ func api(opts Options) http.Handler {
 		}
 		rt.h(w, r)
 	})
+}
+
+// routes are the API paths; each call has its own count of open event
+// streams, so api, which calls it once, holds one for the server.
+func routes(opts Options) map[string]route {
+	var streams atomic.Int32 // event streams open now
+	return map[string]route{
+		contract.PathSnapshot: {http.MethodGet, contract.Snapshot{}, func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, opts.Board.Snapshot())
+		}},
+		contract.PathEvents: {http.MethodGet, contract.Snapshot{}, func(w http.ResponseWriter, r *http.Request) {
+			defer streams.Add(-1)
+			if streams.Add(1) > maxStreams {
+				w.Header().Set("Retry-After", "5")
+				http.Error(w, fmt.Sprintf("too many event streams open (at most %d): close a tab of the board", maxStreams), http.StatusServiceUnavailable)
+				return
+			}
+			events(w, r, opts.Board)
+		}},
+		contract.PathCatchup: {http.MethodGet, contract.Catchup{}, func(w http.ResponseWriter, r *http.Request) {
+			c, err := opts.Board.Catchup(r.Context())
+			if err != nil {
+				http.Error(w, "catch-up unavailable", http.StatusInternalServerError)
+				return
+			}
+			writeJSON(w, c)
+		}},
+		contract.PathLeftovers: {http.MethodGet, contract.Leftovers{}, func(w http.ResponseWriter, r *http.Request) {
+			l, err := opts.Board.Leftovers(r.Context())
+			if err != nil {
+				http.Error(w, "leftovers unavailable", http.StatusInternalServerError)
+				return
+			}
+			writeJSON(w, l)
+		}},
+		contract.PathIssues: {http.MethodGet, contract.Issues{}, func(w http.ResponseWriter, r *http.Request) {
+			l, err := opts.Board.Issues(r.Context())
+			if err != nil {
+				http.Error(w, "issues unavailable", http.StatusInternalServerError)
+				return
+			}
+			writeJSON(w, l)
+		}},
+		contract.PathJump:            {http.MethodPost, nil, jump(opts)},
+		contract.PathSeen:            {http.MethodPost, nil, seen(opts)},
+		contract.PathCatchupRead:     {http.MethodPost, nil, catchupRead(opts)},
+		contract.PathForgetGrouping:  {http.MethodPost, nil, forgetGrouping(opts)},
+		contract.PathGroupingSetting: {http.MethodPost, nil, groupingSetting(opts)},
+	}
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

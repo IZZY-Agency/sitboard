@@ -11,7 +11,7 @@ GOLANGCI := $(shell command -v golangci-lint 2>/dev/null || echo go run github.c
 # release` stamps it into the binaries, scripts/publish.sh tags it, and
 # CHANGELOG.md must open with its entry. A dev build (`make build`) prints
 # `git describe` instead.
-RELEASE_VERSION := 0.4.0
+RELEASE_VERSION := 0.5.0
 RELEASE_DIR := bin/release/$(RELEASE_VERSION)
 # Published builds sign (and notarize) the macOS binaries; empty: unsigned.
 SIGN_IDENTITY ?=
@@ -25,11 +25,16 @@ LDFLAGS := -X github.com/IZZY-Agency/sitboard/internal/buildinfo.Version=$(VERSI
 HAS_WEB := $(wildcard web/package.json)
 HAS_GEN := $(wildcard internal/contract/gen/main.go)
 HAS_CMD := $(wildcard cmd/sitboard/main.go)
+# The website's folder, named without a slash, as scripts/publish.sh does: the
+# public repository has no website, and its tree never names that folder's
+# paths. The steps that read it skip themselves there.
+SITE_DIR := site
+HAS_SITE := $(wildcard $(SITE_DIR)/package.json)
 
-.PHONY: check build test lint web-deps web-check web-build go-build contract contract-check private private-all \
-	notices notices-check release verify-release release-test release-test-linux test-tmux-linux print-version
+.PHONY: check build test lint web-deps web-check web-build go-build contract contract-check facts facts-confirm private private-all \
+	notices notices-check release verify-release export-gates release-test release-test-linux test-tmux-linux print-version
 
-check: lint test web-check contract-check notices-check private release-test
+check: lint test web-check site-sync contract-check notices-check private export-gates release-test
 	@echo "make check: all steps passed"
 
 build: web-build go-build
@@ -54,6 +59,24 @@ private-all:
 	bash scripts/check-private.sh $(PRIVATE_FLAGS)
 	bash scripts/check-private.sh --history $(PRIVATE_FLAGS)
 
+# audit looks the dependencies up in the vulnerability databases: govulncheck
+# for the Go modules and this Go's standard library (only what the code
+# reaches), npm audit for every package of the web page (bundled into the
+# binary) and, where its folder exists, of the website (they build it), from
+# the lockfiles. It needs the network, so it is not part of make check; run it
+# before every release (scripts/README.md). Every step runs; any finding
+# fails it.
+GOVULNCHECK_VERSION := v1.10.0
+.PHONY: audit
+audit:
+	@status=0; \
+	echo "audit: govulncheck $(GOVULNCHECK_VERSION)"; go run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./... || status=1; \
+	echo "audit: npm audit, the web page"; npm --prefix web audit || status=1; \
+	if [ -f $(SITE_DIR)/package.json ]; then echo "audit: npm audit, the website"; npm --prefix $(SITE_DIR) audit || status=1; \
+	else echo "skip: npm audit of the website (no $(SITE_DIR) folder)"; fi; \
+	if [ $$status -ne 0 ]; then echo "make audit: a step failed or found a vulnerability; see its output above" >&2; exit 1; fi; \
+	echo "make audit: no known vulnerabilities"
+
 # THIRD_PARTY_NOTICES.md lists the licence of everything the binary carries
 # besides sitboard's own code: Go, the Go modules in the build, the npm
 # packages in the web bundle and the fonts. It is embedded in the binary
@@ -65,6 +88,22 @@ notices: web-deps
 notices-check: web-deps
 	bash scripts/notices.sh --check
 	bash scripts/notices_test.sh
+
+# README.md's generated sections and the website's facts.gen.json are built from
+# internal/facts/facts.yaml, the one list of what sitboard does, reads, sends
+# and shows. `make test` fails when they are stale, when an anchor of a fact
+# is gone or a value it states changed, when a page field is named by no
+# fact, or when the code a fact rests on changed since it was confirmed:
+# reread the fact, fix it if needed, then
+#   make facts-confirm FACTS="<fact id> …"
+facts:
+	go run ./internal/facts/gen -write
+
+facts-confirm:
+ifeq ($(strip $(FACTS)),)
+	$(error name the facts you reread: make facts-confirm FACTS="<fact id> …")
+endif
+	go run ./internal/facts/gen -confirm "$(FACTS)"
 
 contract:
 ifneq ($(HAS_GEN),)
@@ -98,6 +137,24 @@ web-deps web-check web-build:
 	@echo "skip: web steps (no web/package.json)"
 endif
 
+# site-sync: the website keeps copies of the page's design tokens, fonts
+# stylesheet and favicon, which must stay byte for byte the page's (the
+# website's own verify step checks the same files, but only after a site
+# build). A plain compare, no build; it skips where the website's folder does
+# not exist.
+SITE_SHARED := src/styles/tokens.css src/styles/fonts.css public/favicon.svg
+.PHONY: site-sync
+site-sync:
+ifneq ($(HAS_SITE),)
+	@status=0; for f in $(SITE_SHARED); do \
+	  cmp -s "web/$$f" "$(SITE_DIR)/$$f" || { echo "site-sync: the website's $$f differs from web/$$f; copy the page's" >&2; status=1; }; \
+	done; \
+	if [ $$status -eq 0 ]; then echo "site-sync: the website's copies match the page's ($(SITE_SHARED))"; fi; \
+	exit $$status
+else
+	@echo "skip: site sync (no $(SITE_DIR) folder)"
+endif
+
 go-build:
 ifneq ($(HAS_CMD),)
 	go build -trimpath -ldflags "$(LDFLAGS)" -o bin/sitboard ./cmd/sitboard
@@ -121,6 +178,15 @@ release: notices-check web-build
 # VERIFY_FLAGS=--rebuild builds them again and compares the bytes.
 verify-release:
 	REQUIRE_SIGNATURE="$(REQUIRE_SIGNATURE)" bash scripts/verify-release.sh $(RELEASE_DIR) $(if $(filter 1,$(PACKAGE_DEV)),dev-)$(RELEASE_VERSION) $(shell git rev-parse --short HEAD) $(VERIFY_FLAGS)
+
+# export-gates runs publish.sh's staging and fast gates (file kinds, sizes,
+# ignore rules, docs/ and website pointers, check-private from the staged copy)
+# on the tracked files, so a refused export fails at the pull request, not at
+# release time. It has no target: no public checkout, no new repository, no
+# network, no commit. The clean-copy make check stays release-only. PRIVATE_FLAGS
+# may be empty or --no-denylist.
+export-gates:
+	PUBLISH_GATES_ONLY=1 PRIVATE_FLAGS="$(PRIVATE_FLAGS)" bash scripts/publish.sh
 
 release-test:
 	bash scripts/release_test.sh

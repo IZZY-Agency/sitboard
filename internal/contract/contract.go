@@ -41,17 +41,20 @@ import (
 
 // Version of the API. The page stops and shows "reload the page" when a
 // snapshot carries a different version than it was built for.
-const Version = 16
+const Version = 20
 
 // HTTP surface, all under one origin.
 const (
-	PathSnapshot    = "/api/v1/snapshot"     // GET: Snapshot
-	PathEvents      = "/api/v1/events"       // GET: server-sent events, event EventSnapshot, data Snapshot
-	PathCatchup     = "/api/v1/catchup"      // GET: Catchup
-	PathLeftovers   = "/api/v1/leftovers"    // GET: Leftovers
+	PathSnapshot  = "/api/v1/snapshot"  // GET: Snapshot
+	PathEvents    = "/api/v1/events"    // GET: server-sent events, event EventSnapshot, data Snapshot
+	PathCatchup   = "/api/v1/catchup"   // GET: Catchup
+	PathLeftovers = "/api/v1/leftovers" // GET: Leftovers
+	// GET: Issues. It also asks for a new look when the list is older than
+	// IssuesFreshFor; the new list arrives with a later Snapshot.Issues.AsOf.
+	PathIssues      = "/api/v1/issues"
 	PathJump        = "/api/v1/jump"         // POST CardRequest: focus the card's terminal
 	PathSeen        = "/api/v1/seen"         // POST CardRequest: mark the card seen
-	PathCatchupRead = "/api/v1/catchup/read" // POST CatchupReadRequest: move the catch-up marker
+	PathCatchupRead = "/api/v1/catchup/read" // POST CatchupReadRequest: mark the items of a list read
 	// POST ProjectRequest: forget the grouping of a project that has parts.
 	PathForgetGrouping = "/api/v1/grouping/forget"
 	// POST GroupingRequest: set a folder's grouping to auto, always or never.
@@ -75,12 +78,14 @@ const (
 
 // MergeRequestURLPattern is the only form of a GitLab PullRequest.URL and
 // GitLabIssueURLPattern the only form of a GitLab Issue.URL: built from the
-// host, the project path and the number. Group 1 is the host, which must also
-// be one of Snapshot.GitLabHosts; group 2 the path, group 3 the number. Equal
+// host, the project path and the number. Group 1 is the host, with its web port
+// when it has one ("host:8443"), which must also be the host of one of
+// Snapshot.GitLabHosts; group 2 the path, which starts with that entry's
+// subfolder when it names one; group 3 the number. Equal
 // to model.MergeRequestURLPattern and model.GitLabIssueURLPattern.
 const (
-	MergeRequestURLPattern = `^https://([a-z0-9.-]+)/([A-Za-z0-9_][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_][A-Za-z0-9_.-]*){1,21})/-/merge_requests/([1-9][0-9]{0,9})$`
-	GitLabIssueURLPattern  = `^https://([a-z0-9.-]+)/([A-Za-z0-9_][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_][A-Za-z0-9_.-]*){1,21})/-/issues/([1-9][0-9]{0,9})$`
+	MergeRequestURLPattern = `^https://([a-z0-9.-]+(?::(?:[1-9]|[1-9][0-9]|[1-35-9][0-9]{2}|4[0-35-9][0-9]|44[0-24-9]|[1-9][0-9]{3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?)/([A-Za-z0-9_][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_][A-Za-z0-9_.-]*){1,21})/-/merge_requests/([1-9][0-9]{0,9})$`
+	GitLabIssueURLPattern  = `^https://([a-z0-9.-]+(?::(?:[1-9]|[1-9][0-9]|[1-35-9][0-9]{2}|4[0-35-9][0-9]|44[0-24-9]|[1-9][0-9]{3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?)/([A-Za-z0-9_][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_][A-Za-z0-9_.-]*){1,21})/-/issues/([1-9][0-9]{0,9})$`
 )
 
 // EventSnapshot is the server-sent event name; its data is a Snapshot.
@@ -450,9 +455,14 @@ type Snapshot struct {
 	// knows, ended ones included, by day for the last 7 days and by project.
 	Spend SpendSummary `json:"spend"`
 	// GitLabHosts are the only hosts a GitLab link (forge "gitlab") may point
-	// at: those sitboard looked merge requests up on, sorted. The page drops
-	// any GitLab link whose host is not listed.
+	// at: those sitboard looks merge requests up on now, sorted, each with
+	// its web port when it has one, and with the subfolder GitLab sits under
+	// there after a slash ("example.com/gitlab"). The page drops any GitLab
+	// link whose host is not listed, or whose path does not start with that
+	// subfolder.
 	GitLabHosts []string `json:"gitlabHosts"`
+	// Issues is what the header shows of the list GET PathIssues gives now.
+	Issues IssuesSummary `json:"issues"`
 }
 
 // Build is the sitboard build that serves the page. Version and Commit are as
@@ -512,6 +522,16 @@ type Project struct {
 	// folder, or when any folder of its path below home starts with ".".
 	Area   string `json:"area"`
 	Counts Counts `json:"counts"`
+	// OpenIssues counts the open issues of Repo on its forge; Known is false
+	// while none was counted (no repository, its forge is off, issues are
+	// turned off there, or no answer yet).
+	OpenIssues IssueCount `json:"openIssues"`
+}
+
+// IssueCount is a count that may not be known.
+type IssueCount struct {
+	Known bool `json:"known"`
+	Open  int  `json:"open"`
 }
 
 // Card is one agent session that is not an in-process subagent. Workers are
@@ -623,7 +643,7 @@ type Agent struct {
 // request (forge "gitlab", shown as !Number). The name stays for both.
 type PullRequest struct {
 	Forge  Forge  `json:"forge"`  // ForgeGitHub or ForgeGitLab, never ForgeNone
-	Host   string `json:"host"`   // "github.com"; for GitLab one of Snapshot.GitLabHosts
+	Host   string `json:"host"`   // "github.com"; for GitLab the host of one of Snapshot.GitLabHosts
 	Repo   string `json:"repo"`   // GitHub "owner/name"; GitLab "group/…/project"
 	Number int    `json:"number"` // GitLab: the merge request's iid
 	Title  string `json:"title"`
@@ -655,24 +675,27 @@ type Issue struct {
 	URL string `json:"url"`
 }
 
-// Catchup is what the board learned since the marker, up to 7 days back,
-// newest first by the time each thing happened. An item counts as unread when
-// the board learned it after the marker, even when it happened earlier (a
-// merge GitHub reports a minute late). Items that happened before this run of
-// sitboard started count by their own time, so a restart does not list again
-// what was already read.
+// Catchup is the unread items, up to 7 days back, newest first by the time
+// each thing happened. An item is read only once a list that showed it was
+// marked read, so a merge GitHub reports late, an item a full list left out,
+// or one only another tab showed, stays unread, across restarts too.
 type Catchup struct {
-	Marker time.Time `json:"marker,omitzero"` // absent before the first "mark read"
-	// AsOf is when this list was made. The page sends it back as UpTo: it
-	// covers exactly the items in this list and nothing learned later.
-	AsOf  time.Time `json:"asOf"`
+	Marker time.Time `json:"marker,omitzero"` // when the newest list marked read was made; absent before the first
+	// List names this list. The page sends it back to mark exactly its
+	// items read; a list of an earlier run, or one too old, marks nothing.
+	List  string    `json:"list"`
+	AsOf  time.Time `json:"asOf"`  // when this list was made
 	Total int       `json:"total"` // unread items before the cap; > len(Items) when some were left out
-	// Unsaved: the marker lives in memory only (--no-state), so every start
-	// of sitboard begins with no marker again.
+	// Unsaved: what is marked read lives in memory only (--no-state, or a
+	// state file that could not be written at start), so it is gone at the
+	// next start of sitboard.
 	Unsaved bool `json:"unsaved,omitempty"`
 	// Pending: sessions that had ended before sitboard started are still
 	// being read, so items from them may still arrive.
-	Pending bool          `json:"pending,omitempty"`
+	Pending bool `json:"pending,omitempty"`
+	// Partial: that read stopped at a bound (its time budget, or a file too
+	// large to read), so items from some of those sessions are missing.
+	Partial bool          `json:"partial,omitempty"`
 	Items   []CatchupItem `json:"items"`
 }
 
@@ -690,12 +713,15 @@ type CatchupItem struct {
 	Artifact    *Artifact    `json:"artifact,omitempty"`    // artifact_published only
 }
 
-// CatchupReadRequest is the body of POST PathCatchupRead. UpTo is the AsOf of
-// the list the page showed: the marker moves there, never past the newest
-// list made, never past the server's now and never back, so an item the board
-// learned after that list stays unread. Any other field is ignored.
+// CatchupReadRequest is the body of POST PathCatchupRead. List is the List of
+// the list the page showed: exactly its items are marked read. 204 when they
+// are; 409 when the list is not current (made before a restart, or too long
+// ago): nothing was marked, and the page loads the list again. 507 when
+// marking it would keep more items marked read in the last 7 days than the
+// state file holds (20,000): nothing was marked, all stay unread. Any other
+// field is ignored.
 type CatchupReadRequest struct {
-	UpTo time.Time `json:"upTo"`
+	List string `json:"list"`
 }
 
 // Leftovers lists merged work whose worktree, branch or session still exists,
@@ -719,6 +745,95 @@ type LeftoversSummary struct {
 	Items   int  `json:"items"`   // items listed
 	Held    int  `json:"held"`    // merged work held back, every reason
 	Partial bool `json:"partial"` // the list may be incomplete
+}
+
+// IssuesFreshFor: a GET PathIssues on a list older than this asks for a new
+// look. Looks never come closer together than this.
+const IssuesFreshFor = time.Minute
+
+// IssuesState says whether issues can be listed at all.
+type IssuesState string
+
+const (
+	IssuesOff     IssuesState = "off"     // no forge may be asked (--no-github, gh not installed, ...)
+	IssuesLoading IssuesState = "loading" // no answer yet
+	IssuesReady   IssuesState = "ready"
+)
+
+// IssuesStates in a fixed order.
+var IssuesStates = []IssuesState{IssuesOff, IssuesLoading, IssuesReady}
+
+// IssuesSummary is what the header shows of the issues list.
+type IssuesSummary struct {
+	State IssuesState `json:"state"`
+	// AsOf is when the list last changed (an answer came in, or what was
+	// listed went); absent before the first. The page fetches the list again
+	// when it changes.
+	AsOf time.Time `json:"asOf,omitzero"`
+	// Open sums the open issues of the repositories of the projects on the
+	// board, each repository once.
+	Open int `json:"open"`
+	// Rev counts the changes of what GET /api/v1/issues would answer: its
+	// rows, the repositories it names and its state. The page fetches the list
+	// again when it changes; AsOf is only for display.
+	Rev uint64 `json:"rev"`
+	// Purged is the Rev at which the list last lost rows it had listed (a
+	// lost login, a denied host, a project that left, issues switched off);
+	// absent before the first. The page drops what it holds of a list older
+	// than it at once, and never shows one again.
+	Purged uint64 `json:"purged,omitzero"`
+}
+
+// Issues is the open issues of the repositories of the projects on the
+// board, read only. It is never written anywhere.
+type Issues struct {
+	State IssuesState  `json:"state"`
+	AsOf  time.Time    `json:"asOf,omitzero"` // as IssuesSummary.AsOf
+	Repos []RepoIssues `json:"repos"`         // by forge, host, then repo
+	// Rev is the IssuesSummary.Rev this list is of.
+	Rev uint64 `json:"rev"`
+	// FreshMs: for this many milliseconds after the answer a GET asks for no
+	// new look (IssuesFreshFor, counted on the server's clock from the
+	// latest look's start); 0 once one would.
+	FreshMs int64 `json:"freshMs"`
+}
+
+// RepoIssuesState says what the forge answered about one repository.
+type RepoIssuesState string
+
+const (
+	RepoIssuesPending  RepoIssuesState = "pending"  // not answered yet
+	RepoIssuesOK       RepoIssuesState = "ok"       // Open and Issues are its answer
+	RepoIssuesDisabled RepoIssuesState = "disabled" // issues are turned off in the repository
+	RepoIssuesNotFound RepoIssuesState = "notFound" // gone, renamed, or not visible to the account
+)
+
+// RepoIssuesStates in a fixed order.
+var RepoIssuesStates = []RepoIssuesState{RepoIssuesPending, RepoIssuesOK, RepoIssuesDisabled, RepoIssuesNotFound}
+
+// RepoIssues is one repository's open issues. Forge, Host and Repo are those
+// of the Project that has it.
+type RepoIssues struct {
+	Forge  Forge           `json:"forge"`
+	Host   string          `json:"host"`
+	Repo   string          `json:"repo"`
+	State  RepoIssuesState `json:"state"`
+	Open   int             `json:"open"`   // every open issue, also those not in Issues
+	Issues []OpenIssue     `json:"issues"` // the most recently updated first, at most 30
+}
+
+// OpenIssue is one open issue.
+type OpenIssue struct {
+	Number int    `json:"number"`
+	Title  string `json:"title"`
+	// URL matches IssueURLPattern (GitHub) or GitLabIssueURLPattern (GitLab);
+	// "" when none can be built.
+	URL       string `json:"url"`
+	Milestone string `json:"milestone"` // "" when none
+	// MilestoneDue is the milestone's due date; absent when it has none.
+	MilestoneDue time.Time `json:"milestoneDue,omitzero"`
+	Labels       []string  `json:"labels"` // label names, at most 5
+	UpdatedAt    time.Time `json:"updatedAt,omitzero"`
 }
 
 // HeldCount is how many merged branches, or sessions that could be closed,

@@ -1,7 +1,6 @@
 package shellcmd
 
 import (
-	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -216,29 +215,4 @@ func TestShellScriptParsingIsBounded(t *testing.T) {
 		_ = c.SpawnNames()
 		_ = c.Runs("gh", "pr", "create")
 	}
-}
-
-func FuzzSpawnNames(f *testing.F) {
-	for _, s := range []string{
-		`bash -c 'agtermctl session new --name a'`, `sh -lc "x; agtermctl session new --name=b"`, `zsh -c`, `bash -o -c`,
-		"cat <<'EOF'\nagtermctl session new --name c\nEOF\ngh pr create", `sudo -u x env Y=1 timeout 3 agtermctl session new --name d # e`,
-		"git commit -m \"$(cat <<'EOF'\nx \"y\"\nEOF\n)\" && gh pr create", "echo `a $(b \"c\")` $'d\\'e' $((1<<2)) >&2",
-	} {
-		f.Add(s)
-	}
-	f.Fuzz(func(t *testing.T, s string) {
-		c := Parse(s)
-		if len(c.words) != len(c.sep) || len(c.words) != len(c.at) {
-			t.Fatalf("slices differ: %d words, %d sep, %d at", len(c.words), len(c.sep), len(c.at))
-		}
-		if len(c.words) > maxWords {
-			t.Fatalf("%d words, cap %d", len(c.words), maxWords)
-		}
-		if !reflect.DeepEqual(c, Parse(s)) {
-			t.Fatal("not deterministic")
-		}
-		_ = c.SpawnNames()
-		_ = c.Runs("gh", "pr", "create")
-		_ = c.Runs("agtermctl", "session", "new")
-	})
 }

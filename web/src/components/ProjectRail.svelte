@@ -10,6 +10,7 @@
   import { focusKeeper, isolate, moveFocus, onKeys, tabStop } from '../keys';
   import { ms, VIEW_MS } from '../motion';
   import Count from './Count.svelte';
+  import { openIssuesText } from '../data/issues';
   import Dots from './Dots.svelte';
   import type { GroupingMode } from '../contract.gen';
   import AlwaysGrouping from './AlwaysGrouping.svelte';
@@ -251,7 +252,9 @@
                 >
                   <span class="name u" title={p.name}>{p.name}</span><Dots dots={p.dots.slice(0, 8)} small />{' '}<span class="n"
                     ><Count value={p.count} /></span
-                  ><span class="visually-hidden">{', '}{p.note}</span>
+                  >{#if p.issues !== null && p.issues > 0}<span class="iss" aria-hidden="true" title={openIssuesText(p.issues)}>{p.issues}</span>{/if}<span
+                    class="visually-hidden">{', '}{p.note}{#if p.issues !== null}{', '}{openIssuesText(p.issues)}{/if}</span
+                  >
                 </button>
               </div>
               {#if open}
@@ -269,7 +272,9 @@
                       >
                         <span class="name u" title={e.name}>{e.name}</span><Dots dots={e.dots.slice(0, 8)} small />{' '}<span
                           class="n"><Count value={e.count} /></span
-                        ><span class="visually-hidden">{', '}{e.note}</span>
+                        >{#if e.issues !== null && e.issues > 0}<span class="iss" aria-hidden="true" title={openIssuesText(e.issues)}>{e.issues}</span>{/if}<span
+                          class="visually-hidden">{', '}{e.note}{#if e.issues !== null}{', '}{openIssuesText(e.issues)}{/if}</span
+                        >
                       </button>
                     </li>
                   {/each}
@@ -390,6 +395,24 @@
     min-width: 18px;
     text-align: right;
     color: var(--muted);
+  }
+  /* Open issues: a small ring and the number, quieter than the agent count. */
+  .iss {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    margin-left: 8px;
+    font-size: var(--text-xs);
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .iss::before {
+    content: '';
+    width: 7px;
+    height: 7px;
+    border: 1px solid currentColor;
+    border-radius: 50%;
   }
   .part {
     padding-left: 40px;

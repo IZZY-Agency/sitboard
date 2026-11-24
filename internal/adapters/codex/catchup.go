@@ -3,6 +3,7 @@ package codex
 import (
 	"cmp"
 	"context"
+	"errors"
 	"maps"
 	"os"
 	"path/filepath"
@@ -13,11 +14,16 @@ import (
 	"github.com/IZZY-Agency/sitboard/internal/model"
 )
 
-// Catch-up of ended sessions (#114). Once, at
-// start, the token records of the Codex threads that had ended before
-// sitboard began are read, and their quarter hours go into the Codex day and
-// project totals as Backfill facts: Ended, never a card, no turns, no pull
-// requests, only the spend and the folder.
+// Catch-up of ended sessions (#114, #135). Once, at start, the rollouts of
+// the Codex threads that had ended before sitboard began are read, and each
+// session goes to the board as a Backfill fact, like a Claude Code session
+// found by its transcript: Ended, so never a card; its title from the session
+// index, its folder, its turn ends of the last 7 days and its pull and merge
+// requests, for Catch-up and the lookups of their state; and its quarter
+// hours, for the Codex day and project totals. A session's own rollout is
+// read whole, as a live read reads it; a thread it spawned only for its token
+// records, as for a live session. A `codex exec` run keeps its headless mark,
+// so it counts in the totals and Catch-up leaves it out.
 //
 // Which threads: the ones the board shows as sessions (the terminal client
 // and `codex exec`), not the desktop app's or the plugin's; a thread Codex
@@ -57,6 +63,17 @@ var (
 func firstDisplayedMidnight(now time.Time) time.Time {
 	l := now.Local()
 	return time.Date(l.Year(), l.Month(), l.Day()-6, 0, 0, 0, 0, time.Local)
+}
+
+// catchupSince is what a rollout must have been changed since to matter: the
+// earlier of the rolling Catch-up window and the first displayed midnight, as
+// the regular scan takes it (rollouts).
+func catchupSince(now time.Time) time.Time {
+	since := now.Add(-turnWindow)
+	if c := firstDisplayedMidnight(now); c.Before(since) {
+		since = c
+	}
+	return since
 }
 
 // olderFile is a rollout found in a day folder older than the scanned ones.
@@ -184,12 +201,14 @@ type catchupJob struct {
 type caughtRoot struct {
 	meta meta
 	mod  time.Time
+	path string // the root's rollout
 }
 
 type catchupPlan struct {
 	jobs  []catchupJob
 	roots map[string]caughtRoot
-	cut   bool // a bound left some out
+	cut   bool   // a bound left some out
+	index string // the session index, for the titles of the roots read
 }
 
 type caughtRead struct {
@@ -198,15 +217,17 @@ type caughtRead struct {
 }
 
 type catchupResult struct {
-	roots map[string]caughtRoot
-	reads []caughtRead
-	cut   bool // a bound left some out
+	roots  map[string]caughtRoot
+	reads  []caughtRead
+	titles map[string]string // the roots' titles from the session index
+	cut    bool              // a bound left some out
 }
 
 // caughtItem is one root waiting to be published: its fact, built from the
 // threads read for it.
 type caughtItem struct {
-	id string
+	id    string
+	title string // from a lookup of the session index, for a root the scan's read does not keep
 	caughtRoot
 	parts map[string]*derived // by thread id: the root and the threads spawned under it
 }
@@ -270,7 +291,7 @@ func (r *registry) planCatchup(older []olderFile) catchupPlan {
 		}
 		return id
 	}
-	plan := catchupPlan{roots: map[string]caughtRoot{}}
+	plan := catchupPlan{roots: map[string]caughtRoot{}, index: r.names.path}
 	for id, t := range threads {
 		root := ""
 		if t.meta.Parent == "" {
@@ -282,7 +303,7 @@ func (r *registry) planCatchup(older []olderFile) catchupPlan {
 		}
 		if root != "" {
 			plan.jobs = append(plan.jobs, catchupJob{id: id, root: root, path: t.path, mod: t.mod})
-			plan.roots[root] = caughtRoot{meta: threads[root].meta, mod: threads[root].mod}
+			plan.roots[root] = caughtRoot{meta: threads[root].meta, mod: threads[root].mod, path: threads[root].path}
 		}
 	}
 	slices.SortFunc(plan.jobs, func(a, b catchupJob) int {
@@ -294,9 +315,11 @@ func (r *registry) planCatchup(older []olderFile) catchupPlan {
 	return plan
 }
 
-// readCatchup reads the planned rollouts for their token records, until ctx
-// ends (the time bound). It touches no registry state, so it runs in its own
-// goroutine. A rollout it could not read whole is not counted.
+// readCatchup reads the planned rollouts until ctx ends (the time bound): a
+// root's whole, as a live read does, for its turns, pull requests, model,
+// effort, folder and token records; a spawned thread's for its token records
+// only, as for a live session. It touches no registry state, so it runs in
+// its own goroutine. A rollout it could not read whole is not counted.
 func readCatchup(ctx context.Context, plan catchupPlan, now time.Time) catchupResult {
 	res := catchupResult{roots: plan.roots, cut: plan.cut}
 	for _, j := range plan.jobs {
@@ -304,27 +327,31 @@ func readCatchup(ctx context.Context, plan catchupPlan, now time.Time) catchupRe
 			res.cut = true
 			break
 		}
-		fi, err := os.Lstat(j.path)
-		if err != nil || !fi.Mode().IsRegular() {
-			continue
-		}
-		if fi.Size() > catchupFileCap {
-			res.cut = true
-			continue
-		}
+		root := j.id == j.root
 		t := newTailer(j.path)
-		t.id, t.spendOnly, t.cap = j.id, true, catchupFileCap
+		t.id, t.spendOnly, t.startup, t.cap, t.whole = j.id, !root, root, catchupFileCap, true
 		if _, err := t.update(ctx, now); err != nil {
 			if ctx.Err() != nil {
 				res.cut = true
 				break
 			}
+			res.cut = res.cut || errors.Is(err, errTooLarge)
 			continue
 		}
-		if t.sawRecord {
+		if t.sawRecord || (root && (len(t.d.TurnEnds) > 0 || len(t.d.CreatedPRs) > 0 || len(t.d.PushedPRs) > 0)) {
 			res.reads = append(res.reads, caughtRead{job: j, d: t.d})
 		}
 	}
+	// The titles of the roots read, found here, off the registry goroutine: a
+	// root the scan does not list (an older day folder) is not one the
+	// registry's own index read keeps a title for.
+	want := map[string]bool{}
+	for _, rd := range res.reads {
+		if rd.job.id == rd.job.root {
+			want[rd.job.id] = true
+		}
+	}
+	res.titles = lookupTitles(ctx, plan.index, want)
 	return res
 }
 
@@ -345,7 +372,7 @@ func (r *registry) applyCatchup(res catchupResult) {
 		// The fact is built from the plan's root data: the scan may have
 		// dropped the session (an old folder) since. A root that is a card by
 		// now is skipped at publishing.
-		r.queue = append(r.queue, caughtItem{id: id, caughtRoot: res.roots[id], parts: byRoot[id]})
+		r.queue = append(r.queue, caughtItem{id: id, title: res.titles[id], caughtRoot: res.roots[id], parts: byRoot[id]})
 	}
 }
 
@@ -358,7 +385,22 @@ func (r *registry) publishCatchup() (more bool) {
 	var facts []model.Fact
 	for _, it := range r.queue[:n] {
 		if _, card := r.sent[it.id]; card {
-			continue // a card since it was queued
+			s := r.sessions[it.id]
+			if s == nil || s.seenLive {
+				// A card since it was queued: resumed while the read ran. Its
+				// spend is carried, and its rollout read again whole by the
+				// next live read (read, under the adapter's context), as when
+				// the resume comes after the catch-up fact (scan).
+				if s != nil && s.carryParts == nil && s.path == it.path && s.metaOK && s.meta.ID == it.meta.ID {
+					s.carryParts = it.parts
+				}
+				continue
+			}
+			// A card only because a lock lookup failed (liveness unknown): the
+			// read found the thread ended, and the card goes once a lookup
+			// works, so the read is published in its place (cardOf keeps it so
+			// until the thread is seen live, which carries the read again).
+			r.forget(it.id, s)
 		}
 		if o := r.obs[it.id]; o != nil && o.fact != nil {
 			continue // a fact kept since it was queued is newer: the thread was followed live
@@ -368,11 +410,18 @@ func (r *registry) publishCatchup() (more bool) {
 			ds = append(ds, it.parts[k])
 		}
 		sp := spendOf(ds...)
-		if len(sp.Spans) == 0 {
-			continue // no use in the days: nothing to count
+		var own derived // the root's own read: none when only its spawned threads had records
+		if d := it.parts[it.id]; d != nil {
+			own = *d
+		}
+		headless := it.meta.Source == "exec"
+		prs := !headless && len(own.CreatedPRs)+len(own.PushedPRs) > 0 // a `codex exec` run's are not asked of the forge: Catch-up leaves the run out
+		if len(sp.Spans) == 0 && len(own.TurnEnds) == 0 && !prs {
+			continue // no use in the days, no turn and no pull request to list: nothing to show
 		}
 		f := model.SessionFact{
 			Key:          model.SessionKey{Tool: model.ToolCodex, ID: it.id},
+			Name:         cmp.Or(r.names.byID[it.id], it.title),
 			ToolVersion:  it.meta.Version,
 			Status:       model.Unknown[model.Status](),
 			StartedAt:    it.meta.StartedAt,
@@ -380,10 +429,20 @@ func (r *registry) publishCatchup() (more bool) {
 			Live:         model.Of(false),
 			Ended:        true,
 			EndedAt:      it.mod,
-			Folder:       it.meta.Cwd,
-			Headless:     it.meta.Source == "exec",
+			Folder:       cmp.Or(own.Folder, it.meta.Cwd),
+			TurnEnds:     slices.Clone(own.TurnEnds),
+			Headless:     headless,
 			Backfill:     true,
 			Spend:        sp,
+		}
+		if !headless {
+			f.CreatedPRs, f.PushedPRs = slices.Clone(own.CreatedPRs), slices.Clone(own.PushedPRs)
+		}
+		if own.Model != "" {
+			f.Model = model.Of(own.Model)
+		}
+		if own.Effort != "" {
+			f.Effort = model.Of(own.Effort)
 		}
 		o := &observed{root: it.id, fact: &f, parts: it.parts}
 		r.touch(o)

@@ -24,6 +24,37 @@ var keepEnded = false
 // layout; this keeps a hostile 10,000-character name out of every snapshot.
 const maxText = 300
 
+// sessionsInOrderLocked lists the sessions in one fixed order: those sitting
+// in their repository's main checkout (or a folder inside it) first, then by key. A project takes its
+// repository from the first of its sessions, so linked worktrees with other
+// origins cannot make it change from one rebuild to the next. Callers hold
+// b.mu.
+func (b *Board) sessionsInOrderLocked() []model.SessionFact {
+	list := make([]model.SessionFact, 0, len(b.sessions))
+	for _, s := range b.sessions {
+		list = append(list, s)
+	}
+	inMain := func(s model.SessionFact) bool {
+		r := b.repoLocked(s.Folder)
+		return r.Root != "" && r.Root == r.MainRoot // anywhere inside the main checkout, a subfolder too
+	}
+	slices.SortFunc(list, func(x, y model.SessionFact) int {
+		return cmp.Or(
+			-cmp.Compare(b2i(inMain(x)), b2i(inMain(y))),
+			cmp.Compare(x.Key.Tool, y.Key.Tool),
+			cmp.Compare(x.Key.ID, y.Key.ID),
+		)
+	})
+	return list
+}
+
+func b2i(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
 // deriveLocked builds the whole board from the stored facts. It returns the
 // view and the card id -> session map. Callers hold b.mu.
 func (b *Board) deriveLocked(now time.Time) (view, map[string]model.SessionKey) {
@@ -47,6 +78,7 @@ func (b *Board) deriveLocked(now time.Time) (view, map[string]model.SessionKey) 
 	projects := map[string]*contract.Project{}
 	mainRoots := map[string]string{} // project id -> main root
 	plainLive := map[string]int{}    // plain folder -> agents sitting in it now
+	var remotes []model.ForgeRepo    // each project's repository, for issues
 	var shown []model.SessionFact
 	parents := b.parentsLocked()
 	cyclic := cycles(parents)
@@ -54,7 +86,7 @@ func (b *Board) deriveLocked(now time.Time) (view, map[string]model.SessionKey) 
 	for k := range cyclic {
 		parents[k] = model.Unknown[model.SessionKey]()
 	}
-	for _, s := range b.sessions {
+	for _, s := range b.sessionsInOrderLocked() {
 		if !b.mayShowLocked(s) {
 			continue
 		}
@@ -72,6 +104,7 @@ func (b *Board) deriveLocked(now time.Time) (view, map[string]model.SessionKey) 
 		if _, seen := projects[project.ID]; !seen {
 			projects[project.ID] = &project
 			mainRoots[project.ID] = b.repoLocked(s.Folder).MainRoot
+			remotes = append(remotes, b.shownRemoteLocked(b.repoLocked(s.Folder))) // as cardLocked named it
 		}
 		shown = append(shown, s)
 		if b.liveUmbrellaLocked(s) {
@@ -98,7 +131,9 @@ func (b *Board) deriveLocked(now time.Time) (view, map[string]model.SessionKey) 
 		}
 	}
 	v.spend = b.spendLocked(now)
+	v.issueRepos = b.issueReposOfLocked(remotes)
 	v.gitlabHosts = b.gitlabHostsLocked()
+	v.issues = b.issuesSummaryLocked(v.issueRepos)
 	v.umbrellas, v.groupings = b.groupLocked(projects, mainRoots, plainLive, b.qualifiedLocked(shown, parents, plainLive), now)
 
 	for _, c := range v.cards {
@@ -126,10 +161,7 @@ func (b *Board) deriveLocked(now time.Time) (view, map[string]model.SessionKey) 
 // is within the roots and git has answered for it, and it has not ended (see
 // keepEnded). The column rules then decide. Callers hold b.mu.
 func (b *Board) mayShowLocked(s model.SessionFact) bool {
-	if _, err := contract.CardID(string(s.Key.Tool), s.Key.ID); err != nil {
-		return false // an id outside the safe form never becomes a card
-	}
-	if !b.inRoots(s.Folder) || (s.Ended && !keepEnded) {
+	if !b.onceResolvedLocked(s) {
 		return false
 	}
 	if s.Folder == "" {
@@ -137,6 +169,15 @@ func (b *Board) mayShowLocked(s model.SessionFact) bool {
 	}
 	_, resolved := b.repos[s.Folder]
 	return resolved
+}
+
+// onceResolvedLocked: the session may have a card once git has answered for
+// its folder. Callers hold b.mu.
+func (b *Board) onceResolvedLocked(s model.SessionFact) bool {
+	if _, err := contract.CardID(string(s.Key.Tool), s.Key.ID); err != nil {
+		return false // an id outside the safe form never becomes a card
+	}
+	return b.inRoots(s.Folder) && (!s.Ended || keepEnded)
 }
 
 func count(c *contract.Counts, card contract.Card) {
@@ -202,11 +243,12 @@ func (b *Board) cardLocked(s model.SessionFact, parent model.Known[model.Session
 	}
 	// A path too long for the page is left out with its forge and host: a
 	// project names its repository whole or not at all.
-	if remote := b.shownRemoteLocked(repo.Remote); remote.Valid() && pagePath(remote.Path) != "" {
+	if remote := b.shownRemoteLocked(repo); remote.Valid() && pagePath(remote.Path) != "" {
 		path := pagePath(remote.Path)
 		project.Repo = path
-		project.RepoForge = contract.Forge(repo.Remote.Forge)
-		project.RepoHost = repo.Remote.Host
+		project.RepoForge = contract.Forge(remote.Forge)
+		project.RepoHost = remote.Host
+		project.OpenIssues = b.projectIssuesLocked(remote)
 	}
 
 	card := contract.Card{
@@ -639,14 +681,33 @@ func jumpKind(s model.SessionFact, hasTerm bool) contract.JumpKind {
 }
 
 // gitlabHostsLocked lists the hosts of every GitLab merge request the board
-// knows (on a card or not, so a catch-up item's link passes too), sorted;
-// never nil. The page links a GitLab address only on one of these hosts.
+// knows (on a card or not, so a catch-up item's link passes too) and of every
+// repository with listed issues, sorted; never nil. Only a host lookups may
+// go to now is listed (a merge request on any other is never shown), each
+// with glab's subfolder for it after a slash ("example.com/gitlab"). The page
+// links a GitLab address only on one of these hosts, under exactly that
+// subfolder.
 func (b *Board) gitlabHostsLocked() []string {
 	hosts := []string{}
-	for ref := range b.prs {
-		if ref.Repo.Forge == model.ForgeGitLab && ref.Repo.Valid() && !slices.Contains(hosts, ref.Repo.Host) {
-			hosts = append(hosts, ref.Repo.Host)
+	add := func(host string) {
+		d := b.glHosts[host]
+		if b.gitlabOffLocked() || !d.ok {
+			return
 		}
+		if d.sub != "" {
+			host += "/" + d.sub
+		}
+		if !slices.Contains(hosts, host) {
+			hosts = append(hosts, host)
+		}
+	}
+	for ref := range b.prs {
+		if ref.Repo.Forge == model.ForgeGitLab && ref.Repo.Valid() {
+			add(ref.Repo.Host)
+		}
+	}
+	for _, h := range b.issueHostsLocked() {
+		add(h)
 	}
 	slices.Sort(hosts)
 	return hosts

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Issue, PullRequest } from '../contract.gen';
-import { cardClosesParts, cardPrSummaryParts, closesParts, indexOf, issueHref, prHref, prKey, prLineParts, prNumber, readGitlabHosts, repoKey } from './derive';
-import { groupCatchup, rowLink } from './catchup';
+import { cardClosesParts, cardPrSummaryParts, closesParts, gitlabMount, indexOf, issueHref, prHref, prKey, prLineParts, prNumber, readGitlabHosts, repoKey } from './derive';
+import { groupCatchup, rowLink, visibleCatchupItems } from './catchup';
 import { card, golden, project, snapshot } from '../test/fixtures';
 
 const HOST = 'gitlab.example.com';
@@ -42,7 +42,9 @@ describe('GitLab links', () => {
     expect(prHref(mr({ repo: 'example-group/other' }), [HOST])).toBeNull();
     expect(prHref(mr({ url: `https://gitlab.com/${PATH}/-/merge_requests/12` }), [HOST, 'gitlab.com'])).toBeNull();
     // An address of the wrong form, even when it equals the rebuilt one.
-    expect(prHref(mr({ host: 'evil.example:8443', url: `https://evil.example:8443/${PATH}/-/merge_requests/12` }), ['evil.example:8443'])).toBeNull();
+    expect(prHref(mr({ host: 'evil.example:443', url: `https://evil.example:443/${PATH}/-/merge_requests/12` }), ['evil.example:443'])).toBeNull();
+    expect(prHref(mr({ host: 'evil.example:08443', url: `https://evil.example:08443/${PATH}/-/merge_requests/12` }), ['evil.example:08443'])).toBeNull();
+    expect(prHref(mr({ host: 'evil.example:', url: `https://evil.example:/${PATH}/-/merge_requests/12` }), ['evil.example:'])).toBeNull();
     expect(prHref(mr({ repo: 'p', url: `https://${HOST}/p/-/merge_requests/12` }), [HOST])).toBeNull();
     // A GitHub address under the GitLab forge, and a GitLab one under GitHub.
     expect(prHref(mr({ url: `https://github.com/${PATH}/pull/12` }), [HOST])).toBeNull();
@@ -50,6 +52,123 @@ describe('GitLab links', () => {
     expect(prHref(mr({ forge: 'github', host: HOST, repo: 'o/r', url: 'https://github.com/o/r/pull/12' }))).toBeNull();
     // A forge the page does not know.
     expect(prHref(mr({ forge: 'bitbucket' as never }), [HOST])).toBeNull();
+  });
+
+  it('links a merge request on a host with a web port only when that host:port is listed', () => {
+    const site = `${HOST}:8443`;
+    const url = `https://${site}/${PATH}/-/merge_requests/12`;
+    expect(prHref(mr({ host: site, url }), [site])).toBe(url);
+    expect(issueHref(glIssue(3, { host: site, url: `https://${site}/${PATH}/-/issues/3` }), [site])).toBe(`https://${site}/${PATH}/-/issues/3`);
+    // The host name alone, or another port, is not that host.
+    expect(prHref(mr({ host: site, url }), [HOST])).toBeNull();
+    expect(prHref(mr({ host: site, url }), [`${HOST}:9443`])).toBeNull();
+    // The port in the address must be the one in the fields.
+    expect(prHref(mr({ host: HOST, url }), [HOST, site])).toBeNull();
+    expect(prHref(mr({ host: site, url: `https://${HOST}/${PATH}/-/merge_requests/12` }), [HOST, site])).toBeNull();
+  });
+
+  it('links a merge request under a subfolder at its full web path, nothing shorter or longer', () => {
+    const web = `gitlab/${PATH}`;
+    const url = `https://${HOST}/${web}/-/merge_requests/12`;
+    // The listed entry carries the subfolder: the row must sit under it.
+    expect(prHref(mr({ repo: web, url }), [`${HOST}/gitlab`])).toBe(url);
+    expect(prHref(mr({ repo: PATH, url }), [`${HOST}/gitlab`])).toBeNull();
+    expect(prHref(mr({ repo: web, url: `https://${HOST}/${PATH}/-/merge_requests/12` }), [`${HOST}/gitlab`])).toBeNull();
+    // On a host listed without a subfolder, "gitlab" is just a group name.
+    expect(prHref(mr({ repo: web, url }), [HOST])).toBe(url);
+  });
+
+  it('binds a link to the mount of its host: repo and url changed together still need the mount', () => {
+    const mounted = [`${HOST}/gitlab`];
+    const mrUrl = (repo: string, n = 12) => `https://${HOST}/${repo}/-/merge_requests/${n}`;
+    const isUrl = (repo: string, n = 3) => `https://${HOST}/${repo}/-/issues/${n}`;
+    const good = `gitlab/${PATH}`;
+    expect(prHref(mr({ repo: good, url: mrUrl(good) }), mounted)).toBe(mrUrl(good));
+    expect(issueHref(glIssue(3, { repo: good, url: isUrl(good) }), mounted)).toBe(isUrl(good));
+    // Both fields omit the mount: a path outside it.
+    expect(prHref(mr({ repo: PATH, url: mrUrl(PATH) }), mounted)).toBeNull();
+    expect(issueHref(glIssue(3, { repo: PATH, url: isUrl(PATH) }), mounted)).toBeNull();
+    // Another folder than the mount.
+    const other = `other/${PATH}`;
+    expect(prHref(mr({ repo: other, url: mrUrl(other) }), mounted)).toBeNull();
+    expect(issueHref(glIssue(3, { repo: other, url: isUrl(other) }), mounted)).toBeNull();
+    // A mount that only starts like the listed one.
+    const near = `gitlab2/${PATH}`;
+    expect(prHref(mr({ repo: near, url: mrUrl(near) }), mounted)).toBeNull();
+    // The character after the mount's name is not a slash: another folder.
+    const glued = `gitlabx${PATH}`;
+    expect(prHref(mr({ repo: glued, url: mrUrl(glued) }), mounted)).toBeNull();
+    // Nothing after the mount but one segment: not a project.
+    expect(prHref(mr({ repo: 'gitlab/solo', url: mrUrl('gitlab/solo') }), mounted)).toBeNull();
+    // A host with a web port and a mount, both in the entry.
+    const site = `${HOST}:8443`;
+    const portUrl = `https://${site}/${good}/-/merge_requests/12`;
+    expect(prHref(mr({ host: site, repo: good, url: portUrl }), [`${site}/gitlab`])).toBe(portUrl);
+    expect(prHref(mr({ host: site, repo: PATH, url: `https://${site}/${PATH}/-/merge_requests/12` }), [`${site}/gitlab`])).toBeNull();
+    expect(prHref(mr({ host: site, repo: good, url: portUrl }), [`${HOST}/gitlab`])).toBeNull();
+  });
+
+  it('refuses a path or number the server never emits', () => {
+    // A project segment ending in .git or .atom.
+    const dotGit = `${PATH}.git`;
+    expect(prHref(mr({ repo: dotGit, url: `https://${HOST}/${dotGit}/-/merge_requests/12` }), [HOST])).toBeNull();
+    const dotAtom = `example-group/app.atom`;
+    expect(issueHref(glIssue(3, { repo: dotAtom, url: `https://${HOST}/${dotAtom}/-/issues/3` }), [HOST])).toBeNull();
+    // A number above a signed 32-bit integer (ten digits pass a loose pattern).
+    expect(prHref(mr({ number: 2147483647, url: `https://${HOST}/${PATH}/-/merge_requests/2147483647` }), [HOST])).toBe(`https://${HOST}/${PATH}/-/merge_requests/2147483647`);
+    expect(prHref(mr({ number: 2147483648, url: `https://${HOST}/${PATH}/-/merge_requests/2147483648` }), [HOST])).toBeNull();
+    expect(issueHref(glIssue(2147483648), [HOST])).toBeNull();
+    // 22 segments are the most; 23 are not.
+    const seg = (n: number) => Array.from({ length: n }, (_, i) => `g${i}`).join('/');
+    expect(prHref(mr({ repo: seg(22), url: `https://${HOST}/${seg(22)}/-/merge_requests/12` }), [HOST])).not.toBeNull();
+    expect(prHref(mr({ repo: seg(23), url: `https://${HOST}/${seg(23)}/-/merge_requests/12` }), [HOST])).toBeNull();
+    // Under a mount, the mount's segment counts toward the 22.
+    const under = `gitlab/${seg(21)}`;
+    expect(prHref(mr({ repo: under, url: `https://${HOST}/${under}/-/merge_requests/12` }), [`${HOST}/gitlab`])).not.toBeNull();
+    const tooDeep = `gitlab/${seg(22)}`;
+    expect(prHref(mr({ repo: tooDeep, url: `https://${HOST}/${tooDeep}/-/merge_requests/12` }), [`${HOST}/gitlab`])).toBeNull();
+  });
+
+  it('links no path longer than the server gives the page (300 characters), for merge requests and issues alike', () => {
+    const path = (n: number) => `${'a'.repeat(100)}/${'b'.repeat(100)}/${'c'.repeat(n - 202)}`;
+    for (const [hosts, mount] of [[[HOST], ''], [[`${HOST}/gitlab`], 'gitlab/']] as const) {
+      const at = (n: number) => `${mount}${path(n - mount.length)}`;
+      expect(at(300).length).toBe(300);
+      const mrAt = (n: number) => prHref(mr({ repo: at(n), url: `https://${HOST}/${at(n)}/-/merge_requests/12` }), hosts);
+      const isAt = (n: number) => issueHref(glIssue(3, { repo: at(n), url: `https://${HOST}/${at(n)}/-/issues/3` }), hosts);
+      expect(mrAt(300)).toBe(`https://${HOST}/${at(300)}/-/merge_requests/12`);
+      expect(isAt(300)).toBe(`https://${HOST}/${at(300)}/-/issues/3`);
+      expect(mrAt(301)).toBeNull();
+      expect(isAt(301)).toBeNull();
+    }
+  });
+
+  it('a row of the wrong shape, a whole entry as its host, or github.com never gets a GitLab link', () => {
+    const mounted = [`${HOST}/gitlab`];
+    const good = `gitlab/${PATH}`;
+    const url = `https://${HOST}/${good}/-/merge_requests/12`;
+    expect(prHref(mr({ repo: good, url }), mounted)).toBe(url);
+    // The whole entry as the row's host: not a site.
+    expect(prHref(mr({ host: `${HOST}/gitlab`, repo: PATH, url: `https://${HOST}/gitlab/${PATH}/-/merge_requests/12` }), mounted)).toBeNull();
+    // Fields of another type must not throw.
+    expect(prHref(mr({ repo: 5 as unknown as string, url }), mounted)).toBeNull();
+    expect(prHref(mr({ host: null as unknown as string, url }), mounted)).toBeNull();
+    // github.com is never a GitLab host, even when listed.
+    const gh = `https://github.com/${PATH}/-/merge_requests/12`;
+    expect(prHref(mr({ host: 'github.com', url: gh }), ['github.com'])).toBeNull();
+    expect(prHref(mr({ host: 'github.com:8443', url: `https://github.com:8443/${PATH}/-/merge_requests/12` }), ['github.com:8443'])).toBeNull();
+  });
+
+  it('gitlabMount reads the subfolder from the listed entry, matching the host exactly', () => {
+    expect(gitlabMount([HOST], HOST)).toBe('');
+    expect(gitlabMount([`${HOST}/gitlab`], HOST)).toBe('gitlab');
+    expect(gitlabMount([`${HOST}:8443/apps/gitlab`], `${HOST}:8443`)).toBe('apps/gitlab');
+    expect(gitlabMount([`${HOST}:8443/gitlab`], HOST)).toBeNull();
+    expect(gitlabMount([`${HOST}/gitlab`], 'example.com')).toBeNull();
+    expect(gitlabMount([`x${HOST}`], HOST)).toBeNull();
+    expect(gitlabMount([`${HOST}/gitlab`], `${HOST}/gitlab`)).toBeNull(); // a whole entry is no host
+    expect(gitlabMount([5 as unknown as string, `${HOST}/gitlab`], HOST)).toBe('gitlab'); // a malformed entry is skipped, not thrown on
+    expect(gitlabMount([], HOST)).toBeNull();
   });
 });
 
@@ -135,6 +254,43 @@ describe('forge-aware words and keys', () => {
     expect(hrefOf([5, HOST])[1]).toBe(`https://${HOST}/${PATH}/-/issues/3`);
   });
 
+  it('keeps only entries the server could list: its host, port and subfolder bounds, one entry per site', () => {
+    const ok = [HOST, `${HOST}:8443`, `${HOST}:1`, `${HOST}:65535`, `other.example.com/gitlab`, `third.example.com/${'a/'.repeat(7)}b`];
+    expect(readGitlabHosts(ok)).toEqual(ok);
+    for (const bad of [
+      'localhost', // one label
+      'GitLab.example.com', // not lowercase
+      '-gitlab.example.com', // a label starting with a hyphen
+      `${'a'.repeat(64)}.example.com`, // a label of 64
+      `${'a'.repeat(63)}.${'b'.repeat(63)}.${'c'.repeat(63)}.${'d'.repeat(62)}`, // 254 characters
+      `${HOST}:443`, // GitLab never writes it
+      `${HOST}:0`,
+      `${HOST}:08443`,
+      `${HOST}:65536`,
+      `${HOST}:`,
+      `${HOST}:84a3`,
+      `${HOST}/`, // an empty subfolder
+      `${HOST}//gitlab`,
+      `${HOST}/gitlab/`,
+      `${HOST}/../gitlab`,
+      `${HOST}/apps/git..lab`, // ".." inside a segment
+      `${HOST}/.gitlab`,
+      `${HOST}/${'a/'.repeat(8)}b`, // nine levels
+      `user@${HOST}`,
+    ]) {
+      expect(readGitlabHosts([bad]), bad).toEqual([]);
+    }
+    // The longest host name and the deepest subfolder the server allows pass.
+    const longest = `${'a'.repeat(63)}.${'b'.repeat(63)}.${'c'.repeat(63)}.${'d'.repeat(61)}`;
+    expect(readGitlabHosts([longest])).toEqual([longest]);
+    // Two entries for one site contradict each other: neither is kept; the same entry twice is one.
+    expect(readGitlabHosts([HOST, `${HOST}/gitlab`, 'other.example.com'])).toEqual(['other.example.com']);
+    expect(readGitlabHosts([`${HOST}/a`, `${HOST}/b`])).toEqual([]);
+    expect(readGitlabHosts([HOST, HOST])).toEqual([HOST]);
+    // Another port is another site.
+    expect(readGitlabHosts([HOST, `${HOST}:8443/gitlab`])).toEqual([HOST, `${HOST}:8443/gitlab`]);
+  });
+
   it('reads the golden snapshot: its merge request links, its pull requests unchanged', () => {
     const s = golden();
     const ix = indexOf(s);
@@ -148,6 +304,16 @@ describe('forge-aware words and keys', () => {
 describe('catch-up rows', () => {
   const item = (pullRequest: PullRequest) =>
     ({ at: '2026-11-17T09:00:00Z', kind: 'pr_opened', cardId: '', projectId: 'p1', projectName: 'beta', agentName: 'a', title: 't', pullRequest }) as const;
+
+  it('visibleCatchupItems keeps a merge request only of a host in the list, mounted or not', () => {
+    const gl = item(mr());
+    const gh = item(mr({ forge: 'github', host: 'github.com', repo: 'o/r', url: 'https://github.com/o/r/pull/12' }));
+    expect(visibleCatchupItems([gl, gh], [HOST])).toEqual([gl, gh]);
+    expect(visibleCatchupItems([gl, gh], [`${HOST}/gitlab`])).toEqual([gl, gh]);
+    expect(visibleCatchupItems([gl, gh], [`${HOST}:8443`])).toEqual([gh]);
+    expect(visibleCatchupItems([gl, gh], [])).toEqual([gh]);
+    expect(visibleCatchupItems([gl, gh])).toEqual([gh]);
+  });
 
   it('links a merge request only on a listed host and names it !12', () => {
     const [g] = groupCatchup([item(mr())]);

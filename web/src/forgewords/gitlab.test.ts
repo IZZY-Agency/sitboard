@@ -154,7 +154,7 @@ describe('catch-up with a merge request', () => {
   it('words the row "MR opened" and links it on GitLab with the snapshot hosts', async () => {
     const f = feedOf({ conn: 'live', snapshot: board() });
     const client: CatchupClient = {
-      load: async () => ({ ok: true, catchup: { asOf: '2026-11-17T10:00:00Z', total: 1, items: [opened] } }),
+      load: async () => ({ ok: true, catchup: { list: 'r-1', asOf: '2026-11-17T10:00:00Z', total: 1, items: [opened] } }),
       markRead: async () => ({ ok: true }),
     };
     r = render(App, { feed: f.feed, actions: recordActions().actions, catchup: client });
@@ -171,7 +171,7 @@ describe('catch-up with a merge request', () => {
     const f = feedOf({ conn: 'live', snapshot: board({ gitlabHosts: ['gitlab.other.example'] }) });
     const odd: CatchupItem = { ...opened, artifact: { title: 'Sample', url: 'https://claude.ai/artifact/exampleArtifact0001' } };
     const client: CatchupClient = {
-      load: async () => ({ ok: true, catchup: { asOf: '2026-11-17T10:00:00Z', total: 1, items: [odd] } }),
+      load: async () => ({ ok: true, catchup: { list: 'r-1', asOf: '2026-11-17T10:00:00Z', total: 1, items: [odd] } }),
       markRead: async () => ({ ok: true }),
     };
     r = render(App, { feed: f.feed, actions: recordActions().actions, catchup: client });

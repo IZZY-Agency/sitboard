@@ -103,8 +103,9 @@ func seen(opts Options) http.HandlerFunc {
 	}
 }
 
-// catchupRead moves the marker to the time the page sends: the newest item
-// it showed. The core clamps it; a missing or zero time is refused.
+// catchupRead marks read the items of the list the page names. A list that is
+// not current (or none named: a page from before this build) is 409; one the
+// state file has no room for is 507. In both, nothing is marked.
 func catchupRead(opts Options) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !isJSON(w, r) {
@@ -115,12 +116,20 @@ func catchupRead(opts Options) http.HandlerFunc {
 			return
 		}
 		var req contract.CatchupReadRequest
-		if err := json.Unmarshal(body, &req); err != nil || req.UpTo.IsZero() {
+		if err := json.Unmarshal(body, &req); err != nil {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
-		if err := opts.Board.MarkCatchupRead(req.UpTo); err != nil {
-			http.Error(w, "could not save the catch-up marker", http.StatusInternalServerError)
+		if err := opts.Board.MarkCatchupRead(req.List); err != nil {
+			if errors.Is(err, app.ErrCatchupStale) {
+				http.Error(w, "that list is not current: load it again", http.StatusConflict)
+				return
+			}
+			if errors.Is(err, app.ErrCatchupFull) {
+				http.Error(w, "too many items marked read in the last 7 days: nothing was marked", http.StatusInsufficientStorage)
+				return
+			}
+			http.Error(w, "could not mark the list read", http.StatusInternalServerError)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)

@@ -8,6 +8,7 @@
   import { focusKeeper, moveFocus, onKeys, tabStop } from '../keys';
   import { ms, VIEW_MS } from '../motion';
   import Count from './Count.svelte';
+  import { openIssuesText } from '../data/issues';
   import Dots from './Dots.svelte';
   import type { GroupingMode } from '../contract.gen';
   import AlwaysGrouping from './AlwaysGrouping.svelte';
@@ -122,6 +123,7 @@
         <span class="top"><span class="name u" title={t.name}>{t.name}</span>{' '}<span class="n"><Count value={t.count} /></span></span>
         <Dots dots={t.dots} more={t.more} />
         <span class="note" title={t.note}>{t.note}</span>
+        {#if t.issues !== null}<span class="note iss">{openIssuesText(t.issues)}</span>{/if}
       </button>
     {/each}
     {#if band.idle.length}
@@ -136,8 +138,10 @@
               aria-pressed={t.key === current}
               onclick={() => onselect(t.sel)}
               ><span class="dot tone-idle" aria-hidden="true"></span><span class="name u" title={t.name}>{t.name}</span>{' '}<span
-                class="n">{t.count}</span
-              ></button
+                class="n"><span class="visually-hidden">{'agents '}</span>{t.count}</span
+              >{#if t.issues !== null && t.issues > 0}<span class="iss" title={openIssuesText(t.issues)}
+                  ><span class="visually-hidden">{', '}</span>{t.issues}<span class="visually-hidden">{t.issues === 1 ? ' open issue' : ' open issues'}</span></span
+                >{/if}</button
             >{/each}</span
         >
       </div>
@@ -337,5 +341,22 @@
   .ibtn .n {
     margin-left: 2px;
     font-size: var(--text-s);
+  }
+  /* Open issues, as on the rail: a small ring and the number. */
+  .ibtn .iss {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    margin-left: 6px;
+    font-size: var(--text-xs);
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .ibtn .iss::before {
+    content: '';
+    width: 7px;
+    height: 7px;
+    border: 1px solid currentColor;
+    border-radius: 50%;
   }
 </style>

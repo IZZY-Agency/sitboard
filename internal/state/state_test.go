@@ -15,6 +15,10 @@ import (
 
 var t0 = time.Date(2026, 11, 17, 10, 0, 0, 0, time.UTC)
 
+// atT0 is the clock of tests whose marks are dated t0: pruning of seen marks
+// runs against it, never against the machine's day.
+func atT0() time.Time { return t0.Add(2 * time.Hour) }
+
 func TestMissingFileOpensEmpty(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "nested", "state.json")
 	s, err := Open(file)
@@ -24,8 +28,8 @@ func TestMissingFileOpensEmpty(t *testing.T) {
 	if _, ok := s.SeenAt("claude:1234"); ok {
 		t.Fatal("empty store reports a seen card")
 	}
-	if !s.CatchupMarker().IsZero() {
-		t.Fatal("empty store has a catch-up marker")
+	if s.InMemory() {
+		t.Fatal("a store with a file says it is in memory")
 	}
 	if _, err := os.Stat(file); !os.IsNotExist(err) {
 		t.Fatalf("Open created the file; want it created only on the first write (stat err %v)", err)
@@ -34,18 +38,15 @@ func TestMissingFileOpensEmpty(t *testing.T) {
 
 func TestSeenSurvivesReopen(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "state.json")
-	s, err := Open(file)
+	s, err := OpenAt(file, atT0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := s.SetSeen("claude:1234", t0); err != nil {
 		t.Fatalf("SetSeen: %v", err)
 	}
-	if err := s.SetCatchupMarker(t0.Add(time.Hour)); err != nil {
-		t.Fatalf("SetCatchupMarker: %v", err)
-	}
 
-	again, err := Open(file)
+	again, err := OpenAt(file, atT0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,9 +56,6 @@ func TestSeenSurvivesReopen(t *testing.T) {
 	}
 	if _, ok := again.SeenAt("claude:9999"); ok {
 		t.Fatal("unknown card reported as seen")
-	}
-	if m := again.CatchupMarker(); !m.Equal(t0.Add(time.Hour)) {
-		t.Fatalf("CatchupMarker after reopen = %v", m)
 	}
 }
 
@@ -129,7 +127,7 @@ func TestCorruptFileIsAnError(t *testing.T) {
 }
 
 func TestConcurrentUse(t *testing.T) {
-	s, err := Open(filepath.Join(t.TempDir(), "state.json"))
+	s, err := OpenAt(filepath.Join(t.TempDir(), "state.json"), atT0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +141,7 @@ func TestConcurrentUse(t *testing.T) {
 					return
 				}
 				s.SeenAt(id)
-				s.CatchupMarker()
+				s.CatchupRead()
 			}
 		})
 	}
@@ -159,7 +157,7 @@ func TestConcurrentUse(t *testing.T) {
 // them on the next write, so an older build refuses it.
 func TestNewerFileVersionIsRefused(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "state.json")
-	data := `{"version": 3, "seen": {"claude:1234": "2026-11-17T10:00:00Z"}, "pins": ["x"]}`
+	data := `{"version": 4, "seen": {"claude:1234": "2026-11-17T10:00:00Z"}, "pins": ["x"]}`
 	if err := os.WriteFile(file, []byte(data), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -217,7 +215,7 @@ func TestWritePrunesOldSeenEntries(t *testing.T) {
 	}
 	// Seven days later an unrelated write drops the mark that aged out.
 	fs.now = func() time.Time { return t0 }
-	if err := s.SetCatchupMarker(t0); err != nil {
+	if err := s.SetSeen("claude:new", t0); err != nil {
 		t.Fatal(err)
 	}
 
