@@ -245,6 +245,17 @@ func TestJumpToAPaneThatIsGone(t *testing.T) {
 	if err := newAdapter(t, Options{}, f).Jump(context.Background(), target("%1")); !errors.Is(err, source.ErrUnknownTerminal) {
 		t.Fatalf("no server: Jump = %v", err)
 	}
+	// tmux 3.4 (Ubuntu): a server that is shutting down accepts the connection
+	// and drops it, and the client says so in these words.
+	f = &fakeTmux{fail: map[string]error{"list-panes": &runner.ExitError{Code: 1, Stderr: []byte("server exited unexpectedly\n")}}}
+	if err := newAdapter(t, Options{}, f).Jump(context.Background(), target("%1")); !errors.Is(err, source.ErrUnknownTerminal) {
+		t.Fatalf("server exiting: Jump = %v", err)
+	}
+	// Any other failure of tmux stays a failure.
+	f = &fakeTmux{fail: map[string]error{"list-panes": &runner.ExitError{Code: 1, Stderr: []byte("protocol version mismatch\n")}}}
+	if err := newAdapter(t, Options{}, f).Jump(context.Background(), target("%1")); err == nil || errors.Is(err, source.ErrUnknownTerminal) {
+		t.Fatalf("other failure: Jump = %v, want a plain error", err)
+	}
 	// The pane went away between the reads.
 	f = &fakeTmux{panes: panes, clients: "100 12 /dev/pts/4 $1\n", fail: map[string]error{"select-window": &runner.ExitError{Code: 1, Stderr: []byte("can't find pane: %1\n")}}}
 	if err := newAdapter(t, Options{}, f).Jump(context.Background(), target("%1")); !errors.Is(err, source.ErrUnknownTerminal) {

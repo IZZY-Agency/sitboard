@@ -282,9 +282,10 @@ func (a *Adapter) tmux(ctx context.Context, socket string, args ...string) ([]by
 }
 
 // gone turns tmux's "this does not exist" answers into ErrUnknownTerminal:
-// no server on the socket, or a pane, window or client that went away.
+// no server on the socket (tmux 3.4 says "server exited unexpectedly" when
+// the server dies as the client connects), or a pane, window or client that went away.
 func gone(err error) error {
-	for _, s := range []string{"no server running", "error connecting", "can't find", "no such file"} {
+	for _, s := range []string{"no server running", "error connecting", "server exited unexpectedly", "can't find", "no such file"} {
 		if says(err, s) {
 			return fmt.Errorf("%w: %s", source.ErrUnknownTerminal, s)
 		}
