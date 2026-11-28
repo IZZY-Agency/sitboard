@@ -341,7 +341,7 @@ func TestANewerFileLogsNothingAboutItsContents(t *testing.T) {
 	log.SetOutput(&logs)
 	t.Cleanup(func() { log.SetOutput(os.Stderr) })
 	file := filepath.Join(t.TempDir(), "state.json")
-	mustWriteFile(t, file, []byte(`{"version": 4, "seen": {}, "grouping": {"/home/dev/a": "sometimes"}, "forgotten": 7}`))
+	mustWriteFile(t, file, []byte(`{"version": 5, "seen": {}, "grouping": {"/home/dev/a": "sometimes"}, "forgotten": 7, "pins": {"x": 1}}`))
 	if _, err := Open(file); err == nil || !strings.Contains(err.Error(), "newer sitboard") {
 		t.Fatalf("err %v", err)
 	}

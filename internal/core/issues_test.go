@@ -3,6 +3,9 @@ package core
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -20,14 +23,20 @@ type fakeIssues struct {
 	by    map[model.ForgeRepo]model.RepoIssues
 	calls [][]model.ForgeRepo
 	err   error
+	// hostErr, when set, answers a call whose first repository is on that
+	// GitLab host with that error.
+	hostErr map[string]error
 }
 
-func (f *fakeIssues) OpenIssues(_ context.Context, repos []model.ForgeRepo) ([]model.RepoIssues, error) {
+func (f *fakeIssues) OpenIssues(_ context.Context, repos []model.ForgeRepo, _ map[model.ForgeRepo][]int) ([]model.RepoIssues, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, slices.Clone(repos))
 	if f.err != nil {
 		return nil, f.err
+	}
+	if len(repos) > 0 && f.hostErr[repos[0].Host] != nil {
+		return nil, f.hostErr[repos[0].Host]
 	}
 	var out []model.RepoIssues
 	for _, r := range repos {
@@ -350,6 +359,89 @@ func TestGitLabIssuesAreNeverAskedOnAHostWithoutALogin(t *testing.T) {
 		t.Fatalf("asked a host without a login: %+v", gl.calls)
 	}
 }
+
+// GitLab is asked one host a call: a login gone on one host denies that host
+// alone, as a merge request lookup that finds it gone does, and what was
+// listed from the other hosts stays.
+func TestGitLabIssuesLoginLostOnOneHostDeniesOnlyThatHost(t *testing.T) {
+	const other = "gitlab.other.example"
+	gl := &fakeIssues{by: map[model.ForgeRepo]model.RepoIssues{}}
+	e, glab := newGitLabEnvWith(t, func(o *Options) {
+		o.Issues = map[model.Forge]source.IssueLister{model.ForgeGitLab: gl}
+	})
+	glab.setHost(other, nil)
+	repoA, repoB := model.GitLabRepo(glHost, glPath), model.GitLabRepo(other, glPath)
+	gl.by[repoA], gl.by[repoB] = sampleIssues(repoA, 4, 1), sampleIssues(repoB, 2, 1)
+	e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Remote: repoA, Branch: model.Of("main")})
+	e.repos.set(beta, model.Repo{Root: beta, MainRoot: beta, Remote: repoB, Branch: model.Of("main")})
+	b := busySession("b", tNow)
+	b.Folder = beta
+	e.board.applySync(busySession("a", tNow))
+	e.board.applySync(b)
+	e.board.tick() // the host checks run
+	e.clock.Set(tNow.Add(contract.IssuesFreshFor))
+	e.board.tick()
+	if gl.callCount() != 2 {
+		t.Fatalf("one call a host: %+v", gl.calls)
+	}
+	if l, _ := e.board.Issues(context.Background()); len(l.Repos) != 2 || l.Repos[0].State != contract.RepoIssuesOK || l.Repos[1].State != contract.RepoIssuesOK {
+		t.Fatalf("both listed: %+v", l.Repos)
+	}
+	gl.mu.Lock()
+	gl.hostErr = map[string]error{glHost: fmt.Errorf("gitlab: %w", source.ErrNotLoggedIn)}
+	gl.mu.Unlock()
+	e.clock.Set(tNow.Add(contract.IssuesFreshFor + issuesEvery))
+	e.board.tick()
+	e.board.mu.Lock()
+	denied := !e.board.glHosts[glHost].ok
+	otherOK := e.board.glHosts[other].ok
+	_, keptA := e.board.issues[e.board.issueKey(repoA)]
+	_, keptB := e.board.issues[e.board.issueKey(repoB)]
+	e.board.mu.Unlock()
+	if !denied || !otherOK {
+		t.Fatalf("only the host whose login went is denied: %v %v", denied, otherOK)
+	}
+	if keptA || !keptB {
+		t.Fatalf("its rows go, the other host's stay: %v %v", keptA, keptB)
+	}
+	if p := projectNamed(t, e.board, "beta"); p.OpenIssues != (contract.IssueCount{Known: true, Open: 2}) {
+		t.Fatalf("beta %+v", p.OpenIssues)
+	}
+}
+
+// A GitLab host whose login is not checked right now is no answer, not a
+// failure: nothing is logged for it.
+func TestGitLabIssuesNotCheckedIsNotLogged(t *testing.T) {
+	var logs strings.Builder
+	var mu sync.Mutex
+	log.SetOutput(writerFunc(func(p []byte) (int, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		return logs.Write(p)
+	}))
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	gl := &fakeIssues{by: map[model.ForgeRepo]model.RepoIssues{}, err: fmt.Errorf("gitlab: %w", source.ErrNotChecked)}
+	e, _ := newGitLabEnvWith(t, func(o *Options) {
+		o.Issues = map[model.Forge]source.IssueLister{model.ForgeGitLab: gl}
+	})
+	e.repos.set(alpha, model.Repo{Root: alpha, MainRoot: alpha, Remote: model.GitLabRepo(glHost, glPath), Branch: model.Of("main")})
+	e.board.applySync(busySession("a", tNow))
+	e.board.tick()
+	e.clock.Set(tNow.Add(contract.IssuesFreshFor))
+	e.board.tick()
+	if gl.callCount() == 0 {
+		t.Fatal("the host was never asked")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if strings.Contains(logs.String(), "could not list open issues") {
+		t.Fatalf("logged: %q", logs.String())
+	}
+}
+
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
 
 func TestTurningGitHubOffDropsWhatWasListed(t *testing.T) {
 	e, _ := newIssuesEnv(t)

@@ -281,9 +281,9 @@ describe('tokens', () => {
     expect(base).toMatch(/\.ext::after \{[^}]*display: inline-block;/);
     const full = base.match(/([^{}]*)\{\s*color: currentColor;\s*\}/)?.[1] ?? '';
     for (const sel of ['a:hover .ext::after', 'a:focus-visible .ext::after', 'a.ext:hover::after', 'a.ext:focus-visible::after']) expect(full, sel).toContain(sel);
-    // Both places that link a pull request or issue wear it, the card's number and the catch-up panel's link.
+    // Every place that links a pull request or issue wears it: the card's numbers (pull request, closes, looked at) and the catch-up panel's link.
     const card = readFileSync(join(SRC, 'components/Card.svelte'), 'utf8');
-    expect(card.match(/class="num ext"/g)).toHaveLength(2);
+    expect(card.match(/class="num ext"/g)).toHaveLength(3);
     expect(readFileSync(join(SRC, 'components/CatchupPanel.svelte'), 'utf8')).toMatch(/<a href=\{link\.href\} class:ext=\{!!r\.pullRequest\}/);
     // No hand-made arrow elsewhere.
     for (const f of ['components/Card.svelte', 'components/CatchupPanel.svelte']) expect(readFileSync(join(SRC, f), 'utf8'), f).not.toMatch(/>↗</);

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, setContext, tick, untrack } from 'svelte';
   import { fade } from 'svelte/transition';
-  import type { Card, GroupingMode, GroupingSetting } from './contract.gen';
+  import type { Card, GroupingMode, GroupingSetting, IssuePinRequest } from './contract.gen';
   import type { Actions } from './data/actions';
   import type { Feed } from './data/client';
   import { indexOf, sourcesReady } from './data/derive';
@@ -17,7 +17,7 @@
   import { createCatchupClient, type CatchupClient } from './data/catchup';
   import { CatchupState } from './data/catchup.svelte';
   import { createLeftoversClient, type LeftoversClient } from './data/leftovers';
-  import { createIssuesClient, issuesShown, openIssuesOf, withoutIssueCounts, type IssuesClient } from './data/issues';
+  import { createIssuesClient, issuesShown, knownNoAgent, noAgentFromList, pinKey, noAgentOfProjects, openIssuesOf, withoutIssueCounts, type IssuesClient } from './data/issues';
   import { IssuesState } from './data/issues.svelte';
   import IssuesButton from './components/IssuesButton.svelte';
   import IssuesPanel from './components/IssuesPanel.svelte';
@@ -133,6 +133,11 @@
   const said = $derived(announce || board.said);
   const onforget = (p: { id: string; name: string }) => board.forgetGrouping(p);
   const onsetting = (p: { id: string; name: string }, mode: GroupingMode) => board.setFolderGrouping(p, mode);
+  // A pin shows at once in the Issues panel; a refusal takes it back and says why as the other actions do.
+  const onpin = (repoKey: string, req: IssuePinRequest): void =>
+    void is.pin(repoKey, req, (r) => board.pinIssue(r, { issue: pinKey({ key: repoKey }, r.number), retry: () => onpin(repoKey, req) }));
+  // A refused pin's notice shows inside the Issues panel while it is open (in its tab order).
+  const pinNotice = $derived(board.notice?.kind === 'failed' && board.notice.issue ? board.notice : null);
   const onauto = (s: GroupingSetting) => board.setFolderGrouping({ id: s.projectId, name: s.name }, 'auto');
   // project id -> its grouping setting, for the parts row's controls.
   const settings = $derived(new Map((snap?.groupingSettings ?? []).map((s) => [s.projectId, s.mode])));
@@ -261,8 +266,22 @@
   let issuesOpen = $state(false);
   let issuesBtn = $state<HTMLButtonElement>();
   const showIssues = $derived(showCatchup && issuesShown(snap?.issues));
+  const pinNoticeInPanel = $derived(!!pinNotice && issuesOpen && (showIssues || keyLost));
   const issuesCount = $derived(snap && !keyLost ? openIssuesOf(snap.projects) : null);
   const selProjects = $derived(grp ? projectsOf(grp, sel) : []);
+  // A tile's "N with no agent seen". All projects: the server's count
+  // (IssuesSummary.noAgent). A project: the server's count per project
+  // (Project.issuesNoAgent) when it serves one; otherwise judged here from
+  // the Issues list (OpenIssue.agents) when it is of the current rev and
+  // answers for every repository of the tile (noAgentFromList).
+  function noAgentFor(t: Sel): number | null {
+    if (keyLost || !snap || !grp) return null;
+    if (t.kind === 'all') return knownNoAgent(snap.issues);
+    const ps = projectsOf(grp, t);
+    const served = noAgentOfProjects(ps);
+    if (served !== null) return served;
+    return ix ? noAgentFromList(is.data, snap.issues.rev, ps, ix.byId) : null;
+  }
   async function openIssues() {
     catchupOpen = false;
     spendOpen = false;
@@ -315,7 +334,7 @@
 
 <div class="page">
   <div bind:this={headerEl}>
-    <Header {view} onview={setView} agents={snap ? snap.cards.length : null} {projects} conn={board.conn} generatedAt={snap?.generatedAt ?? null} notify={notify.state} onnotify={() => void toggleNotify()}>
+    <Header {view} onview={setView} agents={snap ? snap.cards.length : null} {projects} conn={board.conn} generatedAt={snap?.generatedAt ?? null} lostAt={frozen ? board.lostAt : null} notify={notify.state} onnotify={() => void toggleNotify()}>
       {#snippet catchup()}
         {#if showCatchup && snap}
           <SpendButton
@@ -358,7 +377,7 @@
   {/if}
   <!-- An open panel stays through a lost key, cleared, with its alert and Close. -->
   {#if issuesOpen && (showIssues || keyLost)}
-    <IssuesPanel id={ISSUES_ID} {is} {now} projects={selProjects} scope={scope} gitlabHosts={ix?.gitlabHosts ?? []} toggle={issuesBtn} top={panelTop} onclose={closeIssues} />
+    <IssuesPanel id={ISSUES_ID} {is} {now} summary={snap?.issues} projects={selProjects} scope={scope} gitlabHosts={ix?.gitlabHosts ?? []} cards={ix?.byId} {onpin} notice={pinNotice} ondismiss={() => board.dismiss()} toggle={issuesBtn} top={panelTop} onclose={closeIssues} />
   {/if}
   {#if spendOpen && showCatchup && snap}
     <SpendPanel id={SPEND_ID} spend={snap.spend} {now} toggle={spendBtn} top={panelTop} onclose={closeSpend} />
@@ -366,11 +385,15 @@
 
   {#if frozen && snap && board.conn !== 'unauthorized' && board.conn !== 'outdated'}
     <p class="lost" role="alert">
-      Connection lost · board as of {clock(new Date(board.lostAt as number).toISOString())} · retrying
+      {#if board.conn === 'stopped'}
+        sitboard has stopped answering · not live, last update {clock(new Date(board.lostAt as number).toISOString())} · what is shown may be out of date · this page keeps trying
+      {:else}
+        Connection lost · board as of {clock(new Date(board.lostAt as number).toISOString())} · retrying
+      {/if}
     </p>
   {/if}
 
-  <div class="content" class:frozen>
+  <div class="content" class:frozen class:stopped={board.conn === 'stopped'}>
     {#if board.conn === 'unauthorized' || board.conn === 'outdated'}
       <ErrorState kind={board.conn} {now} />
     {:else if !snap || !ix || !grp}
@@ -388,7 +411,7 @@
         {#key grouping}
           <div class="grouping" in:fade={{ duration: ms(VIEW_MS) }}>
             {#if grouping === 'tiles'}
-              <ProjectTiles g={grp} {sel} onselect={select} mode={grouping} onmode={setGrouping} {onforget} {onsetting} {settings} />
+              <ProjectTiles g={grp} {sel} onselect={select} mode={grouping} onmode={setGrouping} {onforget} {onsetting} {settings} noAgent={noAgentFor} />
             {:else}
               <ProjectRail g={grp} {sel} onselect={select} mode={grouping} onmode={setGrouping} {onforget} {onsetting} {settings} />
             {/if}
@@ -414,7 +437,7 @@
   <StatusBar snapshot={board.conn === 'unauthorized' ? null : snap} {onauto} leftovers={leftoversOn ? leftovers : undefined} />
 
   <div class="visually-hidden" role="status" aria-live="polite">{said}</div>
-  {#if board.notice}
+  {#if board.notice && !pinNoticeInPanel}
     <ActionNotice notice={board.notice} ondismiss={() => board.dismiss()} />
   {/if}
 </div>
@@ -436,6 +459,10 @@
   .content.frozen {
     opacity: 0.85;
     filter: grayscale(1);
+  }
+  /* Stopped for good as far as the page can tell: dimmer still, so no old state reads as current. */
+  .content.stopped {
+    opacity: 0.55;
   }
   .lost {
     margin: 0;

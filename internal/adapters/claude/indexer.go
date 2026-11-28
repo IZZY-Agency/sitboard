@@ -284,6 +284,7 @@ func (ix *indexer) index(ctx context.Context, j job) (result, bool) {
 	res.d.TurnEnds = slices.Clone(main.d.TurnEnds)
 	res.d.CreatedPRs = slices.Clone(main.d.CreatedPRs)
 	res.d.PushedPRs = slices.Clone(main.d.PushedPRs)
+	res.d.TouchedIssues = slices.Clone(main.d.TouchedIssues)
 	res.d.Artifacts = slices.Clone(main.d.Artifacts)
 	res.d.SpawnedNames = slices.Clone(main.d.SpawnedNames)
 	res.d.SpawnedTerminalIDs = slices.Clone(main.d.SpawnedTerminalIDs)
@@ -322,7 +323,9 @@ func (ix *indexer) index(ctx context.Context, j job) (result, bool) {
 		if ctx.Err() != nil {
 			break
 		}
-		subSpend = append(subSpend, &ix.tail(ctx, p, j.id, now, j.ended, main).spend)
+		ot := ix.tail(ctx, p, j.id, now, j.ended, main)
+		subSpend = append(subSpend, &ot.spend)
+		res.d.TouchedIssues = shellcmd.AddIssueTouchList(res.d.TouchedIssues, ot.d.TouchedIssues, maxPRs)
 	}
 	for _, p := range subs {
 		if ctx.Err() != nil {
@@ -332,6 +335,7 @@ func (ix *indexer) index(ctx context.Context, j job) (result, bool) {
 		subSpend = append(subSpend, &st.spend)
 		sd := st.d
 		res.d.CreatedPRs, res.d.PushedPRs = mergeCreated(res.d.CreatedPRs, res.d.PushedPRs, sd.CreatedPRs, sd.PushedPRs)
+		res.d.TouchedIssues = shellcmd.AddIssueTouchList(res.d.TouchedIssues, sd.TouchedIssues, maxPRs)
 		res.d.Artifacts = mergeArtifacts(res.d.Artifacts, sd.Artifacts)
 		for _, n := range sd.SpawnedNames {
 			res.d.SpawnedNames = addCapped(res.d.SpawnedNames, n, maxSpawns)

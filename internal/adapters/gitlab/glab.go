@@ -14,6 +14,7 @@ package gitlab
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -273,6 +274,13 @@ type Provider struct {
 	goos     string              // runtime.GOOS: how the account is looked up (osAccount)
 	userList string              // the user list file read off macOS
 
+	// admitCh is a one-slot lock that serialises a glab process's start
+	// with what would refuse it (admit): every change of a login, a mount
+	// or a rate-limit wait takes it before mu (lockAuth). It is held across
+	// a start, so mu never is: the board's reads of mu (Failing, Subfolder)
+	// never wait on a start, and a call waiting to be admitted gives up
+	// when its context ends (a merge request lookup at its deadline).
+	admitCh       chan struct{}
 	mu            sync.Mutex
 	cache         map[string]cached     // by lookup key
 	closes        map[string]closing    // by host, project id and iid
@@ -285,6 +293,7 @@ type Provider struct {
 	healthNote    string
 	hostHealth    map[string]string // host → the line for its last failed call (setHostHealth)
 	authNote      map[string]string // host → the line for its last login check that got no answer (setAuthNote)
+	accounts      map[string]string // host name → the address of the account its last issue answer came for (sameAccount); in memory only
 	nowhere       time.Time         // when glab last said it is logged in to no host
 	authSem       chan struct{}     // held while a `glab auth status` runs: one at a time
 	authGen       map[string]uint64 // host → its logouts so far (stampLocked)
@@ -309,7 +318,9 @@ func New(opts Options) *Provider {
 		forgotten:  map[string]uint64{},
 		hostHealth: map[string]string{},
 		authNote:   map[string]string{},
+		accounts:   map[string]string{},
 		authSem:    make(chan struct{}, 1),
+		admitCh:    make(chan struct{}, 1),
 		authGen:    map[string]uint64{},
 	}
 }
@@ -491,7 +502,7 @@ func (p *Provider) host(ctx context.Context, host string) (hostAnswer, error) {
 		// Not a path any address can carry: such a host gets no lookups.
 		return hostAnswer{}, p.noAnswer(ctx, host, errors.New("unreadable subfolder"), "unreadable subfolder in glab's config")
 	}
-	return p.keepYes(host, hostAnswer{at: p.now(), known: true, subfolder: sub}, st), nil
+	return p.keepYes(host, hostAnswer{at: p.now(), known: true, subfolder: sub}, st)
 }
 
 // validSubfolder: glab's subfolder setting as a run of path segments ("gitlab",
@@ -644,8 +655,7 @@ func noLoginSaid(stderr []byte, host string) (said, all bool) {
 // loggedInNowhere records that glab is logged in to no host: every yes
 // kept goes, with every answer cached, and no host is asked for unknownFor.
 func (p *Provider) loggedInNowhere() hostAnswer {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	defer p.lockAuth()()
 	p.nowhere = p.now()
 	p.authAll++
 	clear(p.hosts)
@@ -658,28 +668,41 @@ func (p *Provider) loggedInNowhere() hostAnswer {
 // lookup started: what it learned is kept only while the stamp still holds.
 type authStamp struct{ all, host uint64 }
 
+// lockAuth takes admitCh, then mu, for a change admit must not see half of;
+// the function it returns lets both go.
+func (p *Provider) lockAuth() func() {
+	p.admitCh <- struct{}{}
+	p.mu.Lock()
+	return func() {
+		p.mu.Unlock()
+		<-p.admitCh
+	}
+}
+
 // stampLocked is host's authStamp now. Callers hold p.mu.
 func (p *Provider) stampLocked(host string) authStamp {
 	return authStamp{all: p.authAll, host: p.authGen[host]}
 }
 
 // keepYes keeps a yes about host's login from a check that started at st,
-// unless the login was found gone since: then the answer kept now stands.
-func (p *Provider) keepYes(host string, h hostAnswer, st authStamp) hostAnswer {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+// unless the login changed since: then the answer kept now stands (a
+// definite one, as loggedOut and loggedInNowhere keep), or, with none kept
+// (a refused token drops the yes), the check is inconclusive (errNoAnswer):
+// its yes is of an older login, and it read no no.
+func (p *Provider) keepYes(host string, h hostAnswer, st authStamp) (hostAnswer, error) {
+	defer p.lockAuth()()
 	if p.stampLocked(host) != st {
 		if cur, ok := p.answerLocked(host, knownFor); ok {
-			return cur
+			return cur, nil
 		}
-		return hostAnswer{at: p.now()}
+		return hostAnswer{}, fmt.Errorf("%w: the login changed during the check", errNoAnswer)
 	}
 	if len(p.hosts) > 256 {
 		clear(p.hosts)
 	}
 	p.hosts[host] = h
 	p.nowhere = time.Time{}
-	return h
+	return h, nil
 }
 
 // loggedOut records that host has no working login (a no from its check,
@@ -687,20 +710,37 @@ func (p *Provider) keepYes(host string, h hostAnswer, st authStamp) hostAnswer {
 // from the host, so nothing asked under the old login is served after a new
 // one; checks and lookups that started before keep nothing they learn.
 func (p *Provider) loggedOut(host string) hostAnswer {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if len(p.authGen) > 4096 {
-		clear(p.authGen)
-		p.authAll++
-	}
-	p.authGen[host]++
+	defer p.lockAuth()()
+	p.newLoginLocked(host)
 	if len(p.hosts) > 256 {
 		clear(p.hosts)
 	}
 	h := hostAnswer{at: p.now()}
 	p.hosts[host] = h
-	p.dropAnswersLocked(host)
 	return h
+}
+
+// doubtLogin forgets the yes kept for host (GitLab refused its token), as a
+// new login: a check or lookup that started before keeps nothing it learns
+// (a yes it read included), the answers cached under the old one go, and
+// the next check runs `glab auth status` afresh.
+func (p *Provider) doubtLogin(host string) {
+	defer p.lockAuth()()
+	p.newLoginLocked(host)
+	if h := p.hosts[host]; h.known {
+		delete(p.hosts, host)
+	}
+}
+
+// newLoginLocked moves host's login generation and drops what was cached
+// from it. Callers hold admitCh and p.mu (lockAuth).
+func (p *Provider) newLoginLocked(host string) {
+	if len(p.authGen) > 4096 {
+		clear(p.authGen)
+		p.authAll++
+	}
+	p.authGen[host]++
+	p.dropAnswersLocked(host)
 }
 
 // dropAnswersLocked drops the lookups and closing issues cached for host,
@@ -848,6 +888,26 @@ func readFailure(err error, host string) callFailure {
 	return f
 }
 
+// tokenRefused: GitLab's whole GraphQL answer is that the token glab sent
+// is refused, with no data: {"errors":[{"message":"Invalid token"}]}, as
+// gitlab.com answers a revoked or expired token (glab 1.131.0 adds
+// "glab: Invalid token" on standard error, with no status). It is no
+// logout by itself (the host's next `glab auth status` names a 401 itself),
+// but the yes kept for the host no longer stands: see doubtLogin.
+func tokenRefused(stdout []byte) bool {
+	var a struct {
+		Data   json.RawMessage `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+			Path    []any  `json:"path"`
+		} `json:"errors"`
+	}
+	if json.Unmarshal(stdout, &a) != nil || (len(a.Data) > 0 && string(a.Data) != "null") || len(a.Errors) != 1 {
+		return false
+	}
+	return a.Errors[0].Message == "Invalid token" && len(a.Errors[0].Path) == 0
+}
+
 // loggedOut: the host refused glab's login (a 401 glab named) or glab says it
 // has none for the host. It wins over rate-limit words.
 func (f callFailure) loggedOut() bool { return f.status == http.StatusUnauthorized || f.noLogin }
@@ -899,12 +959,11 @@ func rateLimitWait(err error) time.Duration {
 
 // limited records that host answered 429 and says until when it is left alone.
 func (p *Provider) limited(host string, err error) {
-	p.mu.Lock()
+	defer p.lockAuth()()
 	until := p.now().Add(rateLimitWait(err))
 	if until.After(p.backoff[host]) {
 		p.backoff[host] = until
 	}
-	p.mu.Unlock()
 }
 
 func unwrapCtx(err error) error {

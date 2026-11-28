@@ -57,6 +57,14 @@ type Board interface {
 	// cap; any other error means the state file could not be written and
 	// nothing changed.
 	SetGrouping(projectID string, mode contract.GroupingMode) error
+	// SetIssuePin pins (pinned true) or unpins issue number of repo, a
+	// repository the board asks issues about (as Issues names it: forge,
+	// host and repo path). Setting what is set already changes nothing.
+	// ErrUnknownRepo when the board asks no issues of repo, ErrBadIssue for a
+	// number outside 1..2^31-1, ErrTooManyPins for a new pin past the cap;
+	// any other error means the state file could not be written and nothing
+	// changed.
+	SetIssuePin(repo model.ForgeRepo, number int, pinned bool) error
 
 	// JumpTarget resolves a card to where its jump goes: its tmux pane or
 	// its agterm session. ok is false when the card is unknown or has
@@ -69,6 +77,13 @@ var (
 	ErrUnknownProject  = errors.New("app: unknown project")
 	ErrNotGrouping     = errors.New("app: the project is not a grouping")
 	ErrTooManySettings = errors.New("app: too many folders have a grouping setting")
+)
+
+// Errors SetIssuePin returns for a request it refuses.
+var (
+	ErrUnknownRepo = errors.New("app: the board asks no issues of that repository")
+	ErrBadIssue    = errors.New("app: not an issue number")
+	ErrTooManyPins = errors.New("app: too many issues are pinned")
 )
 
 // ErrCatchupStale: MarkCatchupRead was given a list that is not current (one

@@ -11,8 +11,14 @@
 // installed. A lost key (this panel's or any other read's, lose()) clears the
 // list at once and for good; a failed load keeps the last list.
 
-import type { Issues } from '../contract.gen';
-import type { IssuesClient } from './issues';
+// A pin shows at once (pins, laid over the list by withPins) and is taken
+// back when the server refuses it. One the server accepted asks for a new
+// list and stays laid over until a list from a read sent after the
+// acceptance comes in; a newer press stays laid over whatever comes in.
+
+import { SvelteMap } from 'svelte/reactivity';
+import type { IssuePinRequest, Issues } from '../contract.gen';
+import { pinKey, type IssuesClient } from './issues';
 
 export type IssuesStatus = 'loading' | 'ready' | 'failed' | 'unauthorized';
 
@@ -23,6 +29,15 @@ export class IssuesState {
   status = $state<IssuesStatus>('loading');
   data = $state<Issues | null>(null);
   error = $state('');
+  /** Pins the page changed that the list held may not show yet: pinKey -> pinned. */
+  pins = new SvelteMap<string, boolean>();
+  /** pinKey -> the first read that was sent after the server accepted it: its list shows the pin itself. */
+  #pinAt = new Map<string, number>();
+  /** Reads sent so far (each load counts one). */
+  #reads = 0;
+  /** pinKey -> the latest press, so an older answer never undoes a newer press. */
+  #pinSeq = new Map<string, number>();
+  #seq = 0;
 
   #client: () => IssuesClient;
   #clock: () => number;
@@ -47,6 +62,39 @@ export class IssuesState {
     this.#clock = clock;
   }
 
+  /**
+   * Pins or unpins an issue of the repository the server keys `repoKey`
+   * (RepoIssues.key) at once and asks the server (send); a refusal
+   * puts it back as the list has it.
+   */
+  async pin(repoKey: string, req: IssuePinRequest, send: (req: IssuePinRequest) => Promise<boolean>): Promise<boolean> {
+    const k = pinKey({ key: repoKey }, req.number);
+    const seq = ++this.#seq;
+    this.#pinSeq.set(k, seq);
+    this.#pinAt.delete(k);
+    this.pins.set(k, req.pinned);
+    const ok = await send(req);
+    if (this.#pinSeq.get(k) !== seq) return ok; // pressed again meanwhile: that press decides
+    if (ok) {
+      this.#pinAt.set(k, this.#reads + 1);
+      void this.refresh(); // a read sent now (or after the one that is out)
+    } else {
+      this.pins.delete(k);
+      this.#pinSeq.delete(k);
+    }
+    return ok;
+  }
+
+  /** The list of read `read` came in: pins accepted before that read was sent stop being laid over it. */
+  #settlePins(read: number): void {
+    for (const [k, at] of this.#pinAt) {
+      if (read < at) continue;
+      this.#pinAt.delete(k);
+      this.#pinSeq.delete(k);
+      this.pins.delete(k);
+    }
+  }
+
   /** The panel closed: a read still out is not followed by another. */
   stop(): void {
     this.#again = false;
@@ -57,6 +105,9 @@ export class IssuesState {
     this.#again = false;
     this.status = 'unauthorized';
     this.data = null;
+    this.pins.clear();
+    this.#pinAt.clear();
+    this.#pinSeq.clear();
   }
 
   /**
@@ -106,6 +157,7 @@ export class IssuesState {
       // The server counts freshMs from when it answered, which is after this:
       // counted from here, a slow answer can only shorten the reuse.
       const sent = this.#clock();
+      const read = ++this.#reads;
       const r = await this.#client().load();
       if (this.status === 'unauthorized') return; // lost meanwhile: nothing comes back
       if (!r.ok && r.kind === 'unauthorized') {
@@ -125,6 +177,7 @@ export class IssuesState {
         this.status = 'ready';
         this.error = '';
         this.#loadedRev = r.issues.rev;
+        this.#settlePins(read);
         this.#freshUntil = sent + r.issues.freshMs;
       } else {
         this.status = 'failed';

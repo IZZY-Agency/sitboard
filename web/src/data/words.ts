@@ -88,3 +88,63 @@ export function inReviewEmpty(gitlab: boolean): string {
 export function doneHint(gitlab: boolean): string {
   return `Every ${anyRequest(gitlab)} it opened is merged or closed.`;
 }
+
+// Issues and the agents on them (0.6.0). "No agent seen", never "unclaimed"
+// or "nobody": sitboard sees only the agents on this board, and only their
+// pull requests and their own gh or glab issue commands.
+
+/** The Agent filter's choices, in the order shown. */
+export const AGENT_FILTER = [
+  { value: 'any', label: 'Any' },
+  { value: 'none', label: 'No agent seen' },
+  { value: 'with', label: 'With an agent' },
+] as const;
+
+/** What a row says when no agent on the board is on the issue or looked at it. */
+export const NO_AGENT_SEEN = 'no agent seen';
+
+/** An agent tag's relation, after the card's name: its pull request closes the issue, or its own command named it. */
+export function agentRelation(kind: 'closes' | 'looked'): string {
+  return kind === 'closes' ? 'on it' : 'looked at';
+}
+
+/** A tile's line: "2 with no agent seen". */
+export function noAgentSeenText(n: number): string {
+  return `${n} with no agent seen`;
+}
+
+/** The heading of the pinned issues that lead a repository. */
+export const PINNED_HEADING = 'Pinned';
+
+/** A pinned issue outside the listed ones: still open, or the forge did not say. */
+export const PINNED_OUTSIDE = 'pinned · not in the listed 30';
+
+/** A pinned issue outside the listed ones that the forge reports closed. */
+export const PINNED_CLOSED = 'closed since you pinned it';
+
+/** The star's name for assistive tech; its pressed state says whether it is pinned. */
+export function pinLabel(n: number): string {
+  return `Pin issue #${n}`;
+}
+
+/** The note the Issues panel shows while pins are not saved (Issues.unsaved), worded as Catch-up's. */
+export const PINS_UNSAVED_BEFORE = 'Nothing here is saved: sitboard runs with ';
+export const PINS_UNSAVED_AFTER = ', or could not write its state file when it started, so what you pin lasts until it stops.';
+
+/** The card line for issues its session's own gh or glab commands named. */
+export const LOOKED_AT = 'looked at';
+
+/** A repository's note when the Agent filter "No agent seen" leaves none of its listed issues (" in 0.5.0" or ""). */
+export function everySeenText(inMilestone: string): string {
+  return `Every listed issue${inMilestone} has been seen by an agent.`;
+}
+
+/** A repository's note when the Agent filter "With an agent" leaves none of its listed issues. */
+export function noneSeenText(inMilestone: string): string {
+  return `No listed issue${inMilestone} has been seen by an agent.`;
+}
+
+/** A repository's note when the Agent filter leaves none because its issues were not judged yet. */
+export function agentsUnknownText(inMilestone: string): string {
+  return `Which agents are on the listed issues${inMilestone} is not known yet.`;
+}

@@ -111,6 +111,7 @@ func routes(opts Options) map[string]route {
 		contract.PathCatchupRead:     {http.MethodPost, nil, catchupRead(opts)},
 		contract.PathForgetGrouping:  {http.MethodPost, nil, forgetGrouping(opts)},
 		contract.PathGroupingSetting: {http.MethodPost, nil, groupingSetting(opts)},
+		contract.PathIssuePin:        {http.MethodPost, nil, issuePin(opts)},
 	}
 }
 

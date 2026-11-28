@@ -45,13 +45,30 @@ type fakeRepos struct {
 	fail  map[string]bool          // folder -> git gives no answer
 	hold  map[string]chan struct{} // folder -> the answer waits until the channel closes
 	calls int
+	asked []string // folders asked through Resolve
+	touch []string // folders asked through ResolveTouch
 }
 
 func (f *fakeRepos) Probe(context.Context) source.Status {
 	return source.Status{Kind: source.KindGit, State: source.StateOK}
 }
 
-func (f *fakeRepos) Resolve(_ context.Context, folder string) (model.Repo, error) {
+func (f *fakeRepos) Resolve(ctx context.Context, folder string) (model.Repo, error) {
+	f.mu.Lock()
+	f.asked = append(f.asked, folder)
+	f.mu.Unlock()
+	return f.answer(ctx, folder)
+}
+
+// ResolveTouch is Resolve for a folder only an issue command named.
+func (f *fakeRepos) ResolveTouch(ctx context.Context, folder string) (model.Repo, error) {
+	f.mu.Lock()
+	f.touch = append(f.touch, folder)
+	f.mu.Unlock()
+	return f.answer(ctx, folder)
+}
+
+func (f *fakeRepos) answer(_ context.Context, folder string) (model.Repo, error) {
 	f.mu.Lock()
 	wait := f.hold[folder]
 	f.mu.Unlock()

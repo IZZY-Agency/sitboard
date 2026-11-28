@@ -90,7 +90,7 @@ func TestOnlySitboardStateFilesOpen(t *testing.T) {
 		"a huge version":        {`{"version":99999999999999999999,"seen":{}}`, "newer sitboard (file version 99999999999999999999,"},
 		"a huge negative":       {`{"version":-99999999999999999999,"seen":{}}`, "version -99999999999999999999 is not one"},
 		"an array":              {`[1]`, "not a valid state file"},
-		"a newer version":       {`{"version":4,"seen":{}}`, "newer sitboard (file version 4,"},
+		"a newer version":       {`{"version":5,"seen":{}}`, "newer sitboard (file version 5,"},
 		"version 2":             {`{"version":2,"seen":{},"grouping":{"/home/dev/broad":"never"}}`, ""},
 		"version 2, no setting": {`{"version":2,"seen":{}}`, ""},
 		"version 1":             {`{"version":1,"seen":{}}`, ""},

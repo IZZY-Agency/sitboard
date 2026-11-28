@@ -13,6 +13,7 @@ const gh = (p: Project, open: number | null, repo = REPO): Project => ({
   repo,
   repoForge: 'github',
   repoHost: 'github.com',
+  issuesKey: repo.toLowerCase(), // as the server serves it
   openIssues: open === null ? { known: false, open: 0 } : { known: true, open },
 });
 
@@ -22,10 +23,15 @@ const issue = (n: number, milestone = '', due?: string): OpenIssue => ({
   url: `https://github.com/${REPO}/issues/${n}`,
   milestone,
   labels: [],
+  agents: [],
+  pinned: false,
   ...(due ? { milestoneDue: due } : {}),
 });
 
-const repo = (over: Partial<RepoIssues> = {}): RepoIssues => ({ forge: 'github', host: 'github.com', repo: REPO, state: 'ok', open: 1, issues: [issue(1)], ...over });
+const repo = (over: Partial<RepoIssues> = {}): RepoIssues => {
+  const r = { forge: 'github' as const, host: 'github.com', repo: REPO, state: 'ok' as const, open: 1, issues: [issue(1)], pinned: [], ...over };
+  return { ...r, key: over.key ?? r.repo.toLowerCase() }; // as the server serves it
+};
 
 describe('readIssues', () => {
   it('keeps what the page can show and drops the rest', () => {
@@ -63,11 +69,11 @@ describe('createIssuesClient', () => {
   const answer = (status: number, body: unknown) => async () => new Response(JSON.stringify(body), { status });
   it('loads the list', async () => {
     const r = await createIssuesClient(answer(200, { state: 'off', repos: [] }) as typeof fetch).load();
-    expect(r).toEqual({ ok: true, issues: { state: 'off', repos: [], rev: 0, freshMs: 0 } });
+    expect(r).toEqual({ ok: true, issues: { state: 'off', repos: [], rev: 0, freshMs: 0, unsaved: false } });
     const full = await createIssuesClient(answer(200, { state: 'ready', repos: [], rev: 7, freshMs: 41_500 }) as typeof fetch).load();
-    expect(full).toEqual({ ok: true, issues: { state: 'ready', repos: [], rev: 7, freshMs: 41_500 } });
+    expect(full).toEqual({ ok: true, issues: { state: 'ready', repos: [], rev: 7, freshMs: 41_500, unsaved: false } });
     const bad = await createIssuesClient(answer(200, { state: 'ready', repos: [], rev: -1, freshMs: 'soon' }) as typeof fetch).load();
-    expect(bad).toEqual({ ok: true, issues: { state: 'ready', repos: [], rev: 0, freshMs: 0 } });
+    expect(bad).toEqual({ ok: true, issues: { state: 'ready', repos: [], rev: 0, freshMs: 0, unsaved: false } });
   });
   it('tells a lost key from a failure', async () => {
     expect(await createIssuesClient(answer(401, {}) as typeof fetch).load()).toEqual({ ok: false, kind: 'unauthorized' });
@@ -79,9 +85,9 @@ describe('createIssuesClient', () => {
 describe('counts', () => {
   it('shows the chip unless issues are off', () => {
     expect(issuesShown(undefined)).toBe(false);
-    expect(issuesShown({ state: 'off', open: 0, rev: 0 })).toBe(false);
-    expect(issuesShown({ state: 'loading', open: 0, rev: 0 })).toBe(true);
-    expect(issuesShown({ state: 'ready', open: 0, rev: 0 })).toBe(true);
+    expect(issuesShown({ state: 'off', open: 0, rev: 0, noAgent: 0 })).toBe(false);
+    expect(issuesShown({ state: 'loading', open: 0, rev: 0, noAgent: 0 })).toBe(true);
+    expect(issuesShown({ state: 'ready', open: 0, rev: 0, noAgent: 0 })).toBe(true);
   });
 
   it('counts each repository once and only known counts', () => {
@@ -104,11 +110,42 @@ describe('counts', () => {
 describe('sectionsFor', () => {
   it('lists the repositories of the projects in their order, each once', () => {
     const other = repo({ repo: 'example-org/other-repo' });
-    const list: Issues = { state: 'ready', rev: 1, freshMs: 60_000, repos: [repo(), other] };
+    const list: Issues = { state: 'ready', unsaved: false, rev: 1, freshMs: 60_000, repos: [repo(), other] };
     const ps = [gh(project('p_b', 'beta'), 1, 'example-org/other-repo'), gh(project('p_a', 'alpha'), 1), gh(project('p_c', 'alpha-copy'), 1), project('p_d', 'none')];
     expect(sectionsFor(list, ps).map((s) => s.name)).toEqual(['beta', 'alpha']);
     expect(sectionsFor(null, ps)).toEqual([]);
     expect(sectionsFor(list, [gh(project('p_x', 'x'), 1, 'example-org/unlisted')])).toEqual([]);
+  });
+
+  // Review round 5, P3: the page folds nothing itself. GitLab under the
+  // mount /Tools and under /tools are two projects (the server's keys
+  // differ), counted and listed apart.
+  it('keeps two GitLab mounts that differ only in case apart, by the server key', () => {
+    const gl = (p: Project, path: string, open: number): Project => ({
+      ...p,
+      repo: path,
+      repoForge: 'gitlab',
+      repoHost: HOST,
+      issuesKey: `gitlab:${HOST}/${path}`,
+      openIssues: { known: true, open },
+    });
+    const upper = gl(project('p_u', 'upper'), 'Tools/group/app', 2);
+    const lower = gl(project('p_l', 'lower'), 'tools/group/app', 3);
+    expect(openIssuesOf([upper, lower])).toBe(5);
+    const list: Issues = {
+      state: 'ready',
+      unsaved: false,
+      rev: 1,
+      freshMs: 60_000,
+      repos: [
+        repo({ forge: 'gitlab', host: HOST, repo: 'Tools/group/app', key: upper.issuesKey }),
+        repo({ forge: 'gitlab', host: HOST, repo: 'tools/group/app', key: lower.issuesKey }),
+      ],
+    };
+    expect(sectionsFor(list, [upper, lower]).map((s) => [s.name, s.repo.repo])).toEqual([
+      ['upper', 'Tools/group/app'],
+      ['lower', 'tools/group/app'],
+    ]);
   });
 });
 
@@ -171,7 +208,7 @@ describe('links', () => {
 });
 
 describe('IssuesState', () => {
-  const LIST: Issues = { state: 'ready', rev: 1, freshMs: 60_000, repos: [] };
+  const LIST: Issues = { state: 'ready', unsaved: false, rev: 1, freshMs: 60_000, repos: [] };
   function deferred() {
     const waits: Array<(l: IssuesLoad) => void> = [];
     return {
@@ -247,7 +284,7 @@ describe('IssuesState', () => {
 });
 
 describe('IssuesState, reuse', () => {
-  const LIST: Issues = { state: 'ready', rev: 1, freshMs: 60_000, repos: [] };
+  const LIST: Issues = { state: 'ready', unsaved: false, rev: 1, freshMs: 60_000, repos: [] };
   function rig() {
     const waits: Array<(l: IssuesLoad) => void> = [];
     let t = 1_000_000;
@@ -371,7 +408,7 @@ describe('IssuesState, reuse', () => {
     const { s, waits } = rig();
     const title = (rev: number): IssuesLoad => ({
       ok: true,
-      issues: { ...LIST, rev, repos: [{ forge: 'github', host: 'github.com', repo: 'example-org/example-repo', state: 'ok', open: 1, issues: [{ number: 1, title: 'Sample secret', milestone: '', labels: [], updatedAt: '2026-11-17T09:00:00Z', url: '' }] }] },
+      issues: { ...LIST, rev, repos: [{ forge: 'github', host: 'github.com', repo: 'example-org/example-repo', key: 'example-org/example-repo', state: 'ok', open: 1, issues: [{ number: 1, title: 'Sample secret', milestone: '', labels: [], agents: [], pinned: false, updatedAt: '2026-11-17T09:00:00Z', url: '' }], pinned: [] }] },
     });
     const a = s.refresh(1);
     waits[0](title(1));

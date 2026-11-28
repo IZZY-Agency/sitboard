@@ -16,6 +16,7 @@ export function needsYouCount(cards: readonly Card[]): number {
 // The same words as the header's live mark.
 const LOST_WORD: Record<Exclude<Conn, 'live' | 'connecting'>, string> = {
   reconnecting: 'reconnecting',
+  stopped: 'stopped',
   unreachable: 'not connected',
   unauthorized: 'stopped',
   outdated: 'stopped',

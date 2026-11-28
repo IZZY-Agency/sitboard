@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
@@ -55,5 +57,57 @@ func TestCappedHasOnlyWrite(t *testing.T) {
 	var c any = &capped{limit: 4}
 	if _, ok := c.(io.ReaderFrom); ok {
 		t.Fatal("capped exposes ReadFrom")
+	}
+}
+
+// A gate that refuses starts no process, and its refusal is what the call
+// returns; one that admits starts it; one that neither refuses nor starts is
+// ErrNotAdmitted.
+func TestAGateDecidesWhetherTheProcessStarts(t *testing.T) {
+	mark := filepath.Join(t.TempDir(), "ran")
+	refused := errors.New("refused")
+	run := Exec(5 * time.Second)
+	ctx := WithGate(context.Background(), func(func() error) error { return refused })
+	if _, err := run(ctx, "touch", mark); err != refused { //nolint:errorlint // the very value
+		t.Fatalf("refused: %v", err)
+	}
+	if _, err := os.Stat(mark); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a refused process ran: %v", err)
+	}
+	ctx = WithGate(context.Background(), func(func() error) error { return nil })
+	if _, err := run(ctx, "touch", mark); !errors.Is(err, ErrNotAdmitted) {
+		t.Fatalf("not started, not refused: %v", err)
+	}
+	if _, err := os.Stat(mark); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a process the gate did not start ran: %v", err)
+	}
+	ctx = WithGate(context.Background(), func(start func() error) error { return start() })
+	if _, err := run(ctx, "touch", mark); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(mark); err != nil {
+		t.Fatalf("an admitted process did not run: %v", err)
+	}
+	if _, err := Exec(5*time.Second)(context.Background(), "touch", mark); err != nil {
+		t.Fatalf("no gate: %v", err)
+	}
+}
+
+// The gate holds only the start: start returns while the process still runs,
+// so a gate holding a lock never holds it for the run. The process here
+// waits for a file the gate writes after start returns; were the wait under
+// the gate, the call would run out of time.
+func TestAGateHoldsOnlyTheStart(t *testing.T) {
+	dir := t.TempDir()
+	go_ := filepath.Join(dir, "go")
+	ctx := WithGate(context.Background(), func(start func() error) error {
+		if err := start(); err != nil {
+			return err
+		}
+		return os.WriteFile(go_, nil, 0o600)
+	})
+	out, err := Exec(20*time.Second)(ctx, "sh", "-c", `while [ ! -e "$1" ]; do sleep 0.01; done; echo done`, "sh", go_)
+	if err != nil || string(out) != "done\n" {
+		t.Fatalf("%q %v", out, err)
 	}
 }

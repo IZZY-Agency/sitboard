@@ -23,7 +23,7 @@ describe('the GitLab sample scenario', () => {
   it('links every merge request and issue on its sample host, and keeps "site" GitHub only', async () => {
     const { prHref, issueHref } = await import('./data/derive');
     const s = initial('gitlab')!;
-    expect(s.gitlabHosts).toEqual(['gitlab.example']);
+    expect(s.gitlabHosts).toEqual(['gitlab.example', 'code.example:8443/tools']);
     const mrs = s.cards.flatMap((c) => c.pullRequests).filter((p) => p.forge === 'gitlab');
     const issues = s.cards.flatMap((c) => c.issues).filter((i) => i.forge === 'gitlab');
     expect(mrs.length).toBeGreaterThan(0);
@@ -34,6 +34,40 @@ describe('the GitLab sample scenario', () => {
     const site = initial('site')!;
     expect(site.gitlabHosts).toEqual([]);
     expect(site.cards.flatMap((c) => c.pullRequests).every((p) => p.forge === 'github')).toBe(true);
+  });
+});
+
+describe('the GitLab sample issues', () => {
+  it('list issues of both forges, every one linked on its own host', async () => {
+    const { issuesClient, issuesSnapshot } = await import('../dev/issues');
+    const { openIssueHref, repoIssuesHref } = await import('./data/issues');
+    const s = initial('gitlab')!;
+    issuesSnapshot('many', s);
+    const res = await issuesClient('many', s.projects).load();
+    if (!res.ok) throw new Error('no list');
+    const gl = res.issues.repos.filter((r) => r.forge === 'gitlab');
+    expect(gl.map((r) => `${r.host}/${r.repo}`)).toEqual(['code.example:8443/tools/design/pixel-kit', 'gitlab.example/example-group/harbor-api']);
+    expect(res.issues.repos.some((r) => r.forge === 'github')).toBe(true);
+    for (const r of gl) {
+      expect(r.issues.length).toBeGreaterThan(0);
+      for (const i of r.issues) expect(openIssueHref(r, i, s.gitlabHosts)).toBe(`https://${r.host}/${r.repo}/-/issues/${i.number}`);
+      expect(repoIssuesHref(r, s.gitlabHosts)).toBe(`https://${r.host}/${r.repo}/-/issues`);
+    }
+    expect(s.projects.filter((p) => p.repoForge === 'gitlab').every((p) => p.openIssues.known)).toBe(true);
+  });
+
+  it('show what could not be read as such, never as no open issues', async () => {
+    const { issuesClient, issuesSnapshot } = await import('../dev/issues');
+    const s = initial('gitlab')!;
+    issuesSnapshot('unread', s);
+    const res = await issuesClient('unread', s.projects).load();
+    if (!res.ok) throw new Error('no list');
+    expect(res.issues.repos.map((r) => r.state)).toEqual(['ok', 'disabled', 'pending', 'notFound']);
+    expect(res.issues.repos.filter((r) => r.forge === 'gitlab').map((r) => r.state)).toEqual(['pending', 'notFound']);
+    for (const p of s.projects) {
+      const r = res.issues.repos.find((x) => x.forge === p.repoForge && x.host === p.repoHost && x.repo === p.repo);
+      if (r && r.state !== 'ok') expect(p.openIssues.known).toBe(false);
+    }
   });
 });
 

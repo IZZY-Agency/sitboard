@@ -1,0 +1,110 @@
+{
+  "data": {
+    "r0": {
+      "hasIssuesEnabled": true,
+      "issues": {
+        "totalCount": 42,
+        "nodes": [
+          {
+            "number": 404,
+            "title": "Placeholder issue 404",
+            "updatedAt": "2026-11-27T09:21:21Z",
+            "milestone": null,
+            "labels": {
+              "nodes": [
+                {
+                  "name": "Another Label"
+                },
+                {
+                  "name": "placeholder label"
+                },
+                {
+                  "name": "sample"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "i301": {
+        "state": "OPEN",
+        "number": 301,
+        "title": "Placeholder issue 301",
+        "updatedAt": "2023-10-02T20:39:36Z",
+        "milestone": null,
+        "labels": {
+          "nodes": [
+            {
+              "name": "Another Label"
+            },
+            {
+              "name": "placeholder label"
+            },
+            {
+              "name": "sample"
+            }
+          ]
+        }
+      },
+      "i302": {
+        "state": "CLOSED",
+        "number": 302,
+        "title": "Placeholder issue 302",
+        "updatedAt": "2026-06-01T16:54:37Z",
+        "milestone": null,
+        "labels": {
+          "nodes": []
+        }
+      },
+      "i303": null,
+      "i99999999": null
+    },
+    "r1": {
+      "hasIssuesEnabled": true,
+      "issues": {
+        "totalCount": 3,
+        "nodes": [
+          {
+            "number": 404,
+            "title": "Placeholder issue 404",
+            "updatedAt": "2026-11-13T05:28:26Z",
+            "milestone": null,
+            "labels": {
+              "nodes": []
+            }
+          }
+        ]
+      }
+    }
+  },
+  "errors": [
+    {
+      "type": "NOT_FOUND",
+      "path": [
+        "r0",
+        "i303"
+      ],
+      "locations": [
+        {
+          "line": 1,
+          "column": 583
+        }
+      ],
+      "message": "Could not resolve to an Issue with the number of 303."
+    },
+    {
+      "type": "NOT_FOUND",
+      "path": [
+        "r0",
+        "i99999999"
+      ],
+      "locations": [
+        {
+          "line": 1,
+          "column": 719
+        }
+      ],
+      "message": "Could not resolve to an Issue with the number of 99999999."
+    }
+  ]
+}

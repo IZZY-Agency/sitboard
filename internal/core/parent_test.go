@@ -268,3 +268,34 @@ func TestCoordinatorEndedInThisRunKeepsItsWorker(t *testing.T) {
 		t.Fatalf("worker's parent %q", c.Agent.Parent)
 	}
 }
+
+// coordinatorsLocked is the sessions that spawned names or terminals, plus the
+// parents of matched children; a session that did neither is not one.
+func TestCoordinatorsLockedSet(t *testing.T) {
+	b := newTestBoard(t)
+	byName := busySession("byname", tNow)
+	byName.SpawnedNames = []string{"w"}
+	byTerm := busySession("byterm", tNow)
+	byTerm.SpawnedTerminalIDs = []string{termUUID}
+	parent := busySession("parent", tNow)
+	child := busySession("child", tNow)
+	plain := busySession("plain", tNow)
+	for _, f := range []model.SessionFact{byName, byTerm, parent, child, plain} {
+		b.applySync(f)
+	}
+	parents := map[model.SessionKey]model.Known[model.SessionKey]{
+		claudeKey("child"): model.Of(claudeKey("parent")),
+	}
+	b.mu.Lock()
+	got := b.coordinatorsLocked(parents)
+	b.mu.Unlock()
+	want := map[model.SessionKey]bool{claudeKey("byname"): true, claudeKey("byterm"): true, claudeKey("parent"): true}
+	if len(got) != len(want) {
+		t.Fatalf("coordinators %v, want %v", got, want)
+	}
+	for k := range want {
+		if !got[k] {
+			t.Fatalf("coordinators %v, want %v", got, want)
+		}
+	}
+}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { BACKOFF, createFeed, type FeedDeps, type FeedState } from './client';
+import { BACKOFF, STOP_AFTER, createFeed, type FeedDeps, type FeedState } from './client';
 import { CONTRACT_VERSION, type Snapshot } from '../contract.gen';
 
 function snap(seq: number, version = CONTRACT_VERSION): Snapshot {
@@ -18,7 +18,7 @@ function snap(seq: number, version = CONTRACT_VERSION): Snapshot {
     build: { version: 'dev', commit: 'unknown', os: 'darwin', arch: 'arm64' },
     spend: { days: [], pending: false },
     gitlabHosts: [],
-    issues: { state: 'off', open: 0, rev: 0 },
+    issues: { state: 'off', open: 0, rev: 0, noAgent: 0 },
   };
 }
 
@@ -45,7 +45,7 @@ class FakeES {
   }
 }
 
-function harness(responses: Array<() => Promise<Response>>) {
+function harness(responses: Array<() => Promise<Response>>, clock = { t: 0 }) {
   FakeES.all = [];
   const timers: Array<{ fn: () => void; ms: number }> = [];
   const states: FeedState[] = [];
@@ -62,7 +62,7 @@ function harness(responses: Array<() => Promise<Response>>) {
       return timers.length;
     },
     clearTimeout: () => {},
-    now: () => 0,
+    now: () => clock.t,
   };
   const stop = createFeed(deps).start((s) => states.push(s));
   return { states, timers, stop, calls: () => call };
@@ -100,6 +100,70 @@ describe('feed', () => {
     await tick();
     expect(last(h.states).conn).toBe('live');
     expect(FakeES.all).toHaveLength(2);
+  });
+
+  it('says "stopped" once the stream has stayed lost for STOP_AFTER, and keeps retrying', async () => {
+    const clock = { t: 1_000 };
+    const h = harness([ok(snap(1)), down], clock);
+    await tick();
+    FakeES.all[0].fail(); // lost at t = 1000
+    expect(last(h.states).conn).toBe('reconnecting');
+    clock.t += STOP_AFTER - 1;
+    h.timers[0].fn();
+    await tick();
+    expect(last(h.states).conn).toBe('reconnecting'); // one ms short
+    clock.t += 1;
+    h.timers[1].fn();
+    await tick();
+    expect(last(h.states)).toMatchObject({ conn: 'stopped', snapshot: { seq: 1 } });
+    expect(last(h.states).retryAt).toBe(clock.t + BACKOFF[2]);
+    clock.t += 60_000;
+    h.timers[2].fn();
+    await tick();
+    expect(last(h.states).conn).toBe('stopped'); // stays so, and still tries again
+    expect(h.timers).toHaveLength(4);
+  });
+
+  it('a server that comes back ends "stopped", and the next loss starts the count again', async () => {
+    const clock = { t: 0 };
+    const h = harness([ok(snap(1)), down, ok(snap(2))], clock);
+    await tick();
+    FakeES.all[0].fail();
+    clock.t += STOP_AFTER;
+    h.timers[0].fn();
+    await tick();
+    expect(last(h.states).conn).toBe('stopped');
+    h.timers[1].fn();
+    await tick();
+    expect(last(h.states)).toMatchObject({ conn: 'live', snapshot: { seq: 2 } });
+    // Lost again right away: reconnecting, not stopped, however long ago the first loss was.
+    clock.t += 5_000;
+    FakeES.all[FakeES.all.length - 1].fail();
+    expect(last(h.states).conn).toBe('reconnecting');
+  });
+
+  it('a feed that never had a snapshot stays "unreachable", however long', async () => {
+    const clock = { t: 0 };
+    const h = harness([down], clock);
+    await tick();
+    clock.t += 10 * STOP_AFTER;
+    h.timers[0].fn();
+    await tick();
+    expect(last(h.states).conn).toBe('unreachable');
+  });
+
+  it('a restart under a new key ends in "unauthorized", not in "stopped"', async () => {
+    const clock = { t: 0 };
+    const h = harness([ok(snap(1)), down, status(401)], clock);
+    await tick();
+    FakeES.all[0].fail();
+    clock.t += STOP_AFTER;
+    h.timers[0].fn();
+    await tick();
+    expect(last(h.states).conn).toBe('stopped');
+    h.timers[1].fn();
+    await tick();
+    expect(last(h.states).conn).toBe('unauthorized');
   });
 
   it('backs off further on each failed attempt, and resets once live', async () => {

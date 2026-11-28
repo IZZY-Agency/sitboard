@@ -450,9 +450,29 @@ func TestNoTranscriptTextInEmittedFacts(t *testing.T) {
 	e.setProc(4242, procStart)
 	e.record(4242, nil)
 	tr := e.transcript("/home/dev/projects/alpha", coordID, "coordinator.jsonl")
-	writeFile(t, filepath.Join(filepath.Dir(tr), coordID, "subagents", "agent-a1.jsonl"), fixture(t, "subagent.jsonl"))
+	// Issue commands carry their text in the call (a body, a title): the
+	// touches the session and its subagent make hold the issue and nothing of
+	// that text.
+	var own, sub bytes.Buffer
+	own.Write(fixture(t, "coordinator.jsonl"))
+	toolUseIn(&own, "tc1", `gh issue comment 77 --body "CANARY body" --repo example-org/example-repo`, false, "2026-11-17T08:31:00.000Z", "/home/dev/projects/alpha")
+	toolUseIn(&own, "tc2", `gh issue edit 78 --title "CANARY title"`, false, "2026-11-17T08:31:01.000Z", "/home/dev/projects/alpha")
+	writeFile(t, tr, own.Bytes())
+	sub.Write(fixture(t, "subagent.jsonl"))
+	toolUseIn(&sub, "ts1", `glab issue note 79 -m "CANARY note"`, true, "2026-11-17T08:31:02.000Z", "/home/dev/projects/alpha")
+	writeFile(t, filepath.Join(filepath.Dir(tr), coordID, "subagents", "agent-a1.jsonl"), sub.Bytes())
 	c := run(t, e.adapter())
-	c.wait(t, 2*time.Second, "derived", session(coordID, func(f model.SessionFact) bool { return f.Subagents == 1 && f.Model.OK }))
+	f := c.wait(t, 2*time.Second, "derived", session(coordID, func(f model.SessionFact) bool {
+		return f.Subagents == 1 && f.Model.OK && len(f.TouchedIssues) == 3
+	})).(model.SessionFact)
+	var got []int
+	for _, it := range f.TouchedIssues {
+		got = append(got, it.Number)
+	}
+	slices.Sort(got)
+	if !slices.Equal(got, []int{77, 78, 79}) {
+		t.Fatalf("touched issues = %v", got)
+	}
 	b, _ := json.Marshal(c.all())
 	if bytes.Contains(b, []byte("CANARY")) {
 		t.Fatalf("transcript text reached a fact: %s", b)

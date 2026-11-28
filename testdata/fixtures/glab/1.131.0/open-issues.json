@@ -1,0 +1,163 @@
+{
+  "data": {
+    "currentUser": null,
+    "p0": {
+      "webUrl": "https://example.com/example-org/example-repo",
+      "issuesEnabled": true,
+      "issues": {
+        "count": 267,
+        "nodes": [
+          {
+            "iid": "101",
+            "title": "Placeholder issue 101",
+            "updatedAt": "2026-11-27T07:24:25Z",
+            "milestone": null,
+            "labels": {
+              "nodes": [
+                {
+                  "title": "Placeholder::Kind"
+                },
+                {
+                  "title": "placeholder label"
+                },
+                {
+                  "title": "Another Label"
+                },
+                {
+                  "title": "sample"
+                },
+                {
+                  "title": "zz last"
+                }
+              ]
+            }
+          },
+          {
+            "iid": "102",
+            "title": "Placeholder issue 102",
+            "updatedAt": "2026-11-27T04:18:26Z",
+            "milestone": {
+              "title": "Sample 1.0",
+              "dueDate": "2026-12-11"
+            },
+            "labels": {
+              "nodes": [
+                {
+                  "title": "Placeholder::Kind"
+                },
+                {
+                  "title": "placeholder label"
+                },
+                {
+                  "title": "Another Label"
+                },
+                {
+                  "title": "sample"
+                },
+                {
+                  "title": "zz last"
+                }
+              ]
+            }
+          },
+          {
+            "iid": "103",
+            "title": "Placeholder issue 103",
+            "updatedAt": "2026-11-26T23:02:56Z",
+            "milestone": null,
+            "labels": {
+              "nodes": [
+                {
+                  "title": "Placeholder::Kind"
+                },
+                {
+                  "title": "placeholder label"
+                },
+                {
+                  "title": "Another Label"
+                },
+                {
+                  "title": "sample"
+                },
+                {
+                  "title": "zz last"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "p1": {
+      "webUrl": "https://example.com/example-org/other-repo",
+      "issuesEnabled": true,
+      "issues": {
+        "count": 2555,
+        "nodes": [
+          {
+            "iid": "104",
+            "title": "Placeholder issue 104",
+            "updatedAt": "2026-11-27T07:17:17Z",
+            "milestone": {
+              "title": "Sample 1.0",
+              "dueDate": "2026-12-11"
+            },
+            "labels": {
+              "nodes": [
+                {
+                  "title": "Placeholder::Kind"
+                },
+                {
+                  "title": "placeholder label"
+                },
+                {
+                  "title": "Another Label"
+                },
+                {
+                  "title": "sample"
+                },
+                {
+                  "title": "zz last"
+                }
+              ]
+            }
+          },
+          {
+            "iid": "105",
+            "title": "Placeholder issue 105",
+            "updatedAt": "2026-11-27T02:09:15Z",
+            "milestone": null,
+            "labels": {
+              "nodes": [
+                {
+                  "title": "Placeholder::Kind"
+                },
+                {
+                  "title": "placeholder label"
+                },
+                {
+                  "title": "Another Label"
+                },
+                {
+                  "title": "sample"
+                },
+                {
+                  "title": "zz last"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "p2": {
+      "webUrl": "https://example.com/example-org/mirror-repo",
+      "issuesEnabled": false,
+      "issues": {
+        "count": 0,
+        "nodes": []
+      }
+    },
+    "p3": null
+  }
+}

@@ -28,7 +28,11 @@ const issueReposPerCall = 20
 // repository in a backoff is not asked, and a rate-limited answer here puts
 // every repository of this look into one. A lost login is
 // source.ErrNotLoggedIn.
-func (p *provider) OpenIssues(ctx context.Context, repos []model.ForgeRepo) ([]model.RepoIssues, error) {
+//
+// The pinned numbers of a repository are asked in its own alias, as
+// issue(number:) aliases: the same call, no extra one; only integers go into
+// the query text.
+func (p *provider) OpenIssues(ctx context.Context, repos []model.ForgeRepo, pinned map[model.ForgeRepo][]int) ([]model.RepoIssues, error) {
 	if p.off {
 		return nil, nil
 	}
@@ -44,7 +48,7 @@ func (p *provider) OpenIssues(ctx context.Context, repos []model.ForgeRepo) ([]m
 			continue
 		}
 		seen[r] = true
-		asks = append(asks, issueAsk{repo: r, slug: slug, owner: owner, name: name})
+		asks = append(asks, issueAsk{repo: r, slug: slug, owner: owner, name: name, pins: model.PinsToAsk(pinned[r])})
 	}
 	if len(asks) == 0 {
 		return nil, nil
@@ -73,7 +77,7 @@ func (p *provider) OpenIssues(ctx context.Context, repos []model.ForgeRepo) ([]m
 		if len(chunk) == 0 {
 			continue
 		}
-		args := []string{"api", "graphql", "--hostname", model.GitHubHost, "-f", "query=" + buildIssuesQuery(len(chunk))}
+		args := []string{"api", "graphql", "--hostname", model.GitHubHost, "-f", "query=" + buildIssuesQuery(chunk)}
 		for i, a := range chunk {
 			args = append(args, "-f", "o"+strconv.Itoa(i)+"="+a.owner, "-f", "n"+strconv.Itoa(i)+"="+a.name)
 		}
@@ -104,11 +108,7 @@ func (p *provider) OpenIssues(ctx context.Context, repos []model.ForgeRepo) ([]m
 			}
 			continue
 		}
-		repos := make([]model.ForgeRepo, len(chunk))
-		for i, a := range chunk {
-			repos[i] = a.repo
-		}
-		got, rateLimited, partial, err := parseIssues(raw, repos)
+		got, rateLimited, partial, err := parseIssues(raw, chunk)
 		if err != nil {
 			p.setHealth(source.StateFailing, "unexpected answer from gh")
 			failed = true
@@ -146,6 +146,7 @@ func (p *provider) OpenIssues(ctx context.Context, repos []model.ForgeRepo) ([]m
 type issueAsk struct {
 	repo              model.ForgeRepo
 	slug, owner, name string
+	pins              []int // the pinned numbers to ask (model.PinsToAsk)
 }
 
 // limitIssues starts a rate-limit backoff for issue lists and for every
@@ -193,45 +194,77 @@ func backoffKey(slug string) string { return strings.ToLower(slug) }
 var issueFields = `number title updatedAt milestone{title dueOn} labels(first:` + strconv.Itoa(model.MaxIssueLabels) +
 	`,orderBy:{field:NAME,direction:ASC}){nodes{name}}`
 
-// buildIssuesQuery writes the query for n repositories, $o0/$n0 to
-// $o<n-1>/$n<n-1>. Only integers and fixed text go into it.
-func buildIssuesQuery(n int) string {
+// buildIssuesQuery writes the query for asks, $o0/$n0 to $o<n-1>/$n<n-1>,
+// with each repository's pinned numbers as aliases i<number> inside its own
+// alias. Only integers and fixed text go into it.
+func buildIssuesQuery(asks []issueAsk) string {
 	var q strings.Builder
 	q.WriteString("query(")
-	for i := range n {
+	for i := range asks {
 		if i > 0 {
 			q.WriteString(",")
 		}
 		fmt.Fprintf(&q, "$o%d:String!,$n%d:String!", i, i)
 	}
 	q.WriteString("){")
-	for i := range n {
-		fmt.Fprintf(&q, "r%d:repository(owner:$o%d,name:$n%d){hasIssuesEnabled issues(states:OPEN,first:%d,orderBy:{field:UPDATED_AT,direction:DESC}){totalCount nodes{%s}}} ",
+	for i, a := range asks {
+		fmt.Fprintf(&q, "r%d:repository(owner:$o%d,name:$n%d){hasIssuesEnabled issues(states:OPEN,first:%d,orderBy:{field:UPDATED_AT,direction:DESC}){totalCount nodes{%s}}",
 			i, i, i, model.MaxRepoIssues, issueFields)
+		for _, n := range a.pins {
+			fmt.Fprintf(&q, " i%d:issue(number:%d){state %s}", n, n, issueFields)
+		}
+		q.WriteString("} ")
 	}
 	q.WriteString("}")
 	return q.String()
 }
 
+// ghIssue is one issue as issueFields ask it.
+type ghIssue struct {
+	Number    int    `json:"number"`
+	Title     string `json:"title"`
+	UpdatedAt string `json:"updatedAt"`
+	Milestone *struct {
+		Title string  `json:"title"`
+		DueOn *string `json:"dueOn"`
+	} `json:"milestone"`
+	Labels struct {
+		Nodes []struct {
+			Name string `json:"name"`
+		} `json:"nodes"`
+	} `json:"labels"`
+}
+
+// openIssue is n as the board keeps it, labels capped.
+func (n ghIssue) openIssue() model.OpenIssue {
+	is := model.OpenIssue{Number: n.Number, Title: n.Title, UpdatedAt: parseTime(n.UpdatedAt)}
+	if n.Milestone != nil {
+		is.Milestone = n.Milestone.Title
+		if n.Milestone.DueOn != nil {
+			is.MilestoneDue = parseTime(*n.Milestone.DueOn)
+		}
+	}
+	for _, l := range n.Labels.Nodes {
+		if len(is.Labels) < model.MaxIssueLabels {
+			is.Labels = append(is.Labels, l.Name)
+		}
+	}
+	return is
+}
+
 type ghRepoIssues struct {
 	HasIssuesEnabled bool `json:"hasIssuesEnabled"`
 	Issues           struct {
-		TotalCount int `json:"totalCount"`
-		Nodes      []struct {
-			Number    int    `json:"number"`
-			Title     string `json:"title"`
-			UpdatedAt string `json:"updatedAt"`
-			Milestone *struct {
-				Title string  `json:"title"`
-				DueOn *string `json:"dueOn"`
-			} `json:"milestone"`
-			Labels struct {
-				Nodes []struct {
-					Name string `json:"name"`
-				} `json:"nodes"`
-			} `json:"labels"`
-		} `json:"nodes"`
+		TotalCount int       `json:"totalCount"`
+		Nodes      []ghIssue `json:"nodes"`
 	} `json:"issues"`
+}
+
+// ghPinned is a pinned issue asked by number: null when GitHub has no such
+// issue there (a NOT_FOUND error names its alias).
+type ghPinned struct {
+	ghIssue
+	State string `json:"state"` // OPEN or CLOSED
 }
 
 // hasIssuesData: gh failed, yet GitHub answered the query with data (some
@@ -248,21 +281,41 @@ func hasIssuesData(out []byte) bool {
 }
 
 // ghNotFound is the GraphQL error type of a repository GitHub does not show
-// (gone, renamed, or not visible to this login); ghRateLimited that of a
+// (gone, renamed, or not visible to this login), or of an issue number it
+// has no issue for (a pull request's number too); ghRateLimited that of a
 // rate limit.
+//
+// A pin is gone on one signal only: its alias i<N> is null and an error of
+// type NOT_FOUND names exactly ["r<i>", "i<N>"], inside a repository alias
+// that answered (not null, issues on, no error of its own). On GitHub an
+// issue is visible to whoever sees its repository, so a login that lost
+// access gets the repository alias null with its own error (NOT_FOUND at
+// ["r<i>"], or FORBIDDEN for an organisation's SSO), nothing under it is
+// resolved, and no pin of it is reported (TestOnlyAPinsOwnNotFoundIsGone).
 const (
 	ghNotFound    = "NOT_FOUND"
 	ghRateLimited = "RATE_LIMITED"
 )
 
-// parseIssues reads the answer for repos, aliased r0, r1, ... in that order.
+// pinAlias is the alias of pinned number n inside its repository's alias.
+func pinAlias(n int) string { return "i" + strconv.Itoa(n) }
+
+// parseIssues reads the answer for asks, aliased r0, r1, ... in that order.
 // An alias counts only when it is whole: no error at all names it or anything
 // under it, or it is null and the one error that names exactly it says
 // NOT_FOUND. Any other alias with an error is left out (the board keeps what
 // it had) and sets partial. rateLimited: an error said RATE_LIMITED.
-func parseIssues(raw []byte, repos []model.ForgeRepo) (out []model.RepoIssues, rateLimited, partial bool, err error) {
+//
+// An error under one of a repository's pin aliases (i<number>) is that pin's
+// alone: a null pin that a NOT_FOUND error names exactly is gone, a pin with
+// any other error has no answer, and the repository's own answer stands.
+// No pin is gone in a call with an unscoped error (one that names no alias
+// of the call, or a rate limit anywhere): the lists that stand are kept,
+// but GitHub may have stopped short of the pins. Nor is one gone that its
+// repository's own list shows.
+func parseIssues(raw []byte, asks []issueAsk) (out []model.RepoIssues, rateLimited, partial bool, err error) {
 	var r struct {
-		Data   map[string]*ghRepoIssues `json:"data"`
+		Data   map[string]json.RawMessage `json:"data"`
 		Errors []struct {
 			Type string `json:"type"`
 			Path []any  `json:"path"`
@@ -271,8 +324,20 @@ func parseIssues(raw []byte, repos []model.ForgeRepo) (out []model.RepoIssues, r
 	if err := json.Unmarshal(raw, &r); err != nil || r.Data == nil {
 		return nil, false, false, errors.New("github: unexpected answer")
 	}
+	pinOf := make([]map[string]int, len(asks)) // per ask: pin alias -> number
+	aliasAt := map[string]int{}
+	for i, a := range asks {
+		aliasAt["r"+strconv.Itoa(i)] = i
+		pinOf[i] = map[string]int{}
+		for _, n := range a.pins {
+			pinOf[i][pinAlias(n)] = n
+		}
+	}
 	notFound := map[string]bool{} // alias -> a NOT_FOUND error names exactly it
 	hurt := map[string]bool{}     // alias -> some other error names it or what is under it
+	pinGone := map[[2]string]bool{}
+	pinHurt := map[[2]string]bool{}
+	unscoped := false
 	for _, e := range r.Errors {
 		if e.Type == ghRateLimited {
 			rateLimited = true
@@ -281,8 +346,21 @@ func parseIssues(raw []byte, repos []model.ForgeRepo) (out []model.RepoIssues, r
 		if len(e.Path) > 0 {
 			alias, _ = e.Path[0].(string)
 		}
+		if _, ours := aliasAt[alias]; !ours || e.Type == ghRateLimited {
+			unscoped = true
+		}
 		if alias == "" {
 			continue
+		}
+		if i, ok := aliasAt[alias]; ok && len(e.Path) >= 2 {
+			if sub, _ := e.Path[1].(string); pinOf[i][sub] > 0 {
+				if e.Type == ghNotFound && len(e.Path) == 2 {
+					pinGone[[2]string{alias, sub}] = true
+				} else {
+					pinHurt[[2]string{alias, sub}] = true
+				}
+				continue
+			}
 		}
 		if e.Type == ghNotFound && len(e.Path) == 1 {
 			notFound[alias] = true
@@ -290,10 +368,17 @@ func parseIssues(raw []byte, repos []model.ForgeRepo) (out []model.RepoIssues, r
 			hurt[alias] = true
 		}
 	}
-	out = make([]model.RepoIssues, 0, len(repos))
-	for i, repo := range repos {
+	out = make([]model.RepoIssues, 0, len(asks))
+	for i, a := range asks {
+		repo := a.repo
 		alias := "r" + strconv.Itoa(i)
-		g, present := r.Data[alias]
+		rawRepo, present := r.Data[alias]
+		var g *ghRepoIssues
+		if present {
+			if err := json.Unmarshal(rawRepo, &g); err != nil {
+				return nil, false, false, errors.New("github: unexpected answer")
+			}
+		}
 		switch {
 		case !present:
 			return nil, false, false, errors.New("github: unexpected answer")
@@ -312,22 +397,52 @@ func parseIssues(raw []byte, repos []model.ForgeRepo) (out []model.RepoIssues, r
 			if n.Number <= 0 || len(ri.List) == model.MaxRepoIssues {
 				continue
 			}
-			is := model.OpenIssue{Number: n.Number, Title: n.Title, UpdatedAt: parseTime(n.UpdatedAt)}
-			if n.Milestone != nil {
-				is.Milestone = n.Milestone.Title
-				if n.Milestone.DueOn != nil {
-					is.MilestoneDue = parseTime(*n.Milestone.DueOn)
-				}
-			}
-			for _, l := range n.Labels.Nodes {
-				if len(is.Labels) < model.MaxIssueLabels {
-					is.Labels = append(is.Labels, l.Name)
-				}
-			}
-			ri.List = append(ri.List, is)
+			ri.List = append(ri.List, n.openIssue())
 		}
 		ri.Open = max(ri.Open, len(ri.List))
+		if len(a.pins) > 0 {
+			gone := pinGone
+			if unscoped {
+				gone = nil
+			}
+			listed := map[int]bool{}
+			for _, is := range ri.List {
+				listed[is.Number] = true
+			}
+			ri.Pinned = parsePinned(rawRepo, alias, a.pins, gone, pinHurt, listed)
+		}
 		out = append(out, ri)
 	}
 	return out, rateLimited, partial, nil
+}
+
+// parsePinned reads the pin aliases of one repository's answer rawRepo
+// (alias): what is missing, has an error of its own, or names another
+// number is not answered, and so is a gone one that listed (the numbers of
+// the repository's own list) shows.
+func parsePinned(rawRepo json.RawMessage, alias string, pins []int, gone, hurt map[[2]string]bool, listed map[int]bool) []model.PinnedIssue {
+	var byAlias map[string]json.RawMessage
+	if json.Unmarshal(rawRepo, &byAlias) != nil {
+		return nil
+	}
+	var out []model.PinnedIssue
+	for _, n := range pins {
+		sub := pinAlias(n)
+		rawPin, present := byAlias[sub]
+		var g *ghPinned
+		if present && json.Unmarshal(rawPin, &g) != nil {
+			continue
+		}
+		switch at := [2]string{alias, sub}; {
+		case !present || hurt[at]:
+		case g == nil && gone[at] && !listed[n]:
+			out = append(out, model.PinnedIssue{OpenIssue: model.OpenIssue{Number: n}, State: model.PinGone})
+		case g == nil || gone[at] || g.Number != n:
+		case g.State == "OPEN":
+			out = append(out, model.PinnedIssue{OpenIssue: g.openIssue(), State: model.PinOpen})
+		case g.State == "CLOSED":
+			out = append(out, model.PinnedIssue{OpenIssue: g.openIssue(), State: model.PinClosed})
+		}
+	}
+	return out
 }

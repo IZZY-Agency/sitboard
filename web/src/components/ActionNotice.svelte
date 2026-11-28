@@ -28,6 +28,7 @@
 
 <section
   class="notice"
+  data-action-notice
   class:failed={notice.kind === 'failed'}
   aria-label={notice.kind === 'copy' ? 'Where this session runs' : 'Action failed'}
   transition:fly={{ y: 6, duration: ms(MOVE_MS), easing: cubicOut }}
@@ -60,7 +61,8 @@
     position: fixed;
     right: var(--gutter);
     bottom: 52px;
-    z-index: 3;
+    /* Above the side panels (4): a pin refused in the Issues panel says so where it can be seen. */
+    z-index: 5;
     width: min(420px, calc(100vw - 2 * var(--gutter)));
     padding: 18px 16px 12px;
     background: var(--surface);

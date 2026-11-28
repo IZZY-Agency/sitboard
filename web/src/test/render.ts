@@ -45,7 +45,7 @@ export function live(snapshot: Snapshot) {
   return feedOf({ conn: 'live', snapshot });
 }
 
-export function recordActions(answer: Partial<Record<'jump' | 'seen' | 'forgetGrouping' | 'setGrouping', ActionResult>> = {}) {
+export function recordActions(answer: Partial<Record<'jump' | 'seen' | 'forgetGrouping' | 'setGrouping' | 'pinIssue', ActionResult>> = {}) {
   const calls: Array<[string, string] | [string, string, string]> = [];
   const actions: Actions = {
     jump: async (id) => {
@@ -63,6 +63,10 @@ export function recordActions(answer: Partial<Record<'jump' | 'seen' | 'forgetGr
     setGrouping: async (id, mode) => {
       calls.push(['setGrouping', id, mode]);
       return answer.setGrouping ?? { ok: true };
+    },
+    pinIssue: async (req) => {
+      calls.push(['pinIssue', `${req.forge}|${req.host}|${req.repo}#${req.number}`, String(req.pinned)]);
+      return answer.pinIssue ?? { ok: true };
     },
   };
   return { calls, actions };

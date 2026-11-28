@@ -6,7 +6,7 @@ import Harness from './Harness.svelte';
 import { initial, SCENARIOS, step, type Scenario } from './scenarios';
 import { CATCHUPS, catchupClient, type CatchupCase } from './catchup';
 import { LEFTOVERS, leftoversClient, leftoversSummary, type LeftoversCase } from './leftovers';
-import { ISSUES, issuesClient, issuesSnapshot, type IssuesCase } from './issues';
+import { ISSUES, issuesSnapshot, linkedIssuesClient, sampleNoAgent, sampleProjectNoAgent, samplePin, sampleRev, type IssuesCase } from './issues';
 import { saveSwitch, type Permission } from '../src/data/notify';
 import type { Feed, FeedState } from '../src/data/client';
 import type { Actions } from '../src/data/actions';
@@ -27,17 +27,29 @@ const ic = (ISSUES as readonly string[]).includes(params.get('i') ?? '') ? (para
 let current = initial(sc);
 if (current) current.leftovers = leftoversSummary(lc, current.projects);
 if (current) issuesSnapshot(ic, current);
+// 0.6.0 stream 4: the summary counts what the sample links leave with no agent seen.
+// ?agents=unjudged: a server that has not judged the agents yet: no counts, every agents field null.
+const unjudged = params.get('agents') === 'unjudged';
+if (current && current.issues.state === 'ready' && !unjudged) current.issues.noAgent = sampleNoAgent(ic, current);
+if (current && current.issues.state === 'ready' && !unjudged) sampleProjectNoAgent(ic, current);
+if (current && unjudged) delete (current.issues as { noAgent?: number }).noAgent;
 let push: ((s: FeedState) => void) | null = null;
 
 const feed: Feed = {
   start(on) {
     push = on;
     const conn: FeedState['conn'] =
-      sc === 'loading' ? 'connecting' : sc === 'unreachable' ? 'unreachable' : sc === 'unauthorized' ? 'unauthorized' : sc === 'outdated' ? 'outdated' : sc === 'reconnecting' ? 'reconnecting' : 'live';
+      sc === 'loading' ? 'connecting' : sc === 'unreachable' ? 'unreachable' : sc === 'unauthorized' ? 'unauthorized' : sc === 'outdated' ? 'outdated' : sc === 'reconnecting' ? 'reconnecting' : sc === 'stopped' ? 'stopped' : 'live';
     on({ conn, snapshot: current, retryAt: sc === 'unreachable' ? Date.now() + 8000 : undefined });
+    // ?recover=N: the server comes back after N seconds, so the way out of the lost state can be seen.
+    const back = Number(params.get('recover'));
+    const r = back > 0 && current ? setTimeout(() => publish(current as Snapshot), back * 1000) : undefined;
     let n = 0;
     const t = liveMode && current ? setInterval(() => publish(step(current as Snapshot, n++)), 2500) : undefined;
-    return () => clearInterval(t);
+    return () => {
+      clearInterval(t);
+      clearTimeout(r);
+    };
   },
 };
 
@@ -90,6 +102,16 @@ const actions: Actions = {
     setTimeout(() => publish(next), 300);
     return { ok: true };
   },
+  // 0.6.0 stream 4: the server keeps the pin and moves the list's rev.
+  async pinIssue(req) {
+    const r = samplePin(req, params.get('fail') === 'pin');
+    if (!r.ok || !current) return r;
+    const next = JSON.parse(JSON.stringify(current)) as Snapshot;
+    next.issues.rev = sampleRev();
+    next.seq++;
+    setTimeout(() => publish(next), 300);
+    return { ok: true };
+  },
   async seen(id) {
     if (!current) return { ok: true };
     const next = JSON.parse(JSON.stringify(current)) as Snapshot;
@@ -121,4 +143,4 @@ const permission: Permission | undefined = n
 if (n === 'on') saveSwitch(true);
 else if (n) saveSwitch(false);
 
-mount(App, { target: document.getElementById('app')!, props: { feed, actions, catchup: catchupClient(cu), leftovers: leftoversClient(lc, current?.projects ?? []), issues: issuesClient(ic, current?.projects ?? []), ...(permission ? { permission } : {}) } });
+mount(App, { target: document.getElementById('app')!, props: { feed, actions, catchup: catchupClient(cu), leftovers: leftoversClient(lc, current?.projects ?? []), issues: linkedIssuesClient(ic, () => current, { unsaved: params.get('unsaved') === '1', unjudged }), ...(permission ? { permission } : {}) } });

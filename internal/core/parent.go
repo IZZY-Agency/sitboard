@@ -133,7 +133,7 @@ func matchParent(s model.SessionFact, names []string, records []spawnRecord) mod
 func (b *Board) workerHintsLocked(parents map[model.SessionKey]model.Known[model.SessionKey], cyclic map[model.SessionKey]bool) map[model.SessionKey]bool {
 	own := map[model.SessionKey]map[string]bool{}
 	live := map[string]bool{} // names carried by a session that has not ended
-	coordinator := map[model.SessionKey]bool{}
+	coordinator := b.coordinatorsLocked(parents)
 	add := func(k model.SessionKey, names ...string) {
 		if own[k] == nil {
 			own[k] = map[string]bool{}
@@ -148,9 +148,6 @@ func (b *Board) workerHintsLocked(parents map[model.SessionKey]model.Known[model
 				live[n] = true
 			}
 		}
-		if len(s.SpawnedNames) > 0 || len(s.SpawnedTerminalIDs) > 0 {
-			coordinator[k] = true
-		}
 		add(k, b.namesLocked(s)...)
 		add(k, s.SpawnedNames...)
 		for _, id := range s.SpawnedTerminalIDs {
@@ -160,7 +157,6 @@ func (b *Board) workerHintsLocked(parents map[model.SessionKey]model.Known[model
 		}
 		if p := parents[k]; p.OK {
 			add(p.V, b.namesLocked(s)...)
-			coordinator[p.V] = true
 		}
 	}
 	hints := map[model.SessionKey]bool{}
@@ -180,6 +176,22 @@ func (b *Board) workerHintsLocked(parents map[model.SessionKey]model.Known[model
 		}
 	}
 	return hints
+}
+
+// coordinatorsLocked is the sessions that are coordinators: they spawned
+// sessions or terminals, or have a matched child (a session whose parent is
+// them in parents). Callers hold b.mu.
+func (b *Board) coordinatorsLocked(parents map[model.SessionKey]model.Known[model.SessionKey]) map[model.SessionKey]bool {
+	coordinator := map[model.SessionKey]bool{}
+	for k, s := range b.sessions {
+		if len(s.SpawnedNames) > 0 || len(s.SpawnedTerminalIDs) > 0 {
+			coordinator[k] = true
+		}
+		if p := parents[k]; p.OK {
+			coordinator[p.V] = true
+		}
+	}
+	return coordinator
 }
 
 // unique returns the one record, other than self, that matches.

@@ -132,6 +132,7 @@ func (b *Board) deriveLocked(now time.Time) (view, map[string]model.SessionKey) 
 	}
 	v.spend = b.spendLocked(now)
 	v.issueRepos = b.issueReposOfLocked(remotes)
+	b.linkIssuesLocked(&v, keys, parents, projects)
 	v.gitlabHosts = b.gitlabHostsLocked()
 	v.issues = b.issuesSummaryLocked(v.issueRepos)
 	v.umbrellas, v.groupings = b.groupLocked(projects, mainRoots, plainLive, b.qualifiedLocked(shown, parents, plainLive), now)
@@ -249,6 +250,7 @@ func (b *Board) cardLocked(s model.SessionFact, parent model.Known[model.Session
 		project.RepoForge = contract.Forge(remote.Forge)
 		project.RepoHost = remote.Host
 		project.OpenIssues = b.projectIssuesLocked(remote)
+		project.IssuesKey = b.issueKey(remote).Key()
 	}
 
 	card := contract.Card{
@@ -288,23 +290,36 @@ func (b *Board) cardLocked(s model.SessionFact, parent model.Known[model.Session
 			card.Agent.Name = clean(term.Name)
 		}
 	}
-	issues := map[string]bool{} // by the full identity, so two paths too long to show are still two issues
 	for _, pr := range prs {
 		card.PullRequests = append(card.PullRequests, pagePR(pr))
-		if pr.State != model.PRStateOpen {
-			continue // a closed one never will close them; a merged one already did
-		}
-		for _, n := range pr.ClosingIssues {
-			id := model.PRRef{Repo: pr.Repo, Number: n}.Key()
-			if issues[id] {
-				continue
-			}
-			issues[id] = true
-			card.Issues = append(card.Issues, pageIssue(pr.Repo, n))
-		}
+	}
+	for _, ref := range closingIssues(prs) {
+		card.Issues = append(card.Issues, pageIssue(ref.Repo, ref.Number, contract.IssueCloses))
 	}
 	card.Title, card.TitleSource = title(prs, s, term, hasTerm)
 	return card, project, true
+}
+
+// closingIssues are the issues the open ones of prs close, each once by its
+// full identity (so two paths too long to show are still two issues), in the
+// order of prs. A closed pull request never will close them; a merged one
+// already did.
+func closingIssues(prs []model.PullRequest) []model.PRRef {
+	seen := map[string]bool{}
+	var out []model.PRRef
+	for _, pr := range prs {
+		if pr.State != model.PRStateOpen {
+			continue
+		}
+		for _, n := range pr.ClosingIssues {
+			ref := model.PRRef{Repo: pr.Repo, Number: n}
+			if !seen[ref.Key()] {
+				seen[ref.Key()] = true
+				out = append(out, ref)
+			}
+		}
+	}
+	return out
 }
 
 // title picks the card's title. Never prompt text. In order:
@@ -600,8 +615,8 @@ func pagePath(p string) string {
 
 // pageIssue is issue n of r for the page: the forge and host, the path whole
 // (or none), and the address built for it (none when the path is none).
-func pageIssue(r model.ForgeRepo, n int) contract.Issue {
-	is := contract.Issue{Forge: contract.Forge(r.Forge), Host: clean(r.Host), Repo: pagePath(r.Path), Number: n}
+func pageIssue(r model.ForgeRepo, n int, kind contract.IssueKind) contract.Issue {
+	is := contract.Issue{Forge: contract.Forge(r.Forge), Host: clean(r.Host), Repo: pagePath(r.Path), Number: n, Kind: kind}
 	if is.Repo != "" {
 		is.URL = model.ForgeIssueURL(r, n)
 	}

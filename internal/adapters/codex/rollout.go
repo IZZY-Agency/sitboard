@@ -117,17 +117,18 @@ func readMeta(path string, now time.Time) (meta, bool) {
 // only a model id, an effort word, a folder, times, pull request references
 // and the names and ids of sessions it started.
 type derived struct {
-	Model        string
-	Effort       string // as Codex wrote it, lowercase
-	Folder       string
-	Status       model.Known[model.Status]
-	StatusSince  time.Time
-	LastActivity time.Time
-	TurnEnds     []time.Time
-	CreatedPRs   []model.PRRef
-	PushedPRs    []model.PushedRef // those of CreatedPRs a creating push announced, with the call's window
-	SpawnedNames []string
-	SpawnedIDs   []string
+	Model         string
+	Effort        string // as Codex wrote it, lowercase
+	Folder        string
+	Status        model.Known[model.Status]
+	StatusSince   time.Time
+	LastActivity  time.Time
+	TurnEnds      []time.Time
+	CreatedPRs    []model.PRRef
+	PushedPRs     []model.PushedRef  // those of CreatedPRs a creating push announced, with the call's window
+	TouchedIssues []model.IssueTouch // the issues the session's own gh/glab issue commands named
+	SpawnedNames  []string
+	SpawnedIDs    []string
 	// Total is the thread's token use, from its last token_usage_record;
 	// Spans its use by quarter hour (UTC), for the last spendKeep only.
 	Total model.Tokens
@@ -408,6 +409,7 @@ type payload struct {
 		Type   string          `json:"type"`
 		Cmd    json.RawMessage `json:"command"`
 		Output string          `json:"aggregated_output"`
+		Cwd    json.RawMessage `json:"cwd"` // where the command ran; read apart, so a bad one costs nothing else
 	} `json:"item"`
 }
 
@@ -467,7 +469,7 @@ func (t *tailer) consume(b []byte, now time.Time) {
 			t.turnEnd(at, now)
 		case "item_completed":
 			if p.Item.Type == "CommandExecution" && !t.inherited(at) {
-				t.command(p.Item.Cmd, p.Item.Output, at)
+				t.command(p.Item.Cmd, p.Item.Output, p.Item.Cwd, at)
 			}
 		}
 	case "response_item":
@@ -555,7 +557,7 @@ func (t *tailer) setStatus(s model.Status, at time.Time) {
 // agterm sessions it started. Codex records the command as an argument list,
 // usually a shell and its script (["/bin/zsh", "-lc", "<script>"]); it is
 // quoted back into one line for the shared parser, which reads the script.
-func (t *tailer) command(raw json.RawMessage, out string, at time.Time) {
+func (t *tailer) command(raw json.RawMessage, out string, rawCwd json.RawMessage, at time.Time) {
 	var argv []string
 	if json.Unmarshal(raw, &argv) != nil || len(argv) == 0 {
 		var s string
@@ -575,6 +577,18 @@ func (t *tailer) command(raw json.RawMessage, out string, at time.Time) {
 		line = strings.Join(q, " ")
 	}
 	cmd := shellcmd.Parse(line)
+	if cmds := cmd.IssueCommands(); len(cmds) > 0 {
+		// The folder is the command's own working directory (item.cwd). A
+		// record without a valid one gives a touch only for the commands
+		// that name their repository: the turn's folder is not the
+		// command's (a tool can run elsewhere), so it is never a fallback.
+		var cwd string
+		if json.Unmarshal(rawCwd, &cwd) != nil { // an object, a number: unknown
+			cwd = ""
+		}
+		folder, _ := validFolder(cwd)
+		t.d.TouchedIssues = shellcmd.AddIssueTouches(t.d.TouchedIssues, cmds, folder, at, maxPRs)
+	}
 	if len(cmd.Runs("gh", "pr", "create")) > 0 {
 		refs := shellcmd.PullRequests(out)
 		switch {

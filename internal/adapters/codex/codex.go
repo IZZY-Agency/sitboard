@@ -959,6 +959,7 @@ func (r *registry) fact(id string, s *sess) model.SessionFact {
 		PushedPRs:    slices.Clone(d.PushedPRs),
 		Headless:     s.meta.Source == "exec",
 	}
+	f.TouchedIssues = slices.Clone(d.TouchedIssues)
 	// Its spend, with that of the threads Codex spawned under it. A session
 	// not (yet) seen live, shown because liveness cannot be told, may have
 	// ended before sitboard started: its tokens show, but nothing of it goes

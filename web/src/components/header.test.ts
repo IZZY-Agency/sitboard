@@ -5,6 +5,7 @@ import Header from './Header.svelte';
 import SpendButton from './SpendButton.svelte';
 import { render } from '../test/render';
 import type { Conn } from '../data/client';
+import { clock } from '../data/time';
 
 // Tests run from web/.
 const SRC = join(process.cwd(), 'src');
@@ -54,15 +55,26 @@ describe('the Live chip', () => {
 
   it('is green with the working green only while connected; the other states keep their colours', () => {
     expect(chip('live').className).toMatch(/\blive on\b/);
-    for (const conn of ['reconnecting', 'unreachable', 'connecting', 'unauthorized', 'outdated'] satisfies Conn[]) {
+    for (const conn of ['reconnecting', 'stopped', 'unreachable', 'connecting', 'unauthorized', 'outdated'] satisfies Conn[]) {
       expect(chip(conn).classList.contains('on'), conn).toBe(false);
     }
     expect(chip('reconnecting').classList.contains('warn')).toBe(true);
+    expect(chip('stopped').classList.contains('warn')).toBe(true);
     expect(chip('connecting').classList.contains('quiet')).toBe(true);
     const on = rules('components/Header.svelte').find((x) => x.sel === '.live.on')!.body;
     expect(decl(on, 'color')).toBe('var(--state-working)');
     expect(decl(on, 'background')).toBe('var(--working-soft)');
     expect(decl(on, 'border-color')).toBe('var(--working-edge)');
+  });
+
+  it('says "Stopped" with the time of the last update once the board is stopped', () => {
+    r?.destroy();
+    const at = new Date('2026-11-23T10:04:00Z').getTime();
+    r = render(Header, { view: 'board', onview: () => {}, agents: 1, projects: 1, conn: 'stopped', generatedAt: '2026-11-23T09:00:00Z', lostAt: at });
+    const t = r.target.querySelector('.live')!.textContent!.trim();
+    expect(t).toBe(`Stopped · last update ${clock(new Date(at).toISOString())}`);
+    expect(t).toMatch(/last update \d\d:\d\d$/);
+    expect(chip('stopped').textContent!.trim()).toBe('Stopped'); // no time known: just the word
   });
 
   it('pulses its dot only while connected, and not at all under reduced motion', () => {

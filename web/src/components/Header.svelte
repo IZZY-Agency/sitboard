@@ -16,6 +16,7 @@
     projects,
     conn,
     generatedAt,
+    lostAt = null,
     notify = null,
     onnotify = () => {},
     catchup,
@@ -26,6 +27,8 @@
     projects: number | null;
     conn: Conn;
     generatedAt: string | null;
+    /** When the board stopped being live (ms since epoch), while a board is shown; null while live. */
+    lostAt?: number | null;
     notify?: SwitchState | null;
     onnotify?: () => void;
     /** The Catch-up button, right after the totals. */
@@ -38,6 +41,8 @@
         return { text: generatedAt ? `Live · ${clock(generatedAt)}` : 'Live', kind: 'on' };
       case 'reconnecting':
         return { text: 'Reconnecting', kind: 'warn' };
+      case 'stopped':
+        return { text: lostAt === null ? 'Stopped' : `Stopped · last update ${clock(new Date(lostAt).toISOString())}`, kind: 'warn' };
       case 'unreachable':
         return { text: 'Not connected', kind: 'warn' };
       case 'connecting':

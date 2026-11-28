@@ -35,8 +35,12 @@ type Result struct {
 // the lookup fails unless all of them answer. It asks only a host whose
 // check (Known, Source.Host) said yes within knownFor, and never checks a
 // login itself: with no such yes it makes no call and answers
-// errNotChecked, so a caller's loop never waits for `glab auth status`. It
-// never answers from an old cache when GitLab cannot be asked.
+// errNotChecked, so a caller's loop never waits for `glab auth status`. The
+// same yes (the same login, the same mount, no rate-limit wait) is asked
+// again as each of its glab processes starts, under the provider's lock
+// (admit): a lookup that finds it gone meanwhile starts no further call and
+// ends with stillAsk's error. It never answers from an old cache when GitLab
+// cannot be asked.
 func (p *Provider) Lookup(ctx context.Context, host, path string, iids []int, branches []string) (Result, error) {
 	if p.off {
 		return Result{}, errNotAsked
@@ -90,6 +94,11 @@ func (p *Provider) Lookup(ctx context.Context, host, path string, iids []int, br
 	if now.Before(until) {
 		return Result{}, errRateLimited
 	}
+	// Each glab process of this lookup starts under p.mu, after the login,
+	// the mount and the backoff are looked at once more (admit): a logout
+	// or a 429 recorded meanwhile by a host check, an issue look or another
+	// lookup keeps the project's path and branches in.
+	ctx = runner.WithGate(ctx, p.admit(ctx, host, st, h.subfolder))
 
 	res := Result{BranchesComplete: true}
 	var all []found
@@ -97,6 +106,8 @@ func (p *Provider) Lookup(ctx context.Context, host, path string, iids []int, br
 	for k := 0; k*maxIIDs < len(nums) || k*maxBranches < len(brs); k++ {
 		pa, err := p.query(ctx, w, chunk(nums, k, maxIIDs), chunk(brs, k, maxBranches))
 		switch {
+		case refusal(err) != nil:
+			return Result{}, refusal(err) // the gate said no: nothing went out
 		case errors.Is(err, errNoProject):
 			p.forget(site, web)
 			return Result{}, fmt.Errorf("gitlab: %w", source.ErrRepoNotFound)
@@ -134,6 +145,9 @@ func (p *Provider) Lookup(ctx context.Context, host, path string, iids []int, br
 	}
 	slices.SortFunc(all, func(x, y found) int { return x.mr.IID - y.mr.IID })
 	mrs, limited, err := p.withClosing(ctx, host, site+"\x00"+h.subfolder, all, st)
+	if refusal(err) != nil {
+		return Result{}, refusal(err)
+	}
 	if err != nil {
 		return p.failed(err, host)
 	}
@@ -351,6 +365,8 @@ func (p *Provider) withClosing(ctx context.Context, host, scope string, found []
 				stop = true
 			case errors.Is(err, errRateLimited):
 				stop, limited = true, true
+			case refusal(err) != nil:
+				return nil, false, err // the login, its yes or the mount went: the lookup ends
 			case ctx.Err() != nil:
 				stop = true
 			case readFailure(err, host).loggedOut():

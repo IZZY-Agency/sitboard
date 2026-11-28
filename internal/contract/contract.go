@@ -41,7 +41,7 @@ import (
 
 // Version of the API. The page stops and shows "reload the page" when a
 // snapshot carries a different version than it was built for.
-const Version = 20
+const Version = 24
 
 // HTTP surface, all under one origin.
 const (
@@ -59,6 +59,8 @@ const (
 	PathForgetGrouping = "/api/v1/grouping/forget"
 	// POST GroupingRequest: set a folder's grouping to auto, always or never.
 	PathGroupingSetting = "/api/v1/grouping/setting"
+	// POST IssuePinRequest: pin or unpin an issue of a repository Issues lists.
+	PathIssuePin = "/api/v1/issues/pin"
 )
 
 // ArtifactURLPattern is the only form of Artifact.URL: a claude.ai artifact
@@ -526,6 +528,16 @@ type Project struct {
 	// while none was counted (no repository, its forge is off, issues are
 	// turned off there, or no answer yet).
 	OpenIssues IssueCount `json:"openIssues"`
+	// IssuesKey is Repo's identity for open issues, as the server folds it
+	// (RepoIssues.Key): two projects with one key share one repository's
+	// issues. The page compares it whole and folds nothing itself. "" when
+	// there is no repository.
+	IssuesKey string `json:"issuesKey"`
+	// IssuesNoAgent counts this project's repository's listed open issues no
+	// agent is on or has looked at (IssuesSummary.NoAgent for one
+	// repository). Absent while the repository's list is not known (the same
+	// cases as OpenIssues.Known false).
+	IssuesNoAgent *int `json:"issuesNoAgent,omitempty"`
 }
 
 // IssueCount is a count that may not be known.
@@ -673,7 +685,22 @@ type Issue struct {
 	// URL matches IssueURLPattern (GitHub) or GitLabIssueURLPattern (GitLab);
 	// "" when none can be built.
 	URL string `json:"url"`
+	// Kind is how the card's session relates to the issue: IssueCloses (a pull
+	// request it opened closes the issue) or IssueLooked (its own gh or glab
+	// command named the issue). Every issue served today is IssueCloses.
+	Kind IssueKind `json:"kind"`
 }
+
+// IssueKind is how a session relates to an issue.
+type IssueKind string
+
+const (
+	IssueCloses IssueKind = "closes" // a pull request the session opened closes it
+	IssueLooked IssueKind = "looked" // the session's own gh or glab command named it
+)
+
+// IssueKinds in a fixed order.
+var IssueKinds = []IssueKind{IssueCloses, IssueLooked}
 
 // Catchup is the unread items, up to 7 days back, newest first by the time
 // each thing happened. An item is read only once a list that showed it was
@@ -782,6 +809,10 @@ type IssuesSummary struct {
 	// absent before the first. The page drops what it holds of a list older
 	// than it at once, and never shows one again.
 	Purged uint64 `json:"purged,omitzero"`
+	// NoAgent counts the listed open issues no agent is on or has looked at
+	// (the page words it "no agent seen"). Absent while no repository of the
+	// board has a known list and when issues are off; 0 only when known.
+	NoAgent *int `json:"noAgent,omitempty"`
 }
 
 // Issues is the open issues of the repositories of the projects on the
@@ -796,6 +827,9 @@ type Issues struct {
 	// new look (IssuesFreshFor, counted on the server's clock from the
 	// latest look's start); 0 once one would.
 	FreshMs int64 `json:"freshMs"`
+	// Unsaved: the pins live in memory only (--no-state, or a state file that
+	// could not be written at start), so they are gone at the next start.
+	Unsaved bool `json:"unsaved"`
 }
 
 // RepoIssuesState says what the forge answered about one repository.
@@ -814,12 +848,20 @@ var RepoIssuesStates = []RepoIssuesState{RepoIssuesPending, RepoIssuesOK, RepoIs
 // RepoIssues is one repository's open issues. Forge, Host and Repo are those
 // of the Project that has it.
 type RepoIssues struct {
-	Forge  Forge           `json:"forge"`
-	Host   string          `json:"host"`
-	Repo   string          `json:"repo"`
+	Forge Forge  `json:"forge"`
+	Host  string `json:"host"`
+	Repo  string `json:"repo"`
+	// Key is the repository's identity for open issues (Project.IssuesKey):
+	// GitHub ignores case in owner and name; on GitLab the site and the
+	// mount count exactly and only the path under the mount ignores case.
+	Key    string          `json:"key"`
 	State  RepoIssuesState `json:"state"`
 	Open   int             `json:"open"`   // every open issue, also those not in Issues
 	Issues []OpenIssue     `json:"issues"` // the most recently updated first, at most 30
+	// Pinned is the pinned issues outside Issues, most recently pinned
+	// first, each with its State. Pinned rows inside Issues are marked there
+	// (OpenIssue.Pinned) and lead it.
+	Pinned []OpenIssue `json:"pinned"`
 }
 
 // OpenIssue is one open issue.
@@ -834,6 +876,31 @@ type OpenIssue struct {
 	MilestoneDue time.Time `json:"milestoneDue,omitzero"`
 	Labels       []string  `json:"labels"` // label names, at most 5
 	UpdatedAt    time.Time `json:"updatedAt,omitzero"`
+	// Agents are the cards whose sessions are on the issue or looked at it.
+	Agents []IssueAgent `json:"agents"`
+	// Pinned: the owner pinned this issue.
+	Pinned bool `json:"pinned"`
+	// State is set only on a RepoIssues.Pinned row: "open" or "closed" as the
+	// forge last reported it, or absent when it was not asked (the page words
+	// it "pinned · not in the listed 30"; number and address only).
+	State OpenIssueState `json:"state,omitempty"`
+}
+
+// OpenIssueState is the state of a pinned issue the forge reported.
+type OpenIssueState string
+
+const (
+	OpenIssueOpen   OpenIssueState = "open"
+	OpenIssueClosed OpenIssueState = "closed"
+)
+
+// OpenIssueStates in a fixed order.
+var OpenIssueStates = []OpenIssueState{OpenIssueOpen, OpenIssueClosed}
+
+// IssueAgent is one card on an issue. The page takes the name from the card.
+type IssueAgent struct {
+	CardID string    `json:"cardId"`
+	Kind   IssueKind `json:"kind"`
 }
 
 // HeldCount is how many merged branches, or sessions that could be closed,
@@ -880,6 +947,19 @@ type CardRequest struct {
 // ignored; the server resolves the folder from the project id itself.
 type ProjectRequest struct {
 	ProjectID string `json:"projectId"`
+}
+
+// IssuePinRequest is the body of POST PathIssuePin: Forge, Host and Repo as
+// a RepoIssues of Issues names the repository, Number from 1 to 2^31-1, and
+// Pinned true to pin, false to unpin (it must be given: missing or null is
+// refused). Setting what is set already changes nothing. Any other field is
+// ignored.
+type IssuePinRequest struct {
+	Forge  Forge  `json:"forge"`
+	Host   string `json:"host"`
+	Repo   string `json:"repo"`
+	Number int    `json:"number"`
+	Pinned bool   `json:"pinned"`
 }
 
 // GroupingRequest is the body of POST PathGroupingSetting. ProjectID is a

@@ -2,7 +2,7 @@
 // you (for the flash), and the result of the last action.
 
 import { SvelteMap } from 'svelte/reactivity';
-import type { Card, GroupingMode, Snapshot } from '../contract.gen';
+import type { Card, GroupingMode, IssuePinRequest, Snapshot } from '../contract.gen';
 import type { Actions } from './actions';
 import type { Conn, Feed } from './client';
 import { applySeen, canJump, needsYouArrivals } from './derive';
@@ -11,7 +11,7 @@ import { clean } from './text';
 
 export type Notice =
   | { kind: 'copy'; cardId: string; name: string; folder: string; why: 'no_agterm' | 'no_terminal' }
-  | { kind: 'failed'; what: string; message: string; retry?: () => void }; // no retry when it would fail the same way
+  | { kind: 'failed'; what: string; message: string; retry?: () => void; issue?: string }; // no retry when it would fail the same way; issue: the pin's issue (the Issues panel shows it)
 
 /** How long an arrival in Needs you can still flash. A card that mounts later does not. */
 export const FLASH_TTL = 1000;
@@ -90,6 +90,8 @@ export class BoardState {
   #timers = new Set<ReturnType<typeof setTimeout>>();
   #forgetting = new Map<string, Promise<boolean>>(); // project id -> the forget request that is out
   #setting = new Map<string, Promise<boolean>>(); // "<project id> <mode>" -> the setting request that is out
+  #pinning = new Map<string, Promise<boolean>>(); // issue -> the last pin write queued for it
+  #pinLatest = new Map<string, IssuePinRequest>(); // issue -> the latest press, the only one sent
   // A setting the server accepted, to be said once a snapshot shows what the
   // server ended up with (another tab may have set the folder meanwhile).
   #toSay: { id: string; name: string; before: GroupingMode } | null = null;
@@ -316,6 +318,45 @@ export class BoardState {
         what: WHAT[mode](name),
         message: r.kind === 'failed' ? r.message : 'sitboard refused it',
         retry: r.kind === 'failed' && r.final ? undefined : () => void this.setFolderGrouping(project, mode),
+      };
+    return false;
+  }
+
+  /**
+   * Pins or unpins an issue; true when the server accepted this intent. One
+   * write per issue at a time: a press while one is out waits for it, and
+   * only the latest press is sent then; one a newer press replaced is not
+   * sent and answers false. A refusal of the latest press says why
+   * (ctx.retry presses it again); one of a replaced press says nothing.
+   */
+  pinIssue(req: IssuePinRequest, ctx: { issue?: string; retry?: () => void } = {}): Promise<boolean> {
+    const k = `${req.forge}|${req.host}|${req.repo}#${req.number}`;
+    this.#pinLatest.set(k, req);
+    const latest = () => this.#pinLatest.get(k) === req;
+    const prev = this.#pinning.get(k) ?? Promise.resolve();
+    const p = prev.then(() => (latest() ? this.#pin(req, latest, ctx) : false));
+    this.#pinning.set(k, p);
+    void p.finally(() => {
+      if (this.#pinning.get(k) === p) this.#pinning.delete(k);
+    });
+    return p;
+  }
+
+  async #pin(req: IssuePinRequest, latest: () => boolean, ctx: { issue?: string; retry?: () => void }): Promise<boolean> {
+    const what = `${req.pinned ? 'Pin' : 'Unpin'} issue #${req.number}`;
+    const r = await this.#actions().pinIssue(req);
+    if (r.ok) {
+      if (this.notice?.kind === 'failed' && /^(Pin|Unpin) issue /.test(this.notice.what)) this.notice = null;
+      return true;
+    }
+    if (r.kind === 'unauthorized') this.#lostKey();
+    else if (latest())
+      this.notice = {
+        kind: 'failed',
+        what,
+        message: r.kind === 'failed' ? r.message : 'sitboard refused it',
+        ...(ctx.issue ? { issue: ctx.issue } : {}),
+        retry: r.kind === 'failed' && r.final ? undefined : () => (latest() ? (ctx.retry ?? (() => void this.pinIssue(req, ctx)))() : undefined),
       };
     return false;
   }

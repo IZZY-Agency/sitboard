@@ -94,6 +94,11 @@ fi
 # Allowed forms.
 run_case "home/dev allowed"   0 "$(tree_with "path $home_dev")" "$cfg_with_list" ""
 run_case "example.com and noreply allowed" 0 "$(tree_with "$ok_email_a $ok_email_b")" "$cfg_with_list" ""
+# The reserved documentation domains (RFC 2606) pass with any subdomain; a
+# look-alike domain, or one that only starts with example.com, does not.
+run_case "example domains and subdomains allowed" 0 "$(tree_with "git""@gitlab.example.com a""@sub.example.org b""@example.net")" "$cfg_with_list" ""
+run_case "notexample.com is flagged" 1 "$(tree_with "mail a""@notexample.com")" "$cfg_with_list" ""
+run_case "example.com.evil.io is flagged" 1 "$(tree_with "mail a""@example.com.evil.io")" "$cfg_with_list" ""
 
 # 10. Deny-list words match as case-insensitive substrings: inside camelCase,
 # snake_case or a longer word they are still caught.

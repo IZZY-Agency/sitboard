@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -41,6 +43,10 @@ type fakeBoard struct {
 	forgetErr error                      // what ForgetGrouping returns for a grouping
 	set       []contract.GroupingRequest // what SetGrouping accepted
 	setErr    error                      // what SetGrouping returns for a grouping
+	pinRepos  []model.ForgeRepo          // repositories SetIssuePin knows
+	pins      map[string]bool            // "forge|host|repo#number" -> pinned, as SetIssuePin left it
+	pinCalls  int                        // SetIssuePin calls that reached a known repository
+	pinErr    error                      // what SetIssuePin returns for a known repository
 }
 
 var _ app.Board = (*fakeBoard)(nil)
@@ -141,6 +147,28 @@ func (f *fakeBoard) ForgetGrouping(id string) error {
 		return f.forgetErr
 	}
 	f.forgotten = append(f.forgotten, id)
+	return nil
+}
+
+func (f *fakeBoard) SetIssuePin(repo model.ForgeRepo, number int, pinned bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !slices.Contains(f.pinRepos, repo) {
+		return app.ErrUnknownRepo
+	}
+	f.pinCalls++
+	if f.pinErr != nil {
+		return f.pinErr
+	}
+	if f.pins == nil {
+		f.pins = map[string]bool{}
+	}
+	key := string(repo.Forge) + "|" + repo.Host + "|" + repo.Path + "#" + strconv.Itoa(number)
+	if pinned {
+		f.pins[key] = true
+	} else {
+		delete(f.pins, key)
+	}
 	return nil
 }
 

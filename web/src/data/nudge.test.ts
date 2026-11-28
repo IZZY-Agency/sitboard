@@ -43,6 +43,7 @@ describe('tabSignal', () => {
   it('gives no number while not live, in the header’s words: the board cannot say', () => {
     const cards = [blocked()];
     expect(tabSignal('reconnecting', cards)).toEqual({ kind: 'lost', word: 'reconnecting' });
+    expect(tabSignal('stopped', cards)).toEqual({ kind: 'lost', word: 'stopped' }); // no count of old states
     expect(tabSignal('unreachable', null)).toEqual({ kind: 'lost', word: 'not connected' });
     expect(tabSignal('unauthorized', cards)).toEqual({ kind: 'lost', word: 'stopped' });
     expect(tabSignal('outdated', cards)).toEqual({ kind: 'lost', word: 'stopped' });

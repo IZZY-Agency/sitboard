@@ -21,6 +21,7 @@ const mr = (over: Partial<PullRequest> = {}): PullRequest => ({
 });
 const glIssue = (n: number, over: Partial<Issue> = {}): Issue => ({
   forge: 'gitlab',
+  kind: 'closes',
   host: HOST,
   repo: PATH,
   number: n,
@@ -190,7 +191,7 @@ describe('forge-aware words and keys', () => {
   });
 
   it('counts the same issue number on two forges as two issues', () => {
-    const gh: Issue = { forge: 'github', host: 'github.com', repo: 'example-group/example-project', number: 3, url: '' };
+    const gh: Issue = { forge: 'github', kind: 'closes' as const, host: 'github.com', repo: 'example-group/example-project', number: 3, url: '' };
     const gl = glIssue(3, { repo: 'example-group/example-project', url: '' });
     expect(closesParts([gh, gl], '')?.items).toHaveLength(2);
   });
@@ -200,7 +201,7 @@ describe('forge-aware words and keys', () => {
     const a = glIssue(3);
     const b = glIssue(3, { host: OTHER, url: `https://${OTHER}/${PATH}/-/issues/3` });
     const SHORT = 'example-group/example-project';
-    const gh: Issue = { forge: 'github', host: 'github.com', repo: SHORT, number: 3, url: `https://github.com/${SHORT}/issues/3` };
+    const gh: Issue = { forge: 'github', kind: 'closes' as const, host: 'github.com', repo: SHORT, number: 3, url: `https://github.com/${SHORT}/issues/3` };
     const glShort = glIssue(3, { repo: SHORT, url: `https://${HOST}/${SHORT}/-/issues/3` });
     const hosts = [HOST, OTHER];
     // Neither is the card's own: each label carries its host, and each link is its own.

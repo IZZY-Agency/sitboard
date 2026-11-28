@@ -81,6 +81,7 @@ func (b *Board) noteHostLocked(host string, err error) hostDecision {
 	switch {
 	case err == nil:
 		d.ok, d.why, d.sub = true, nil, b.opts.GitLab.Subfolder(host) // the check just read it
+		delete(b.issuesHold, model.GitLabHostname(host))              // a check made since the refusal says yes: issues may be asked again
 	case errors.Is(err, source.ErrNotLoggedIn):
 		d.ok, d.why, d.sub = false, source.ErrNotLoggedIn, ""
 	default:
@@ -238,14 +239,19 @@ func (b *Board) noteGitLabDemandLocked() {
 // the host's subfolder in front of its path, as the web addresses carry it.
 // Callers hold b.mu.
 func (b *Board) shownRemoteLocked(repo model.Repo) model.ForgeRepo {
-	r := repo.Remote
+	return b.shownAddrLocked(repo.Remote, repo.RemoteBare)
+}
+
+// shownAddrLocked is shownRemoteLocked for one address: the repository r it
+// names, bare when it is an ssh address with no web path. Callers hold b.mu.
+func (b *Board) shownAddrLocked(r model.ForgeRepo, bare bool) model.ForgeRepo {
 	if r.Forge != model.ForgeGitLab {
 		return r
 	}
 	if b.gitlabOffLocked() || !b.glHosts[r.Host].ok {
 		return model.ForgeRepo{}
 	}
-	if sub := b.glHosts[r.Host].sub; repo.RemoteBare && sub != "" { // the mount the allowlist holds
+	if sub := b.glHosts[r.Host].sub; bare && sub != "" { // the mount the allowlist holds
 		r.Path = sub + "/" + r.Path
 	}
 	return r

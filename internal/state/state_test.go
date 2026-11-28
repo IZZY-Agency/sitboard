@@ -157,7 +157,7 @@ func TestConcurrentUse(t *testing.T) {
 // them on the next write, so an older build refuses it.
 func TestNewerFileVersionIsRefused(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "state.json")
-	data := `{"version": 4, "seen": {"claude:1234": "2026-11-17T10:00:00Z"}, "pins": ["x"]}`
+	data := `{"version": 5, "seen": {"claude:1234": "2026-11-17T10:00:00Z"}, "later": ["x"]}`
 	if err := os.WriteFile(file, []byte(data), 0o600); err != nil {
 		t.Fatal(err)
 	}

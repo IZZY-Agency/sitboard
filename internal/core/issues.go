@@ -4,8 +4,10 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"maps"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -21,21 +23,45 @@ import (
 // batches per look, outside b.mu.
 const (
 	issuesEvery = 10 * time.Minute
-	// issuesTimeout bounds one whole look; each gh or glab call has its own.
+	// issuesTimeout bounds one batch (GitHub's, or one GitLab host's); each
+	// gh or glab call has its own.
 	issuesTimeout = 2 * time.Minute
+	// issuesRefusedHold: a GitLab host that refused glab's token is not asked
+	// about issues for this long, unless a login check says yes before.
+	issuesRefusedHold = 5 * time.Minute
 	// maxIssueRepos caps the repositories one look asks about (GitHub: five
-	// calls of 20). With more on the board, each look asks those asked
-	// longest ago (never first), so every repository is answered in turn.
+	// calls of 20). With more on the board, each look asks those picked
+	// longest ago (never first), so every repository is asked in turn.
 	maxIssueRepos = 100
 	// maxLabelText caps a label name and a milestone title on the page.
 	maxLabelText = 50
 )
 
+// issueBatchSlots is how many batches of a look run at once.
+var issueBatchSlots = 3
+
 // issueKey is a repository's identity for issues: GitHub ignores case in
-// owner and name, so "Org/Repo" and "org/repo" are one repository.
-func issueKey(r model.ForgeRepo) model.ForgeRepo {
-	if r.Forge == model.ForgeGitHub {
+// owner and name, so "Org/Repo" and "org/repo" are one repository. A GitLab
+// project is its site (host with web port), the mount exactly as the host's
+// login check gave it (GitLab under a subfolder answers only that spelling,
+// and the adapter checks the mount of every answer exactly), and the path
+// under the mount, whose case GitLab ignores: two checkouts of one project
+// that differ only in that case are one project, counted once, while
+// "/tools/group/app" and "/Tools/group/app" are two. Callers hold b.mu.
+func (b *Board) issueKey(r model.ForgeRepo) model.ForgeRepo {
+	switch r.Forge {
+	case model.ForgeGitHub:
 		r.Host, r.Path = strings.ToLower(r.Host), strings.ToLower(r.Path)
+	case model.ForgeGitLab:
+		if sub := b.glHosts[r.Host].sub; sub != "" {
+			// A path outside the mount (another spelling of it) stays as it
+			// is: it is a project of its own, which the adapter refuses.
+			if rest, ok := strings.CutPrefix(r.Path, sub+"/"); ok {
+				r.Path = sub + "/" + strings.ToLower(rest)
+			}
+			break
+		}
+		r.Path = strings.ToLower(r.Path)
 	}
 	return r
 }
@@ -60,6 +86,9 @@ func (b *Board) issueListerLocked(repo model.ForgeRepo) source.IssueLister {
 		if b.gitlabOffLocked() || !b.glHosts[repo.Host].ok {
 			return nil
 		}
+		if until, held := b.issuesHold[model.GitLabHostname(repo.Host)]; held && b.now().Before(until) {
+			return nil // GitLab refused glab's token: left alone for a while
+		}
 	default:
 		return nil
 	}
@@ -83,7 +112,7 @@ func (b *Board) issueReposOfLocked(remotes []model.ForgeRepo) []model.ForgeRepo 
 		if pagePath(r.Path) == "" || b.issueListerLocked(r) == nil {
 			continue
 		}
-		k := issueKey(r)
+		k := b.issueKey(r)
 		if have, ok := set[k]; !ok || r.Key() < have.Key() {
 			set[k] = r // one spelling, the same every time
 		}
@@ -92,7 +121,7 @@ func (b *Board) issueReposOfLocked(remotes []model.ForgeRepo) []model.ForgeRepo 
 	for _, r := range set {
 		repos = append(repos, r)
 	}
-	slices.SortFunc(repos, func(x, y model.ForgeRepo) int { return cmp.Compare(issueKey(x).Key(), issueKey(y).Key()) })
+	slices.SortFunc(repos, func(x, y model.ForgeRepo) int { return cmp.Compare(b.issueKey(x).Key(), b.issueKey(y).Key()) })
 	return repos
 }
 
@@ -119,7 +148,7 @@ func (b *Board) issuesDueLocked(repos []model.ForgeRepo, now time.Time) bool {
 		return true
 	}
 	for _, r := range repos {
-		if _, ok := b.issuesTried[issueKey(r)]; !ok {
+		if _, ok := b.issuesTried[b.issueKey(r)]; !ok {
 			return true
 		}
 	}
@@ -132,7 +161,7 @@ func (b *Board) issuesDueLocked(repos []model.ForgeRepo, now time.Time) bool {
 func (b *Board) dropIssuesLocked(repos []model.ForgeRepo) bool {
 	keep := map[model.ForgeRepo]bool{}
 	for _, r := range repos {
-		keep[issueKey(r)] = true
+		keep[b.issueKey(r)] = true
 	}
 	gone := false
 	for k := range b.issues {
@@ -144,6 +173,16 @@ func (b *Board) dropIssuesLocked(repos []model.ForgeRepo) bool {
 	for k := range b.issuesTried {
 		if !keep[k] {
 			delete(b.issuesTried, k)
+		}
+	}
+	for k := range b.issuesPicked {
+		if !keep[k] {
+			delete(b.issuesPicked, k)
+		}
+	}
+	for k := range b.issuesReadAt {
+		if _, ok := b.issues[k]; !ok {
+			delete(b.issuesReadAt, k)
 		}
 	}
 	return gone
@@ -166,6 +205,12 @@ func (b *Board) clearIssuesOffLocked() {
 	}
 	clear(b.issues)
 	clear(b.issuesTried)
+	clear(b.issuesPicked)
+	clear(b.issuesReadAt)
+	// What a look under way brings back is of before: GitHub's generation
+	// moves here; GitLab's moved when it went off (setGitLabBaseLocked), and
+	// with no GitLab lister no GitLab batch runs.
+	b.ghGen++
 	b.issuesDone, b.issuesAt, b.issuesListAt = false, time.Time{}, time.Time{}
 	b.issuesRev++
 	b.issuesPurged = b.issuesRev
@@ -205,142 +250,387 @@ func (b *Board) startIssuesLocked(ctx context.Context, now time.Time) {
 	if !b.issuesDueLocked(repos, now) {
 		return
 	}
-	// Those asked longest ago first; never asked before all.
+	// Those picked longest ago first; never picked before all. The order is
+	// by when each was picked, not by whether its answer counted: a look
+	// whose answer is dropped (its generation moved) leaves its
+	// repositories due again (issuesTried), but behind those it left out,
+	// so no repository past the cap waits forever.
 	slices.SortStableFunc(repos, func(x, y model.ForgeRepo) int {
-		return b.issuesTried[issueKey(x)].Compare(b.issuesTried[issueKey(y)])
+		return b.issuesPicked[b.issueKey(x)].Compare(b.issuesPicked[b.issueKey(y)])
 	})
 	if len(repos) > maxIssueRepos {
 		repos = repos[:maxIssueRepos]
 	}
-	byLister := map[source.IssueLister][]model.ForgeRepo{}
-	var order []source.IssueLister
-	stamps := map[string]hostStamp{} // GitLab host -> its stamp now
+	// One call per lister, and on GitLab per host: a host whose login went
+	// is denied alone (noteHostLocked), as a merge request lookup that
+	// finds it gone does, and the other hosts keep theirs. Each batch holds
+	// its answer against its generation when the look started (issueGen).
+	var order []issueBatch
+	at := map[issueBatch]int{}
+	var byBatch [][]model.ForgeRepo
 	for _, r := range repos {
-		l := b.issueListerLocked(r)
-		if _, ok := byLister[l]; !ok {
-			order = append(order, l)
-		}
-		byLister[l] = append(byLister[l], r)
+		k := issueBatch{l: b.issueListerLocked(r), gen: b.issueGenLocked(r)}
 		if r.Forge == model.ForgeGitLab {
-			stamps[r.Host] = b.hostStampLocked(r.Host)
+			k.host = r.Host
 		}
+		i, ok := at[k]
+		if !ok {
+			i = len(order)
+			at[k] = i
+			order = append(order, k)
+			byBatch = append(byBatch, nil)
+		}
+		byBatch[i] = append(byBatch[i], r)
 	}
 	b.issuesAt, b.issuesWant, b.issuesBusy = now, false, true
-	// A purge from elsewhere during the look (a repository a pull request
-	// lookup found gone, a host denied, issues switched off and on) makes
-	// everything it brings back older than the purge.
-	cut := b.issuesPurged
+	denied := map[model.ForgeRepo]uint64{} // each repository's denial counter as the look starts; read only from here
 	for _, r := range repos {
-		b.issuesTried[issueKey(r)] = now
-	}
-	// current: repo may still be asked about by l, and nothing about its
-	// GitLab host changed since the look started. Callers hold b.mu.
-	current := func(r model.ForgeRepo, l source.IssueLister) bool {
-		if b.issueListerLocked(r) != l {
-			return false
-		}
-		return r.Forge != model.ForgeGitLab || b.issueHostCurrentLocked(ctx, r.Host, stamps[r.Host])
+		b.issuesTried[b.issueKey(r)] = now
+		b.issuesPicked[b.issueKey(r)] = now
+		denied[b.issueKey(r)] = b.issuesDenied[b.issueKey(r)]
 	}
 	b.resolving.Add(1)
 	go func() {
 		defer b.resolving.Done()
-		lctx, cancel := context.WithTimeout(ctx, issuesTimeout)
-		type answered struct {
-			ri model.RepoIssues
-			l  source.IssueLister
+		// Each batch is applied the moment it returns: a login found gone
+		// hides its rows at once, and one host that does not answer holds up
+		// no other. At most issueBatchSlots run at a time.
+		var wg sync.WaitGroup
+		slots := make(chan struct{}, issueBatchSlots)
+		for i, k := range order {
+			slots <- struct{}{}
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				defer func() { <-slots }()
+				b.runIssueBatch(ctx, k, byBatch[i], denied)
+			}()
 		}
-		var got []answered
-		var lost []source.IssueLister // listers that lost their login
-		for _, l := range order {
-			b.mu.Lock()
-			var ask []model.ForgeRepo
-			for _, r := range byLister[l] {
-				if current(r, l) {
-					ask = append(ask, r)
-				}
-			}
-			b.mu.Unlock()
-			if len(ask) == 0 {
-				continue
-			}
-			ans, err := l.OpenIssues(lctx, ask)
-			switch {
-			case errors.Is(err, source.ErrNotLoggedIn):
-				// Whatever came with the error is of a login that is gone.
-				lost = append(lost, l)
-				continue
-			case err != nil && !errors.Is(err, source.ErrRateLimited) && lctx.Err() == nil:
-				logf("could not list open issues: %v", err)
-			}
-			b.mu.Lock()
-			for _, ri := range ans {
-				// Dropped here already, so no title of a host that went
-				// waits in memory for the listers after this one; the
-				// final check below decides alone what is listed.
-				if slices.Contains(ask, ri.Repo) && current(ri.Repo, l) {
-					got = append(got, answered{ri, l})
-				}
-			}
-			b.mu.Unlock()
-		}
-		cancel()
+		wg.Wait()
 		b.mu.Lock()
 		defer b.mu.Unlock()
 		b.issuesBusy = false
 		if b.closed || ctx.Err() != nil {
 			return
 		}
-		purged := b.dropIssuesLocked(b.issueReposLocked())
-		// A lost login sees none of what it listed before, asked this time or not.
-		for k, ri := range b.issues {
-			if slices.Contains(lost, b.opts.Issues[ri.Repo.Forge]) {
-				delete(b.issues, k)
-				purged = true
-			}
-		}
-		changed := false
-		still := map[model.ForgeRepo]bool{}
-		for _, r := range b.issueReposLocked() {
-			still[issueKey(r)] = true
-		}
-		sure := map[source.IssueLister]bool{} // listers with rows listed: their login works
-		if b.issuesPurged != cut {
-			got = nil
-			b.issuesWant = true // asked again once the minute is over
-		}
-		for _, a := range got {
-			// Its project may have left during the look, or its host been
-			// denied or changed since the answer was staged.
-			if still[issueKey(a.ri.Repo)] && current(a.ri.Repo, a.l) {
-				k := issueKey(a.ri.Repo)
-				// Rows this login can no longer see (gone, or no longer
-				// visible to it) leave like any other drop: a purge.
-				if old, ok := b.issues[k]; ok && old.State == model.RepoIssuesOK && a.ri.State != model.RepoIssuesOK {
-					purged = true
-				}
-				b.issues[k] = a.ri
-				changed = true
-				sure[a.l] = true
-			}
-		}
 		b.issuesDone = true
-		switch {
-		case purged:
-			b.issuesPurgedLocked(b.now())
-		case changed:
-			b.issuesChangedLocked(b.now())
-		}
-		if gh := b.opts.Issues[model.ForgeGitHub]; gh != nil {
-			switch {
-			case slices.Contains(lost, gh):
-				b.ghLogin = loginLost
-			case sure[gh]:
-				b.ghLogin = loginWorks
-			}
-			b.refreshGitHubLineLocked()
-		}
 		b.rebuildLocked()
 	}()
+}
+
+// issueGen is the one thing an issue answer is held against: GitHub's
+// generation (b.ghGen), or the GitLab host name's stamp (hostStampLocked:
+// every web port and mount of a name shares one glab login). A login event
+// moves it: a refused token, a logout, no logins anywhere, another account,
+// a mount that changed, issues or GitLab switched off. An answer of an older
+// generation is dropped whole. A repository found gone moves only its own
+// counter (deniedLocked), which drops only its answer.
+type issueGen struct {
+	gh uint64
+	gl hostStamp
+}
+
+// issueGenLocked is repo's generation now. Callers hold b.mu.
+func (b *Board) issueGenLocked(repo model.ForgeRepo) issueGen {
+	if repo.Forge == model.ForgeGitLab {
+		return issueGen{gl: b.hostStampLocked(repo.Host)}
+	}
+	return issueGen{gh: b.ghGen}
+}
+
+// deniedLocked moves repo's own denial counter (by issueKey): the answer
+// for repo of a batch sent before is dropped, and repo left not asked, while
+// the other repositories of the batch keep theirs. Every authoritative
+// denial moves it, a repeated one too, rows listed or not. Login events
+// (a refused token, a logout, no logins, another account) move the host
+// name's or GitHub's generation instead (issueGen). Callers hold b.mu.
+func (b *Board) deniedLocked(repo model.ForgeRepo) {
+	k := b.issueKey(repo)
+	if _, known := b.issuesDenied[k]; !known && len(b.issuesDenied) >= 4096 {
+		// A cleared count could meet an old one again: every answer under
+		// way is dropped instead.
+		clear(b.issuesDenied)
+		b.ghGen++
+		b.glEpoch++
+	}
+	b.issuesDenied[k]++
+}
+
+// deniedSinceLocked: some denial of repo was recorded since its counter
+// read was at. Callers hold b.mu.
+func (b *Board) deniedSinceLocked(repo model.ForgeRepo, at map[model.ForgeRepo]uint64) bool {
+	k := b.issueKey(repo)
+	return b.issuesDenied[k] != at[k]
+}
+
+// issueBatch is one call of a look: one lister, on GitLab one host (site),
+// with the generation it is held against.
+type issueBatch struct {
+	l    source.IssueLister
+	host string // the GitLab host (site) of every repository; "" on GitHub
+	gen  issueGen
+}
+
+// currentLocked: k's answer may still be applied: the board still runs, its
+// generation did not move and, on GitLab, the host may still be asked.
+// Callers hold b.mu.
+func (k issueBatch) currentLocked(ctx context.Context, b *Board, repo model.ForgeRepo) bool {
+	if ctx.Err() != nil || b.closed || b.issueGenLocked(repo) != k.gen {
+		return false
+	}
+	return k.host == "" || !b.gitlabOffLocked() && b.glHosts[k.host].ok
+}
+
+// runIssueBatch asks k's lister about repos under its own time and applies
+// the answer under b.mu at once. An answer whose generation moved meanwhile
+// is dropped whole, and its repositories count as not asked; a repository
+// found gone since the look started (its counter moved from denied) loses
+// only its own answer. Runs with no lock held.
+func (b *Board) runIssueBatch(ctx context.Context, k issueBatch, repos []model.ForgeRepo, denied map[model.ForgeRepo]uint64) {
+	stale := func() { // Callers hold b.mu.
+		for _, r := range repos {
+			delete(b.issuesTried, b.issueKey(r))
+		}
+	}
+	b.mu.Lock()
+	var ask []model.ForgeRepo
+	if k.currentLocked(ctx, b, repos[0]) {
+		// A batch may have waited for a slot: only the repositories still
+		// on the board go out; one whose project left is not sent, and
+		// stays not asked.
+		still := map[model.ForgeRepo]bool{}
+		for _, r := range b.issueReposLocked() {
+			still[b.issueKey(r)] = true
+		}
+		for _, r := range repos {
+			switch {
+			case !still[b.issueKey(r)]:
+				delete(b.issuesTried, b.issueKey(r))
+			case b.issueListerLocked(r) == k.l:
+				ask = append(ask, r)
+			}
+		}
+	} else {
+		stale()
+	}
+	look := b.pinsToAskLocked(ask) // the pins as this batch begins (pinlookup.go)
+	b.mu.Unlock()
+	if len(ask) == 0 {
+		return
+	}
+	lctx, cancel := context.WithTimeout(ctx, issuesTimeout)
+	ans, err := k.l.OpenIssues(lctx, ask, look.asked)
+	timedOut := lctx.Err() != nil
+	cancel()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed || ctx.Err() != nil {
+		return
+	}
+	current := k.currentLocked(ctx, b, ask[0])
+	kick := false
+	// A repository found gone while the call was out (a merge request
+	// lookup's denial) loses its answer alone, and is left not asked; the
+	// others of the batch keep theirs.
+	ans = slices.DeleteFunc(ans, func(ri model.RepoIssues) bool { return b.deniedSinceLocked(ri.Repo, denied) })
+	for _, r := range ask {
+		if b.deniedSinceLocked(r, denied) {
+			delete(b.issuesTried, b.issueKey(r))
+		}
+	}
+	switch {
+	case k.host != "" && errors.Is(err, source.ErrNoLogins):
+		// glab is logged in to no host: whatever the generation, every host
+		// is denied and loses what it listed, and nothing under way about
+		// any host counts (noteHostLocked).
+		if !b.gitlabOffLocked() {
+			b.noteHostLocked(k.host, err)
+			b.refreshGitLabLineLocked()
+		}
+	case k.host != "" && errors.Is(err, source.ErrLoginChanged):
+		// glab answered for another account than before: a new login,
+		// whatever the generation. What the old one brought from every site
+		// of the host name goes, nothing under way about it counts, and its
+		// sites are checked again at once.
+		if !b.gitlabOffLocked() {
+			b.loginChangedLocked(k.host)
+			kick = true
+		}
+	case k.host != "" && (errors.Is(err, source.ErrTokenRefused) || errors.Is(err, source.ErrNotLoggedIn) && !current):
+		// GitLab refused the token, or said the login is gone in an older
+		// generation. Whatever the login check that follows finds (it may
+		// time out), what was listed from every site of the host name is
+		// hidden now, a check under way is void, and the name is left alone
+		// for issuesRefusedHold: no issue call, and no check forced by one,
+		// before. Only a check made from now releases it.
+		if !b.gitlabOffLocked() {
+			b.refusedLocked(k.host)
+			kick = true
+		}
+	case errors.Is(err, source.ErrNotLoggedIn) && k.host != "":
+		// Whatever came with the error is of a login that is gone: the host
+		// name is denied until its next check says otherwise, and what was
+		// listed from it goes (forgetHostLocked), on the page at once.
+		b.noteHostLocked(k.host, err)
+		b.refreshGitLabLineLocked()
+	case errors.Is(err, source.ErrNotLoggedIn):
+		// GitHub's login is gone: it sees none of what it listed before,
+		// asked this time or not, whatever the generation.
+		// A purge only when it drops a kept answer: once they are gone, a
+		// look logged out again changes nothing served.
+		b.ghGen++
+		dropped := false
+		for key, ri := range b.issues {
+			if b.opts.Issues[ri.Repo.Forge] == k.l {
+				delete(b.issues, key)
+				delete(b.issuesReadAt, key)
+				dropped = true
+			}
+		}
+		if dropped {
+			b.issuesPurgedLocked(b.now())
+		}
+		b.issuesDone = true
+		if gh := b.opts.Issues[model.ForgeGitHub]; gh == k.l {
+			b.ghLogin = loginLost
+			b.refreshGitHubLineLocked()
+		}
+	case !current:
+		stale()
+	case errors.Is(err, source.ErrNotChecked) && k.host != "":
+		// glab made no call (the host's yes ran out), maybe after earlier
+		// chunks were answered: what came is of this generation and is
+		// applied; the repositories left unanswered are not counted as
+		// asked, and the host is checked again at once; once that check
+		// passes, a look asks them (the minute still holds).
+		b.applyIssueAnswersLocked(k.l, ask, ans, look)
+		answered := map[model.ForgeRepo]bool{}
+		for _, ri := range ans {
+			answered[ri.Repo] = true
+		}
+		for _, r := range repos {
+			if !answered[r] {
+				delete(b.issuesTried, b.issueKey(r))
+			}
+		}
+		if d, ok := b.glHosts[k.host]; ok {
+			d.at = time.Time{}
+			b.glHosts[k.host] = d
+		}
+		kick = true
+	default:
+		if err != nil && !errors.Is(err, source.ErrRateLimited) && !timedOut {
+			logf("could not list open issues: %v", err)
+		}
+		b.applyIssueAnswersLocked(k.l, ask, ans, look)
+	}
+	b.rebuildLocked()
+	if kick {
+		b.kickRefresh()
+	}
+}
+
+// refusedLocked: GitLab refused glab's token at host. Every site of its host
+// name loses its listed issues at once (glab keeps one login per name), the
+// name's generation moves, the name is held for issuesRefusedHold, and each
+// of its sites is checked once at once. Callers hold b.mu.
+func (b *Board) refusedLocked(host string) {
+	name := model.GitLabHostname(host)
+	b.bumpHostLocked(name)
+	b.issuesHold[name] = b.now().Add(issuesRefusedHold)
+	b.hideHostIssuesLocked(name)
+	for h, d := range b.glHosts {
+		if model.GitLabHostname(h) == name {
+			d.at = time.Time{} // one login check at once
+			b.glHosts[h] = d
+		}
+	}
+	b.refreshGitLabLineLocked()
+}
+
+// loginChangedLocked: glab's login for GitLab host's name is another
+// account now. Every site of the name loses what the board kept from it
+// (forgetHostLocked: merge requests and issues, as a purge), the name's
+// generation moves, and each site is checked once at once. Unlike a
+// refusal, the name is not held: the new login may be asked as soon as its
+// check says yes. Callers hold b.mu.
+func (b *Board) loginChangedLocked(host string) {
+	name := model.GitLabHostname(host)
+	b.bumpHostLocked(name)
+	b.hideHostIssuesLocked(name)
+	for h, d := range b.glHosts {
+		if model.GitLabHostname(h) == name {
+			b.forgetHostLocked(h)
+			d.at = time.Time{} // one login check at once
+			b.glHosts[h] = d
+		}
+	}
+	b.refreshGitLabLineLocked()
+}
+
+// applyIssueAnswersLocked stores the answers of one batch that still count,
+// each with the time it arrived, and saves what they say about the pins look
+// asked (pinlookup.go). Callers hold b.mu.
+func (b *Board) applyIssueAnswersLocked(l source.IssueLister, ask []model.ForgeRepo, ans []model.RepoIssues, look pinLook) {
+	reports := pinReports{}
+	purged := b.dropIssuesLocked(b.issueReposLocked())
+	still := map[model.ForgeRepo]bool{}
+	for _, r := range b.issueReposLocked() {
+		still[b.issueKey(r)] = true
+	}
+	arrived := b.now()
+	changed, sure := false, false
+	for _, ri := range ans {
+		// Its project may have left during the look, or its forge or host
+		// been turned off or held since (the generation is checked before).
+		k := b.issueKey(ri.Repo)
+		if !slices.Contains(ask, ri.Repo) || !still[k] || b.issueListerLocked(ri.Repo) != l {
+			continue
+		}
+		// Rows this login can no longer see (gone, or no longer visible to
+		// it) leave like any other drop: a purge.
+		if old, ok := b.issues[k]; ok && old.State == model.RepoIssuesOK && ri.State != model.RepoIssuesOK {
+			purged = true
+		}
+		ri = b.carryPinAnswersLocked(b.issues[k], b.keepPinAnswersLocked(look, ri))
+		b.noteAnswerLocked(k, ri)
+		b.issues[k] = ri
+		b.issuesReadAt[k] = arrived
+		b.pinReportsLocked(look, ri, reports)
+		changed, sure = true, true
+	}
+	b.issuesDone = true
+	b.savePinReportsLocked(reports)
+	switch {
+	case purged:
+		b.issuesPurgedLocked(arrived)
+	case changed:
+		// Freshness only: the revision moves at the rebuild that follows,
+		// when what is served changed (issuesrev.go).
+		b.issuesListAt = arrived
+	}
+	if gh := b.opts.Issues[model.ForgeGitHub]; gh != nil && gh == l {
+		if sure {
+			b.ghLogin = loginWorks
+		}
+		b.refreshGitHubLineLocked()
+	}
+}
+
+// hideHostIssuesLocked drops what was listed from every site of GitLab host
+// name, and that it was asked, as a purge: the page drops it at once.
+// Callers hold b.mu.
+func (b *Board) hideHostIssuesLocked(name string) {
+	on := func(r model.ForgeRepo) bool {
+		return r.Forge == model.ForgeGitLab && model.GitLabHostname(r.Host) == name
+	}
+	listed := len(b.issues)
+	maps.DeleteFunc(b.issues, func(r model.ForgeRepo, _ model.RepoIssues) bool { return on(r) })
+	maps.DeleteFunc(b.issuesReadAt, func(r model.ForgeRepo, _ time.Time) bool { return on(r) })
+	maps.DeleteFunc(b.issuesTried, func(r model.ForgeRepo, _ time.Time) bool { return on(r) })
+	if len(b.issues) != listed {
+		b.issuesPurgedLocked(b.now())
+	}
 }
 
 // loginSeen is what the latest issue look said about a forge's login.
@@ -379,19 +669,10 @@ func (b *Board) refreshGitHubLineLocked() bool {
 	return b.setSourceLineLocked(line)
 }
 
-// issueHostCurrentLocked says whether an issue answer from a lister that
-// started at st may be applied for GitLab host: the board still runs, GitLab is
-// on, nothing about host changed since st and host may still be asked.
-// Unlike merge requests, issues need no session that asks for the host.
-// Callers hold b.mu.
-func (b *Board) issueHostCurrentLocked(ctx context.Context, host string, st hostStamp) bool {
-	return ctx.Err() == nil && !b.closed && !b.gitlabOffLocked() && b.hostStampLocked(host) == st && b.glHosts[host].ok
-}
-
 // projectIssuesLocked is the count a project with repository r shows.
 // Callers hold b.mu.
 func (b *Board) projectIssuesLocked(r model.ForgeRepo) contract.IssueCount {
-	ri, ok := b.issues[issueKey(r)]
+	ri, ok := b.issues[b.issueKey(r)]
 	if !ok || ri.State != model.RepoIssuesOK || b.issueListerLocked(r) == nil {
 		return contract.IssueCount{}
 	}
@@ -419,11 +700,16 @@ func (b *Board) issuesSummaryLocked(repos []model.ForgeRepo) contract.IssuesSumm
 		sum.Rev = b.issuesRev
 		return sum // with the purge, so a tab drops a list it holds
 	}
-	if !b.issuesListAt.IsZero() {
-		sum.AsOf = b.issuesListAt.UTC()
-	}
+	sum.AsOf = b.issuesAsOfLocked(repos)
+	noAgent, known := 0, false
 	for _, r := range repos {
 		sum.Open += b.projectIssuesLocked(r).Open
+		if n, ok := b.issueNoAgent[b.issueKey(r).Key()]; ok {
+			noAgent, known = noAgent+n, true
+		}
+	}
+	if known {
+		sum.NoAgent = &noAgent
 	}
 	// What Issues() returns also changes with the repositories and the state
 	// (a repository found, one that left, loading turning ready), not only
@@ -434,6 +720,30 @@ func (b *Board) issuesSummaryLocked(repos []model.ForgeRepo) contract.IssuesSumm
 	}
 	sum.Rev = b.issuesRev
 	return sum
+}
+
+// issuesAsOfLocked is the list's "as of": when the oldest answer among
+// repos was read, so a repository whose latest answer failed does not pass
+// for one read with the others; when none was read, when the list last
+// changed. Zero for neither. Callers hold b.mu.
+func (b *Board) issuesAsOfLocked(repos []model.ForgeRepo) time.Time {
+	var at time.Time
+	for _, r := range repos {
+		k := b.issueKey(r)
+		if _, ok := b.issues[k]; !ok {
+			continue
+		}
+		if t, ok := b.issuesReadAt[k]; ok && (at.IsZero() || t.Before(at)) {
+			at = t
+		}
+	}
+	if at.IsZero() {
+		at = b.issuesListAt
+	}
+	if at.IsZero() {
+		return time.Time{}
+	}
+	return at.UTC()
 }
 
 // issuesPage is the latest list as the page gets it, kept until the list,
@@ -454,17 +764,17 @@ func (b *Board) Issues(context.Context) (contract.Issues, error) {
 	st := b.issuesStateLocked()
 	if st == contract.IssuesOff {
 		// The current rev: a tab that saw the off purge takes this answer.
-		return contract.Issues{State: st, Repos: []contract.RepoIssues{}, Rev: b.issuesRev}, nil
+		return contract.Issues{State: st, Repos: []contract.RepoIssues{}, Rev: b.issuesRev, Unsaved: b.pinsUnsavedLocked()}, nil
 	}
 	repos := b.issueReposLocked()
 	c := b.issuesPage
 	if c == nil || c.rev != b.issuesRev || c.out.State != st || !slices.Equal(c.repos, repos) {
 		out := contract.Issues{State: st, Repos: make([]contract.RepoIssues, 0, len(repos))}
-		if !b.issuesListAt.IsZero() {
-			out.AsOf = b.issuesListAt.UTC()
-		}
+		out.AsOf = b.issuesAsOfLocked(repos)
 		for _, r := range repos {
-			out.Repos = append(out.Repos, pageRepoIssues(r, b.issues[issueKey(r)]))
+			ri := b.servedRowsLocked(r) // before it is cached: pins bump issuesRev
+			b.issueAgentsLocked(&ri, b.issueKey(r))
+			out.Repos = append(out.Repos, ri)
 		}
 		c = &issuesPage{rev: b.issuesRev, repos: repos, out: out}
 		b.issuesPage = c
@@ -479,9 +789,11 @@ func (b *Board) Issues(context.Context) (contract.Issues, error) {
 		}
 		lookAt = now
 	}
-	out := c.out // shallow: Repos stays shared
+	out := c.out                         // shallow: Repos stays shared
+	out.AsOf = b.issuesAsOfLocked(repos) // freshness moves without the rev (issuesrev.go)
 	out.Rev = c.rev
 	out.FreshMs = max(0, (contract.IssuesFreshFor - since(lookAt, now)).Milliseconds())
+	out.Unsaved = b.pinsUnsavedLocked()
 	return out, nil
 }
 
@@ -502,9 +814,9 @@ func (b *Board) issueHostsLocked() []string {
 // pageRepoIssues is one repository's answer as the page gets it: cleaned
 // text, addresses built for its own repository and numbers; pending when the
 // forge has not answered (ri is zero).
-func pageRepoIssues(r model.ForgeRepo, ri model.RepoIssues) contract.RepoIssues {
+func pageRepoIssues(r model.ForgeRepo, key string, ri model.RepoIssues) contract.RepoIssues {
 	out := contract.RepoIssues{
-		Forge: contract.Forge(r.Forge), Host: clean(r.Host), Repo: pagePath(r.Path),
+		Forge: contract.Forge(r.Forge), Host: clean(r.Host), Repo: pagePath(r.Path), Key: key,
 		State: contract.RepoIssuesPending, Issues: []contract.OpenIssue{},
 	}
 	switch ri.State {

@@ -235,7 +235,7 @@ describe('words', () => {
     ],
   ];
 
-  const issue = (number: number, repo = 'org/repo') => ({ forge: 'github' as const, host: 'github.com', repo, number, url: `https://github.com/${repo}/issues/${number}` });
+  const issue = (number: number, repo = 'org/repo') => ({ forge: 'github' as const, kind: 'closes' as const, host: 'github.com', repo, number, url: `https://github.com/${repo}/issues/${number}` });
 
   it('closes: numbers only, at most two, then the count; duplicates counted once', () => {
     expect(closesText([], 'org/repo')).toBe('');
@@ -549,9 +549,9 @@ describe('pull request and issue links', () => {
   });
 
   it('closes in parts: the same labels as the text, each with its link or none', () => {
-    const ok = { forge: 'github' as const, host: 'github.com', repo: 'org/repo', number: 7, url: 'https://github.com/org/repo/issues/7' };
-    const bad = { forge: 'github' as const, host: 'github.com', repo: 'org/other', number: 8, url: 'javascript:alert(1)' };
-    const more = { forge: 'github' as const, host: 'github.com', repo: 'org/repo', number: 9, url: 'https://github.com/org/repo/issues/9' };
+    const ok = { forge: 'github' as const, kind: 'closes' as const, host: 'github.com', repo: 'org/repo', number: 7, url: 'https://github.com/org/repo/issues/7' };
+    const bad = { forge: 'github' as const, kind: 'closes' as const, host: 'github.com', repo: 'org/other', number: 8, url: 'javascript:alert(1)' };
+    const more = { forge: 'github' as const, kind: 'closes' as const, host: 'github.com', repo: 'org/repo', number: 9, url: 'https://github.com/org/repo/issues/9' };
     expect(closesParts([], 'org/repo')).toBeNull();
     expect(closesParts([ok, bad, more], 'org/repo')).toEqual({
       items: [

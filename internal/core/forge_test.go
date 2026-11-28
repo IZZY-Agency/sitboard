@@ -176,7 +176,7 @@ func TestGitLabMergeRequestOnTheCard(t *testing.T) {
 		t.Fatalf("merge request %+v", pr)
 	}
 	if len(c.Issues) != 1 || c.Issues[0] != (contract.Issue{Forge: contract.ForgeGitLab, Host: gl.Host, Repo: gl.Path, Number: 3,
-		URL: "https://gitlab.example.com/example-group/example-project/-/issues/3"}) {
+		URL: "https://gitlab.example.com/example-group/example-project/-/issues/3", Kind: contract.IssueCloses}) {
 		t.Fatalf("issues %+v", c.Issues)
 	}
 	var p contract.Project

@@ -16,7 +16,7 @@ const REPO_A = 'example-org/example-repo';
 const REPO_B = 'example-org/other-repo';
 
 function withRepo(p: Project, repo: string, open: number | null): Project {
-  return { ...p, repo, repoForge: 'github', repoHost: 'github.com', openIssues: open === null ? { known: false, open: 0 } : { known: true, open } };
+  return { ...p, repo, repoForge: 'github', repoHost: 'github.com', issuesKey: repo.toLowerCase(), openIssues: open === null ? { known: false, open: 0 } : { known: true, open } };
 }
 
 const PA = withRepo(project('p_a', 'alpha'), REPO_A, 12);
@@ -24,15 +24,15 @@ const PB = withRepo(project('p_b', 'beta'), REPO_B, 3);
 const CARDS = [card({ id: 'claude:a', projectId: 'p_a' }), card({ id: 'claude:b', projectId: 'p_b' })];
 
 function issue(n: number, milestone = '', over: Partial<OpenIssue> = {}): OpenIssue {
-  return { number: n, title: `Sample issue ${n}`, url: `https://github.com/${REPO_A}/issues/${n}`, milestone, labels: [], ...over };
+  return { number: n, title: `Sample issue ${n}`, url: `https://github.com/${REPO_A}/issues/${n}`, milestone, labels: [], agents: [], pinned: false, ...over };
 }
 
 function repoList(repo: string, open: number, issues: OpenIssue[]): RepoIssues {
-  return { forge: 'github', host: 'github.com', repo, state: 'ok', open, issues };
+  return { forge: 'github', host: 'github.com', repo, key: repo.toLowerCase(), state: 'ok', open, issues, pinned: [] };
 }
 
 const LIST: Issues = {
-  state: 'ready',
+  state: 'ready', unsaved: false,
   rev: 1,
   freshMs: 60_000,
   asOf: '2026-11-17T09:58:00Z',
@@ -46,7 +46,7 @@ const LIST: Issues = {
   ],
 };
 
-const READY: IssuesSummary = { state: 'ready', asOf: '2026-11-17T09:58:00Z', open: 15, rev: 1 };
+const READY: IssuesSummary = { state: 'ready', asOf: '2026-11-17T09:58:00Z', open: 15, rev: 1, noAgent: 0 };
 
 function client(loads: IssuesLoad[]) {
   const calls: string[] = [];
@@ -76,7 +76,7 @@ async function open() {
 
 describe('Issues', () => {
   it('has no button while issues are off', async () => {
-    app(snap({ issues: { state: 'off', open: 0, rev: 0 } }));
+    app(snap({ issues: { state: 'off', open: 0, rev: 0, noAgent: 0 } }));
     await settle();
     expect(btn()).toBeNull();
   });
@@ -89,7 +89,7 @@ describe('Issues', () => {
   });
 
   it('shows no number while no count is known', async () => {
-    app(snap({ issues: { state: 'loading', open: 0, rev: 0 } }, [withRepo(PA, REPO_A, null)]));
+    app(snap({ issues: { state: 'loading', open: 0, rev: 0, noAgent: 0 } }, [withRepo(PA, REPO_A, null)]));
     await settle();
     expect(btn()!.getAttribute('aria-label')).toBe('Issues');
   });
@@ -149,6 +149,27 @@ describe('Issues', () => {
     c.push(snap({ seq: 4, issues: { ...READY, asOf: '2026-11-17T10:09:00Z', rev: 2 } })); // older or newer by the clock only: not a new list
     await settle();
     expect(c.calls).toEqual(['load', 'load']);
+  });
+
+  it("takes its 'as of' from the snapshot while that is of the rows shown", async () => {
+    const c = app(snap());
+    await settle();
+    await open();
+    const asOf = () => [...panel()!.querySelectorAll('.since .seg')].map((e) => e.textContent).find((t) => t?.startsWith('as of'));
+    const first = asOf();
+    expect(first).toBeTruthy();
+    // An identical look: the same rev, a newer asOf; the rows are not fetched again.
+    c.push(snap({ seq: 2, issues: { ...READY, asOf: '2026-11-17T10:08:00Z', rev: 1 } }));
+    await settle();
+    expect(c.calls).toEqual(['load']);
+    const later = asOf();
+    expect(later).toBeTruthy();
+    expect(later).not.toBe(first);
+    // A snapshot of another rev than the rows shown says nothing of their age.
+    c.push(snap({ seq: 3, issues: { ...READY, asOf: '2026-11-17T10:20:00Z', rev: 3 } }));
+    await settle();
+    expect(c.calls).toEqual(['load', 'load']);
+    expect(asOf()).toBe(first);
   });
 
   it('does not load while it is closed', async () => {
@@ -232,7 +253,7 @@ describe('Issues, review', () => {
   });
 
   it('says the count is not known while no repository answered', async () => {
-    const pending: Issues = { state: 'ready', rev: 1, freshMs: 60_000, repos: [{ ...repoList(REPO_A, 0, []), state: 'pending' }] };
+    const pending: Issues = { state: 'ready', unsaved: false, rev: 1, freshMs: 60_000, repos: [{ ...repoList(REPO_A, 0, []), state: 'pending' }] };
     app(snap({}, [withRepo(PA, REPO_A, null)]), [{ ok: true, issues: pending }]);
     await settle();
     await open();
@@ -242,7 +263,7 @@ describe('Issues, review', () => {
   });
 
   it('says a filtered section may have unlisted issues', async () => {
-    const list: Issues = { state: 'ready', rev: 1, freshMs: 60_000, repos: [repoList(REPO_A, 12, [issue(48, '0.5.0'), issue(33, 'Later')]), repoList(REPO_B, 1, [issue(7, '0.5.0')])] };
+    const list: Issues = { state: 'ready', unsaved: false, rev: 1, freshMs: 60_000, repos: [repoList(REPO_A, 12, [issue(48, '0.5.0'), issue(33, 'Later')]), repoList(REPO_B, 1, [issue(7, '0.5.0')])] };
     app(snap(), [{ ok: true, issues: list }]);
     await settle();
     await open();
@@ -255,7 +276,7 @@ describe('Issues, review', () => {
   });
 
   it('says it when the listed issues of a truncated repository are not in the milestone', async () => {
-    const list: Issues = { state: 'ready', rev: 1, freshMs: 60_000, repos: [repoList(REPO_A, 12, [issue(48, '0.5.0')]), repoList(REPO_B, 1, [issue(7, 'Later')])] };
+    const list: Issues = { state: 'ready', unsaved: false, rev: 1, freshMs: 60_000, repos: [repoList(REPO_A, 12, [issue(48, '0.5.0')]), repoList(REPO_B, 1, [issue(7, 'Later')])] };
     app(snap(), [{ ok: true, issues: list }]);
     await settle();
     await open();
@@ -308,7 +329,7 @@ describe('Issues, review', () => {
   });
 
   it('shows two labels that read the same', async () => {
-    const list: Issues = { state: 'ready', rev: 1, freshMs: 60_000, repos: [repoList(REPO_A, 1, [issue(9, '', { labels: ['bug', 'bug'] })])] };
+    const list: Issues = { state: 'ready', unsaved: false, rev: 1, freshMs: 60_000, repos: [repoList(REPO_A, 1, [issue(9, '', { labels: ['bug', 'bug'] })])] };
     app(snap({}, [PA]), [{ ok: true, issues: list }]);
     await settle();
     await open();
@@ -429,7 +450,7 @@ describe('Issues, round 2', () => {
       await open();
       btn()!.click();
       await settle();
-      c.push(snap({ seq: 2, issues: { state: 'off', open: 0, rev: 1, purged: 2 } }));
+      c.push(snap({ seq: 2, issues: { state: 'off', open: 0, rev: 1, noAgent: 0, purged: 2 } }));
       await settle();
       c.push(snap({ seq: 3, issues: { ...READY, rev: 3, purged: 2 } }));
       await settle();
@@ -566,7 +587,7 @@ describe('Issues, round 2', () => {
 
   describe('milestone order', () => {
     const SPRINTS: Issues = {
-      state: 'ready',
+      state: 'ready', unsaved: false,
       rev: 1,
       freshMs: 60_000,
       repos: [
@@ -587,7 +608,7 @@ describe('Issues, round 2', () => {
 
     it('orders a chip the repositories share by its earliest due date', async () => {
       const list: Issues = {
-        state: 'ready',
+        state: 'ready', unsaved: false,
         rev: 1,
         freshMs: 60_000,
         repos: [

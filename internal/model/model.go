@@ -79,6 +79,24 @@ type PushedRef struct {
 	From, To time.Time // the push call's start and its result
 }
 
+// IssueTouch is an issue a session's own `gh issue` or `glab issue` command
+// named: the "looked at" evidence (#171). Repo is the repository the command
+// named with -R/--repo or an issue address, and is zero when it named none:
+// the issue is then the folder's repository's, and only the core, which holds
+// the folders' origins, can say which. Folder is that folder (the call's
+// working directory), and is empty when Repo is set. At is when the call was
+// made.
+type IssueTouch struct {
+	// Forge is the forge of the tool that named the issue (gh: GitHub, glab:
+	// GitLab), set also when Repo is zero, so an issue left to a folder is
+	// never read against the other forge's remote.
+	Forge  Forge
+	Repo   ForgeRepo
+	Folder string
+	Number int
+	At     time.Time
+}
+
 // ArtifactURLPattern is the only form of artifact link a fact may carry: a
 // claude.ai artifact address, nothing else. contract.ArtifactURLPattern, which
 // the page checks links against, must stay equal to it (a test checks).
@@ -244,6 +262,11 @@ type SessionFact struct {
 	// the push call's times; none until the transcript matchers learn
 	// GitLab's push option.
 	PushedPRs []PushedRef
+	// TouchedIssues are the issues this session's own `gh issue` and `glab
+	// issue` commands named ("looked at", #171), one per issue, most
+	// recently touched kept when there are too many. Derived facts only: the
+	// command text is never kept.
+	TouchedIssues []IssueTouch
 	// Artifacts are the claude.ai artifacts this session (or one of its
 	// in-process subagents) published itself, one per URL. A delete is not
 	// followed, and a rename made anywhere else is not seen.
@@ -393,6 +416,35 @@ type Repo struct {
 	// OriginUnclear: origin has more than one fetch address, one of them on
 	// GitHub. Remote is zero: which GitHub repository it is cannot be told.
 	OriginUnclear bool
+	// Remotes are the remotes besides origin, one entry each, in name order,
+	// for telling which repository a command run in this folder is about
+	// (#171, "looked at"): a tool that picks among the remotes may read any of
+	// them. Every remote's fetch address counts, so a remote with several is
+	// RemotesUnclear.
+	Remotes []RemoteAddr
+	// RemotesUnclear: the remotes cannot all be told: a remote besides origin
+	// has more than one fetch address or one git could not read, or there are
+	// more than MaxSecondaryRemotes of them, or a remote's push address names
+	// another repository than its fetch address. A command's repository is then
+	// not told by origin.
+	RemotesUnclear bool
+	// GHResolved: the checkout has a remote.<name>.gh-resolved setting
+	// (`gh repo set-default`): gh then reads that repository, not the one the
+	// remotes name, so a gh command with no repository in this folder is not
+	// told by them.
+	GHResolved bool
+}
+
+// MaxSecondaryRemotes is how many remotes besides origin are read for a
+// folder; more make RemotesUnclear.
+const MaxSecondaryRemotes = 4
+
+// RemoteAddr is the repository one remote's one fetch address names, as
+// origin's is read (Repo.Remote, Repo.RemoteBare); Repo is zero when the
+// address is on no forge sitboard knows.
+type RemoteAddr struct {
+	Repo ForgeRepo
+	Bare bool
 }
 
 // Worktree is one git worktree of a repo, as `git worktree list` gives it.

@@ -218,6 +218,46 @@ describe('shell', () => {
   });
 });
 
+describe('a stopped sitboard', () => {
+  it('turns the chip, the banner and the tab to "stopped", dims the board, and keeps the age of every card still', () => {
+    const s = golden();
+    const h = app(s);
+    expect(q('.content')!.classList.contains('stopped')).toBe(false);
+    h.push({ conn: 'reconnecting', snapshot: s });
+    expect(q('.content')!.classList.contains('stopped')).toBe(false); // a short loss is only dimmed grey
+    expect(text(q('.lost'))).toMatch(/^Connection lost · board as of \d\d:\d\d · retrying$/);
+    h.push({ conn: 'stopped', snapshot: s });
+    expect(text(q('header [role="status"]'))).toMatch(/^Stopped · last update \d\d:\d\d$/);
+    expect(text(q('.lost'))).toMatch(/^sitboard has stopped answering · not live, last update \d\d:\d\d ·/);
+    expect(q('.content')!.classList.contains('stopped')).toBe(true);
+    expect(q('.content')!.classList.contains('frozen')).toBe(true);
+    expect(qa('[data-card]').length).toBe(7); // the board is still there, marked
+    expect(document.title).toBe('sitboard · stopped');
+    expect(document.head.querySelector('link[rel="icon"]')!.getAttribute('href')).toMatch(/^\/badge\/lost\.svg/);
+  });
+
+  it('is live again when the server answers on the same address', () => {
+    const s = golden();
+    const h = app(s);
+    h.push({ conn: 'stopped', snapshot: s });
+    h.push({ conn: 'live', snapshot: s });
+    expect(text(q('header [role="status"]'))).toMatch(/^Live/);
+    expect(q('.lost')).toBeNull();
+    expect(q('.content')!.classList.contains('stopped')).toBe(false);
+    expect(q('.content')!.classList.contains('frozen')).toBe(false);
+  });
+
+  it('a new run with a new key ends in the "open the new link" page, not in the old board', () => {
+    const s = golden();
+    const h = app(s);
+    h.push({ conn: 'stopped', snapshot: s });
+    h.push({ conn: 'unauthorized', snapshot: s });
+    expect(text(q('.content h1'))).toBe('This tab lost its key');
+    expect(qa('[data-card]')).toHaveLength(0);
+    expect(q('.lost')).toBeNull();
+  });
+});
+
 describe('actions', () => {
   it('activating a card posts jump with its cardId and marks it seen locally', async () => {
     const s = golden();

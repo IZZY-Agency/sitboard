@@ -9,6 +9,7 @@
   import { ms, VIEW_MS } from '../motion';
   import Count from './Count.svelte';
   import { openIssuesText } from '../data/issues';
+  import { noAgentSeenText } from '../data/words';
   import Dots from './Dots.svelte';
   import type { GroupingMode } from '../contract.gen';
   import AlwaysGrouping from './AlwaysGrouping.svelte';
@@ -25,6 +26,7 @@
     onforget,
     onsetting,
     settings,
+    noAgent,
   }: {
     g: Grouping;
     sel: Sel;
@@ -37,6 +39,8 @@
     onsetting?: (p: { id: string; name: string }, mode: GroupingMode) => Promise<boolean>;
     /** project id -> its setting, for folders set to always or never. */
     settings?: ReadonlyMap<string, GroupingMode>;
+    /** Listed open issues of a tile's projects with no agent seen; null when not known. */
+    noAgent?: (sel: Sel) => number | null;
   } = $props();
 
   const band = $derived(tileBand(g));
@@ -123,7 +127,9 @@
         <span class="top"><span class="name u" title={t.name}>{t.name}</span>{' '}<span class="n"><Count value={t.count} /></span></span>
         <Dots dots={t.dots} more={t.more} />
         <span class="note" title={t.note}>{t.note}</span>
-        {#if t.issues !== null}<span class="note iss">{openIssuesText(t.issues)}</span>{/if}
+        {#if t.issues !== null}{@const free = t.issues ? (noAgent?.(t.sel) ?? 0) : 0}<span class="note iss">{openIssuesText(t.issues)}</span>{#if free > 0}<span class="note free"
+            ><span class="visually-hidden">{', '}</span>{noAgentSeenText(free)}</span
+          >{/if}{/if}
       </button>
     {/each}
     {#if band.idle.length}
@@ -273,6 +279,10 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  /* "2 with no agent seen", under the open issues: a shade brighter than them. */
+  .note.free {
+    color: var(--fg-body);
   }
   .idle {
     flex: 2 1 320px;

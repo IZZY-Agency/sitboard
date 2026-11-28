@@ -174,6 +174,15 @@ func TestParsingIsLinear(t *testing.T) {
 		"arithmetic":      func(k int) string { return "echo $((" + rep("(1<<2)+", k*bytes/7) + "1))" },
 		"deep nesting":    func(k int) string { return rep(`"$(`, k*bytes/3) },
 		"backticks":       func(k int) string { return rep("`echo x` ", k*words/4) },
+		"bracket word":    func(k int) string { return "echo create " + rep("[", k*bytes) },
+		"glob word":       func(k int) string { return "echo create " + rep("*?[", k*bytes/3) },
+		"merge requests":  func(k int) string { return rep("glab mr create;", k*words/4) },
+		"and lists":       func(k int) string { return rep("gh issue view 7 && x; (", k*words/6) },
+		"continuations":   func(k int) string { return rep("gh issue view 7 \\\n", k*words/5) },
+		"or lists":        func(k int) string { return rep("gh issue view 7 || ", k*words/5) },
+		"issue commands":  func(k int) string { return rep("gh issue view 7; ", k*words/5) },
+		"issue repos":     func(k int) string { return rep("gh issue view 7 -R a/b; ", k*words/6) },
+		"issue scripts":   func(k int) string { return rep("bash -c 'gh issue view 7'; ", k*words/6) },
 	}
 	timeOf := func(in string) time.Duration {
 		return cpucost.Of(5, func() {
@@ -181,6 +190,8 @@ func TestParsingIsLinear(t *testing.T) {
 			_ = c.Runs("gh", "pr", "create")
 			_ = c.Runs("agtermctl", "session", "new")
 			_ = c.SpawnNames()
+			_ = c.MRCreation()
+			_ = c.IssueCommands()
 		})
 	}
 	for name, gen := range inputs {

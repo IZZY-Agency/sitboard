@@ -8,6 +8,7 @@
     jumpLabel,
     cardPrs,
     cardClosesParts,
+    cardLookedParts,
     cardTitle,
     effortOf,
     modelFamily,
@@ -26,7 +27,7 @@
   import { critterState } from '../data/critter';
   import Critter from './Critter.svelte';
   import PrIcon from './PrIcon.svelte';
-  import { hasGitLab, requestLinkHint, requestsHeading } from '../data/words';
+  import { hasGitLab, LOOKED_AT, requestLinkHint, requestsHeading } from '../data/words';
   import ArtifactIcon from './ArtifactIcon.svelte';
   import SpendFigure from './SpendFigure.svelte';
 
@@ -68,6 +69,8 @@
   const arts = $derived(cardArtifacts(card.artifacts));
   // Only beside pull request lines: a card with issues and no pull request shows nothing extra.
   const closes = $derived(prs.shown.length ? cardClosesParts(card, ix) : null);
+  // The issues its session's own gh or glab commands named: a line of their own, pull request or not.
+  const looked = $derived(cardLookedParts(card, ix));
   const unseen = $derived(card.attention.includes('unseen'));
   const failing = $derived(card.attention.includes('failing_checks'));
 
@@ -137,6 +140,13 @@
         </li>
       {/if}
     </ul>
+  {/if}
+  {#if looked}
+    <p class="links looked u">
+      {LOOKED_AT}{#each looked.items as is, i (i)}{' '}{#if is.href}<a class="link" href={is.href} target="_blank" rel="noopener noreferrer"
+            ><span class="name"><span class="num ext">{is.label}</span></span><span class="visually-hidden">{' (issue, opens in a new tab)'}</span></a
+          >{:else}{is.label}{/if}{/each}{#if looked.extra > 0}{` +${looked.extra}`}{/if}
+    </p>
   {/if}
   {#if arts.shown.length}
     <!-- The link's name is the title once and the hint once; the tooltip on the
@@ -341,8 +351,27 @@
     text-decoration-thickness: 1px;
     text-underline-offset: 2px;
   }
-  .pr.closes .link:hover {
+  .pr.closes .link:hover,
+  .looked .link:hover {
     color: var(--fg-body);
+  }
+  /* "looked at #N": muted like the closes line, under the pull requests. */
+  .looked {
+    display: block;
+    margin-top: -4px;
+    font-size: var(--text-s);
+    color: var(--muted);
+    /* A long repository-qualified label wraps inside the card. */
+    overflow-wrap: anywhere;
+  }
+  .prs + .looked {
+    margin-top: -12px;
+    padding-left: 18px;
+    border-top: 0;
+  }
+  .looked .link {
+    color: inherit;
+    text-decoration: none;
   }
   /* A link is marked at rest, on its number only: a 1px underline in the row's
      own tone at 70% (3:1 or more on a card in every tone), then the arrow every

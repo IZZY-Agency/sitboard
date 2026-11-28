@@ -90,6 +90,14 @@ type RepoResolver interface {
 	Resolve(ctx context.Context, folder string) (model.Repo, error)
 }
 
+// TouchResolver is what a RepoResolver may also be: it answers for a folder
+// only an issue command's working directory named, without any filesystem call
+// of its own that a deadline cannot cut short (os.Stat on a stalled mount). A
+// missing folder, or one that is not a folder, is an error.
+type TouchResolver interface {
+	ResolveTouch(ctx context.Context, folder string) (model.Repo, error)
+}
+
 // RepoInventory answers the git questions behind Leftovers. It never changes
 // a repo. root and dir are absolute folders; commits are full ids.
 type RepoInventory interface {
@@ -136,7 +144,16 @@ type IssueLister interface {
 	// what that login listed before). errors.Is finds ErrRateLimited
 	// underneath when the forge asked to be left alone.
 	// A repo on another forge is left out of the answer.
-	OpenIssues(ctx context.Context, repos []model.ForgeRepo) ([]model.RepoIssues, error)
+	//
+	// pinned names, per repository of repos (the same value), the issue
+	// numbers the owner pinned there: they are asked by number in the same
+	// call, no extra one, and answered in RepoIssues.Pinned of a repository
+	// answered OK (open, closed, or gone: no such issue for this login). A
+	// number with no answer is left out: an error, a partial answer, or past
+	// model.MaxPinsAsked (model.PinsToAsk: the first ones are asked). Numbers are 1 to
+	// 2^31-1; others are not asked. GitLab's lister asks none and answers no
+	// Pinned (#182); the core gives it none.
+	OpenIssues(ctx context.Context, repos []model.ForgeRepo, pinned map[model.ForgeRepo][]int) ([]model.RepoIssues, error)
 }
 
 // PREvidence is what Leftovers asks GitHub; the GitHub PRProvider implements
@@ -169,6 +186,16 @@ var (
 	// known now (never checked, or the last yes ran out). It is no answer:
 	// the lookup waits for the host's next check.
 	ErrNotChecked = errors.New("login not checked")
+	// ErrTokenRefused: the host answered a call with "invalid token". It is
+	// also ErrNotChecked (nothing was read), and says more: what was listed
+	// from that host with the token is to be hidden at once, whatever the
+	// login check that follows finds, and the host is left alone for a while.
+	ErrTokenRefused = fmt.Errorf("token refused: %w", ErrNotChecked)
+	// ErrLoginChanged: the host answered for another account than before
+	// (glab was logged in afresh). It is also ErrNotChecked (nothing read is
+	// passed on), and says more: what was learned from that host with the
+	// old login is to be dropped at once, and the host checked again.
+	ErrLoginChanged = fmt.Errorf("login changed: %w", ErrNotChecked)
 )
 
 // PartialLookup is the error a GitLab Lookup returns together with the pull

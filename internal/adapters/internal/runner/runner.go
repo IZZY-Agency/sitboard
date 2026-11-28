@@ -41,6 +41,44 @@ func (e *ExitError) Error() string { return fmt.Sprintf("exit status %d", e.Code
 // ErrWarned is a tool that exited 0 but wrote to stderr, from ExecQuiet.
 var ErrWarned = errors.New("warned on stderr")
 
+// Gate admits one process: it calls start (which starts the process and does
+// not wait for it) when the call may still go out, and returns start's error;
+// otherwise it returns its own refusal and never calls start. A caller that
+// must keep a decision and the start of the process together (no change of
+// mind between the two) holds its lock across start.
+type Gate func(start func() error) error
+
+type gateKey struct{}
+
+// WithGate returns ctx with g as the gate every process started under it
+// goes through (Admit).
+func WithGate(ctx context.Context, g Gate) context.Context {
+	return context.WithValue(ctx, gateKey{}, g)
+}
+
+// ErrNotAdmitted is a gate that neither refused nor called start.
+var ErrNotAdmitted = errors.New("process not admitted")
+
+// Admit starts a process through ctx's gate (WithGate): start runs only if
+// the gate calls it, and Admit returns the gate's refusal otherwise. Without
+// a gate it calls start. A Func that starts no process (a test's) calls
+// Admit itself, with a start that records the call.
+func Admit(ctx context.Context, start func() error) error {
+	g, _ := ctx.Value(gateKey{}).(Gate)
+	if g == nil {
+		return start()
+	}
+	called := false
+	err := g(func() error {
+		called = true
+		return start()
+	})
+	if err == nil && !called {
+		return ErrNotAdmitted
+	}
+	return err
+}
+
 // Exec returns a Func that runs real processes with the given timeout per call
 // and extra environment entries appended to the inherited environment.
 func Exec(timeout time.Duration, env ...string) Func { return execFunc(timeout, false, nil, env) }
@@ -92,7 +130,21 @@ func run(timeout time.Duration, quiet bool, setup func(*exec.Cmd)) Func {
 		var out, errb capped
 		out.limit, errb.limit = maxOutput, stderrCap
 		cmd.Stdout, cmd.Stderr = &out, &errb
-		err := cmd.Run()
+		// Only the start goes through ctx's gate, never the wait: a gate
+		// holding a lock holds it while the process is started, not run.
+		var startErr error
+		started := false
+		err := Admit(ctx, func() error {
+			startErr = cmd.Start()
+			started = startErr == nil
+			return startErr
+		})
+		switch {
+		case started:
+			err = cmd.Wait() // a process that started is always waited for
+		case startErr == nil:
+			return nil, err // the gate's refusal: no process
+		}
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("%s: %w", name, ctx.Err())
 		}

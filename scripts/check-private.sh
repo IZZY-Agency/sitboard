@@ -548,10 +548,12 @@ all_rules() {
   pw_key="([A-Za-z0-9_.-]*pass""(word|wd)[A-Za-z0-9_.-]*|[A-Za-z0-9_.-]*_(pass|pwd))"
   rule "password" - -oiE -e "^[[:space:]]*(export[[:space:]]+)?${pw_key}[[:space:]]*=[[:space:]]*[\"']?[^[:space:]\"'\$<{=][^[:space:]\"']*"
   rule "password" - -oiE -e "[\"']?${pw_key}[\"']?[[:space:]]*(:=|:|=)[[:space:]]*[\"'][^\"'\$<{[:space:]][^\"']{5,}[\"']"
+  # @example.com, .org and .net, with any subdomain, are the reserved
+  # documentation domains (RFC 2606): a placeholder address there is no one's.
   # moshier@na-net.ornl.gov is in the Cephes notice that Go's math package
   # carries; THIRD_PARTY_NOTICES.md must reproduce it unchanged.
   rule "email address" \
-    '(@example\.com|@users\.noreply\.github\.com|:git@github\.com|:noreply@anthropic\.com|:moshier@na-net\.ornl\.gov)$' \
+    '(@([a-z0-9-]+\.)*example\.(com|org|net)|@users\.noreply\.github\.com|:git@github\.com|:noreply@anthropic\.com|:moshier@na-net\.ornl\.gov)$' \
     -oE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'
   local exempt="$assets_re"
   [[ "$mode" == "history" ]] && exempt="$history_assets_re"

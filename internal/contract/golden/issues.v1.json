@@ -6,6 +6,7 @@
       "forge": "github",
       "host": "github.com",
       "repo": "example-org/example-repo",
+      "key": "example-org/example-repo",
       "state": "ok",
       "open": 12,
       "issues": [
@@ -18,7 +19,9 @@
           "labels": [
             "bug"
           ],
-          "updatedAt": "2026-11-17T08:00:00Z"
+          "updatedAt": "2026-11-17T08:00:00Z",
+          "agents": null,
+          "pinned": false
         },
         {
           "number": 45,
@@ -29,7 +32,9 @@
           "labels": [
             "enhancement"
           ],
-          "updatedAt": "2026-11-16T09:00:00Z"
+          "updatedAt": "2026-11-16T09:00:00Z",
+          "agents": null,
+          "pinned": false
         },
         {
           "number": 33,
@@ -37,7 +42,9 @@
           "url": "https://github.com/example-org/example-repo/issues/33",
           "milestone": "Later",
           "labels": [],
-          "updatedAt": "2026-11-11T09:00:00Z"
+          "updatedAt": "2026-11-11T09:00:00Z",
+          "agents": null,
+          "pinned": false
         },
         {
           "number": 5,
@@ -48,19 +55,25 @@
             "docs",
             "good first issue"
           ],
-          "updatedAt": "2026-11-05T09:00:00Z"
+          "updatedAt": "2026-11-05T09:00:00Z",
+          "agents": null,
+          "pinned": false
         }
-      ]
+      ],
+      "pinned": null
     },
     {
       "forge": "gitlab",
       "host": "gitlab.example.com",
       "repo": "example-group/example-project",
+      "key": "gitlab:gitlab.example.com/example-group/example-project",
       "state": "pending",
       "open": 0,
-      "issues": []
+      "issues": [],
+      "pinned": null
     }
   ],
   "rev": 4,
-  "freshMs": 42000
+  "freshMs": 42000,
+  "unsaved": false
 }

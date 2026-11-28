@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"maps"
 	"slices"
 	"time"
 
@@ -128,6 +129,15 @@ func (b *Board) tickCtx(ctx context.Context) {
 	if b.resolved.IsZero() || since(b.resolved, now) >= githubEvery {
 		for _, f := range b.liveFoldersLocked() {
 			b.startResolveLocked(f)
+		}
+		// The folders issue commands ran in (at most maxTouchFolders) go the
+		// same way, so a failed or pending lookup is tried again and a changed
+		// remote is seen; a session's own folder is not asked twice.
+		live := b.liveFoldersLocked()
+		for _, f := range slices.Sorted(maps.Keys(b.touchFolders)) {
+			if !slices.Contains(live, f) {
+				b.startResolveAsLocked(f, true)
+			}
 		}
 		b.resolved = now
 	}
@@ -269,6 +279,18 @@ func (b *Board) refreshForges(ctx context.Context, periodic bool) {
 			b.mu.Unlock()
 			return
 		}
+		if repo.Forge == model.ForgeGitLab && errors.Is(err, source.ErrNoLogins) {
+			// glab is logged in to no host: this holds for every host
+			// whatever the stamp, as an issue look's (noteHostLocked).
+			if !b.gitlabOffLocked() {
+				b.noteHostLocked(repo.Host, err)
+				b.refreshGitLabLineLocked()
+				b.rebuildLocked()
+			}
+			b.mu.Unlock()
+			b.flushSeen()
+			continue
+		}
 		if repo.Forge == model.ForgeGitLab && !b.hostCurrentLocked(ctx, repo.Host, st) {
 			// The host was purged, switched off or left alone meanwhile:
 			// what this older lookup learned brings none of it back.
@@ -323,10 +345,25 @@ func (b *Board) refreshForges(ctx context.Context, periodic bool) {
 			// not asked again until sitboard restarts, even when the cause
 			// passes (a token not yet authorised for the organisation).
 			// Live sessions still ask.
+			// On GitHub its issue rows go too, as a purge: the login no longer
+			// sees it (on GitLab they are read again, below). Every such
+			// answer moves the repository's own denial counter, listed rows
+			// or not and found gone before or not (access may have come back
+			// in between): its answer in an issue batch sent before is
+			// dropped, and only its (deniedLocked).
+			b.deniedLocked(repo)
 			b.goneRepos[repo] = true
-			// Its issue rows go too, as a purge: the login no longer sees it.
-			if _, listed := b.issues[issueKey(repo)]; listed {
-				delete(b.issues, issueKey(repo))
+			k := b.issueKey(repo)
+			if repo.Forge == model.ForgeGitLab {
+				// GitLab's null project is not shown to come from the
+				// project's own instance (glab routes by its own config; the
+				// issue lister checks the route, a lookup does not): the rows
+				// stay, and the repository is due for a re-read, first in
+				// line, which settles it.
+				delete(b.issuesTried, k)
+				delete(b.issuesPicked, k)
+			} else if _, listed := b.issues[k]; listed {
+				delete(b.issues, k)
 				b.issuesPurgedLocked(now)
 			}
 		}

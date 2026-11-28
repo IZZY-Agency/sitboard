@@ -124,7 +124,7 @@ describe('Board', () => {
     const c = card({
       attention: ['unseen'],
       pullRequests: [pr(5), pr(4)],
-      issues: [{ forge: 'github' as const, host: 'github.com', repo: 'o/r', number: 3, url: 'https://github.com/o/r/issues/3' }],
+      issues: [{ forge: 'github' as const, kind: 'closes' as const, host: 'github.com', repo: 'o/r', number: 3, url: 'https://github.com/o/r/issues/3' }],
       artifacts: [{ title: 'Placeholder', url: 'https://claude.ai/artifact/exampleArtifact0001' }],
     });
     view(Board, snapshot([c], [{ ...project(c.projectId, 'one'), repo: 'o/r' }]));
@@ -143,8 +143,8 @@ describe('Board', () => {
         pr(7, 'https://github.com/o/r/pull/4'),
       ],
       issues: [
-        { forge: 'github' as const, host: 'github.com', repo: 'o/r', number: 2, url: 'javascript:alert(2)' },
-        { forge: 'github' as const, host: 'github.com', repo: 'o/r', number: 1, url: 'https://github.com/attacker-org/phish/issues/1' },
+        { forge: 'github' as const, kind: 'closes' as const, host: 'github.com', repo: 'o/r', number: 2, url: 'javascript:alert(2)' },
+        { forge: 'github' as const, kind: 'closes' as const, host: 'github.com', repo: 'o/r', number: 1, url: 'https://github.com/attacker-org/phish/issues/1' },
       ],
     });
     view(Board, snapshot([c], [{ ...project(c.projectId, 'one'), repo: 'o/r' }]));
@@ -188,7 +188,7 @@ describe('Board', () => {
       column: 'in_review',
       agent: { name: 'a', model: 'claude-opus-5-5', effort: 'high', effortSource: 'launch' },
       pullRequests: [pr],
-      issues: [{ forge: 'github' as const, host: 'github.com', repo: 'o/r', number: 3, url: 'https://github.com/o/r/issues/3' }],
+      issues: [{ forge: 'github' as const, kind: 'closes' as const, host: 'github.com', repo: 'o/r', number: 3, url: 'https://github.com/o/r/issues/3' }],
     });
     return { c, s: snapshot([c], [{ ...project(c.projectId, 'one'), repo: 'o/r' }]) };
   };
@@ -275,7 +275,7 @@ describe('Board', () => {
     ['Teams', Teams],
   ] as const)('%s keyboard order: a row\'s jump button, then its pull requests and issues, then the next row', (_n, V) => {
     const pr = (n: number) => ({ forge: 'github' as const, host: 'github.com', repo: 'o/r', number: n, title: 't', url: `https://github.com/o/r/pull/${n}`, state: 'open' as const, checks: 'passing' as const, review: '' as const, draft: false });
-    const a = card({ column: 'in_review', agent: { name: 'a' }, pullRequests: [pr(5), pr(4)], issues: [{ forge: 'github' as const, host: 'github.com', repo: 'o/r', number: 3, url: 'https://github.com/o/r/issues/3' }] });
+    const a = card({ column: 'in_review', agent: { name: 'a' }, pullRequests: [pr(5), pr(4)], issues: [{ forge: 'github' as const, kind: 'closes' as const, host: 'github.com', repo: 'o/r', number: 3, url: 'https://github.com/o/r/issues/3' }] });
     const b = card({ column: 'in_review', agent: { name: 'b' }, pullRequests: [pr(9)] });
     view(V, snapshot([a, b], [{ ...project(a.projectId, 'one'), repo: 'o/r' }]));
     const order = qa('[data-card] button, [data-card] a[href]').map((e) => (e.tagName === 'BUTTON' ? `jump ${text(e.closest('[data-card]')!.querySelector('.agent'))}` : e.getAttribute('href')));
@@ -294,8 +294,8 @@ describe('Board', () => {
     const c = card({
       pullRequests: [pr(9, 'javascript:alert(1)'), pr(8, 'https://github.com/attacker-org/phish/pull/1')],
       issues: [
-        { forge: 'github' as const, host: 'github.com', repo: 'o/r', number: 2, url: 'javascript:alert(2)' },
-        { forge: 'github' as const, host: 'github.com', repo: 'o/r', number: 1, url: 'https://github.com/attacker-org/phish/issues/1' },
+        { forge: 'github' as const, kind: 'closes' as const, host: 'github.com', repo: 'o/r', number: 2, url: 'javascript:alert(2)' },
+        { forge: 'github' as const, kind: 'closes' as const, host: 'github.com', repo: 'o/r', number: 1, url: 'https://github.com/attacker-org/phish/issues/1' },
       ],
     });
     view(V, snapshot([c], [{ ...project(c.projectId, 'one'), repo: 'o/r' }]));
@@ -306,7 +306,7 @@ describe('Board', () => {
   });
 
   it('a card with issues but no pull request shows nothing extra', () => {
-    const c = card({ issues: [{ forge: 'github' as const, host: 'github.com', repo: 'o/r', number: 7, url: 'https://github.com/o/r/issues/7' }] });
+    const c = card({ issues: [{ forge: 'github' as const, kind: 'closes' as const, host: 'github.com', repo: 'o/r', number: 7, url: 'https://github.com/o/r/issues/7' }] });
     view(Board, snapshot([c], [project(c.projectId, 'one')]));
     expect(q(`[data-card="${c.id}"] .prs`)).toBeNull();
     expect(text(q(`[data-card="${c.id}"]`))).not.toContain('closes');

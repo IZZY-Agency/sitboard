@@ -152,6 +152,22 @@ func (r *resolver) Resolve(ctx context.Context, folder string) (model.Repo, erro
 	if !fi.IsDir() {
 		return model.Repo{}, fmt.Errorf("not a folder")
 	}
+	return r.resolve(ctx, folder)
+}
+
+// ResolveTouch is Resolve for a folder only an issue command named: it makes
+// no filesystem call of its own (an os.Stat cannot be cancelled, and on a
+// stalled mount would hold one of the shared resolver slots past the
+// deadline). The bounded git call finds out: a folder that is missing or not
+// a folder is an error, one outside git is its own root, as in Resolve.
+func (r *resolver) ResolveTouch(ctx context.Context, folder string) (model.Repo, error) {
+	if !validDir(folder) {
+		return model.Repo{}, errBadFolder
+	}
+	return r.resolve(ctx, folder)
+}
+
+func (r *resolver) resolve(ctx context.Context, folder string) (model.Repo, error) {
 	outside := model.Repo{Root: folder, MainRoot: folder}
 
 	out, err := r.git(ctx, folder, "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir")
@@ -187,6 +203,8 @@ func (r *resolver) Resolve(ctx context.Context, folder string) (model.Repo, erro
 	if err != nil {
 		return model.Repo{}, err
 	}
+	repo.Remotes, repo.RemotesUnclear = r.secondaryRemotes(ctx, repo.Root)
+	repo.GHResolved = r.ghResolved(ctx, repo.Root)
 	return repo, nil
 }
 
@@ -319,23 +337,136 @@ func (r *resolver) origin(ctx context.Context, root string) (remote model.ForgeR
 		}
 		return model.ForgeRepo{}, false, false, err
 	}
-	var urls []string
-	for _, l := range strings.Split(string(out), "\n") {
-		if l != "" {
-			urls = append(urls, l)
-		}
-	}
+	remote, bare, unclear = forgeOfURLs(splitLines(out))
+	return remote, bare, unclear, nil
+}
+
+// forgeOfURLs is the repository one remote's fetch addresses name, as origin
+// reads it: zero for none or several addresses; unclear when several and one
+// is on GitHub.
+func forgeOfURLs(urls []string) (remote model.ForgeRepo, bare, unclear bool) {
 	if len(urls) != 1 {
-		return model.ForgeRepo{}, false, slices.ContainsFunc(urls, func(u string) bool { return slugFromURL(u) != "" }), nil
+		return model.ForgeRepo{}, false, slices.ContainsFunc(urls, func(u string) bool { return slugFromURL(u) != "" })
 	}
 	if slug := slugFromURL(urls[0]); slug != "" {
-		return model.GitHubRepo(slug), false, false, nil
+		return model.GitHubRepo(slug), false, false
 	}
 	// github.com keeps its stricter two-part rule above.
 	if host, path, bare, ok := gitlab.ParseRemote(urls[0]); ok && model.GitLabHostname(host) != model.GitHubHost {
-		return model.GitLabRepo(host, path), bare, false, nil
+		return model.GitLabRepo(host, path), bare, false
 	}
-	return model.ForgeRepo{}, false, false, nil
+	return model.ForgeRepo{}, false, false
+}
+
+// secondaryRemotes reads the remotes besides origin: each one's one fetch
+// address as origin's is read. A remote with several addresses or one git
+// cannot read, a name that could be taken for an option, more than
+// model.MaxSecondaryRemotes remotes, or a remote (origin too) whose push
+// address names another repository than its fetch address (a tool may use
+// the push one) make the folder unclear: which repository a command run
+// there is about is then not told by origin. The core compares the addresses
+// with its own, mount-aware, rule. One `git remote -v` gives the names and
+// both addresses.
+func (r *resolver) secondaryRemotes(ctx context.Context, root string) (addrs []model.RemoteAddr, unclear bool) {
+	out, err := r.git(ctx, root, "remote", "-v")
+	if err != nil {
+		return nil, true
+	}
+	type pair struct{ fetch, push []string }
+	byName := map[string]*pair{}
+	var names []string
+	for _, line := range splitLines(out) {
+		name, rest, ok := strings.Cut(line, "\t")
+		if !ok {
+			return nil, true
+		}
+		var kind string
+		switch {
+		case strings.HasSuffix(rest, " (fetch)"):
+			kind, rest = "fetch", strings.TrimSuffix(rest, " (fetch)")
+		case strings.HasSuffix(rest, " (push)"):
+			kind, rest = "push", strings.TrimSuffix(rest, " (push)")
+		default:
+			return nil, true
+		}
+		p := byName[name]
+		if p == nil {
+			p = &pair{}
+			byName[name] = p
+			names = append(names, name)
+		}
+		if kind == "fetch" {
+			p.fetch = append(p.fetch, rest)
+		} else {
+			p.push = append(p.push, rest)
+		}
+	}
+	for _, name := range names { // origin too: its push address counts
+		p := byName[name]
+		if len(p.fetch) != 1 {
+			return nil, true
+		}
+		for _, push := range p.push {
+			if !samePlace(p.fetch[0], push) {
+				return nil, true
+			}
+		}
+	}
+	var others []string
+	for _, name := range names {
+		if name != "origin" {
+			others = append(others, name)
+		}
+	}
+	if len(others) > model.MaxSecondaryRemotes {
+		return nil, true
+	}
+	for _, name := range others {
+		if strings.HasPrefix(name, "-") {
+			return nil, true
+		}
+		urls, err := r.git(ctx, root, "remote", "get-url", "--all", name)
+		if err != nil {
+			return nil, true
+		}
+		list := splitLines(urls)
+		if len(list) != 1 {
+			return nil, true
+		}
+		got, bare, _ := forgeOfURLs(list)
+		addrs = append(addrs, model.RemoteAddr{Repo: got, Bare: bare})
+	}
+	return addrs, false
+}
+
+// samePlace: a push address that is the fetch address, or names the same
+// forge repository by its path (GitHub ignores case; a GitLab path is kept as
+// it is). Any other push address is another repository.
+func samePlace(fetch, push string) bool {
+	if fetch == push {
+		return true
+	}
+	f, _, _ := forgeOfURLs([]string{fetch})
+	p, _, _ := forgeOfURLs([]string{push})
+	if f.IsZero() || p.IsZero() || f.Forge != p.Forge {
+		return false
+	}
+	if f.Forge == model.ForgeGitHub {
+		return strings.EqualFold(f.Path, p.Path)
+	}
+	return f == p
+}
+
+// ghResolved says whether the checkout has any remote.<name>.gh-resolved
+// setting, which `gh repo set-default` writes and gh reads before the
+// remotes: the repository gh picks is then not told by the remotes. A git
+// that cannot say counts as set.
+func (r *resolver) ghResolved(ctx context.Context, root string) bool {
+	out, err := r.git(ctx, root, "config", "--get-regexp", `^remote\..*\.gh-resolved$`)
+	if err != nil {
+		return exitCode(err) != 1 // 1: no such key
+	}
+	return len(splitLines(out)) > 0
 }
 
 // operation reads the files git keeps in a worktree's own git folder for an

@@ -94,6 +94,8 @@ func mainCode() int {
 		goos:     runtime.GOOS,
 		getenv:   os.Getenv,
 		lockWait: state.LockWait,
+		colour:   colourFor(isTerminal(os.Stdout), os.Getenv),
+		light:    lightTerminal(os.Getenv),
 	}
 	if err := run(ctx, cfg, env); err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, "sitboard:", err)
@@ -124,11 +126,11 @@ func parseArgs(args []string, stderr io.Writer) (config, error) {
 	fs.IntVar(&cfg.port, "port", defaultPort, "port on 127.0.0.1; 0 picks a free one")
 	fs.BoolVar(&cfg.noOpen, "no-open", false, "do not open the browser")
 	fs.BoolVar(&cfg.noGitHub, "no-github", false, "never call gh: no pull request lookups on GitHub")
-	fs.BoolVar(&cfg.noGitLab, "no-gitlab", false, "never call glab: no merge request lookups on GitLab (with --no-github: nothing goes to GitHub or GitLab)")
+	fs.BoolVar(&cfg.noGitLab, "no-gitlab", false, "never call glab: no merge request or issue lookups on GitLab (with --no-github: nothing goes to GitHub or GitLab)")
 	fs.StringVar(&roots, "roots", "", "comma-separated folders; only agents working under them are shown")
 	fs.DurationVar(&cfg.staleAfter, "stale-after", 20*time.Minute, "a busy agent with no activity for this long is flagged stale")
-	fs.StringVar(&cfg.statePath, "state", "", "`file` for seen marks, what Catch-up marked read and project groupings (default: ~/Library/Application Support/sitboard/state.json on macOS; elsewhere sitboard/state.json under $XDG_STATE_HOME, or ~/.local/state)")
-	fs.BoolVar(&cfg.noState, "no-state", false, "keep seen marks, what Catch-up marked read and project groupings in memory only: no state file is read or written")
+	fs.StringVar(&cfg.statePath, "state", "", "`file` for seen marks, what Catch-up marked read, pinned issues and project groupings (default: ~/Library/Application Support/sitboard/state.json on macOS; elsewhere sitboard/state.json under $XDG_STATE_HOME, or ~/.local/state)")
+	fs.BoolVar(&cfg.noState, "no-state", false, "keep seen marks, what Catch-up marked read, pinned issues and project groupings in memory only: no state file is read or written")
 	fs.BoolVar(&cfg.version, "version", false, "print the version and exit")
 	fs.BoolVar(&cfg.licenses, "licenses", false, "print sitboard's licence and the third-party notices and exit")
 	if err := fs.Parse(args); err != nil {
@@ -186,6 +188,10 @@ func realSources(cfg config, home string) sources {
 	if l, ok := gh.(source.IssueLister); ok {
 		issues[model.ForgeGitHub] = l
 	}
+	gl := gitlab.NewSource(gitlab.Options{Off: cfg.noGitLab})
+	if !cfg.noGitLab {
+		issues[model.ForgeGitLab] = gl
+	}
 	tm := tmux.New(tmux.Options{AgtermOf: claude.AgtermIDOf, Raise: term, Alive: claude.ProcessAlive})
 	return sources{
 		watchers: []source.Watcher{
@@ -198,7 +204,7 @@ func realSources(cfg config, home string) sources {
 		folders: procs.New(),
 		prs:     gh,
 		issues:  issues,
-		gitlab:  gitlab.NewSource(gitlab.Options{Off: cfg.noGitLab}),
+		gitlab:  gl,
 		jumper: source.Jumpers{
 			model.FocusAgterm: term,
 			model.FocusTmux:   tm,
@@ -220,6 +226,10 @@ type runEnv struct {
 	lock      func(ctx context.Context, file string, wait time.Duration) (*state.FileLock, error)
 	lockWait  time.Duration
 	openStore func(file string) (state.Store, error)
+	// colour is how the start lines are written (colourNone: plain); light
+	// takes the block's darker shades for a light terminal.
+	colour colour
+	light  bool
 }
 
 // run serves the board until ctx ends.
@@ -316,14 +326,18 @@ func run(ctx context.Context, cfg config, env runEnv) error {
 
 	// The token is per run and dies with the process; this is the only place it is printed.
 	link := "http://" + addr + "/?" + server.TokenParam + "=" + token
-	for _, n := range stateNotes {
-		_, _ = fmt.Fprintln(env.out, "sitboard:", n)
-	}
+	notes := stateNotes
 	if note != "" {
-		_, _ = fmt.Fprintln(env.out, "sitboard:", note)
+		notes = append(notes, note)
 	}
-	_, _ = fmt.Fprintln(env.out, "sitboard:", link)
-	_, _ = fmt.Fprintln(env.out, "sitboard: press Ctrl-C to stop")
+	printStart(env.out, env.colour, env.light, startInfo{
+		version:     buildinfo.Version,
+		commit:      buildinfo.Commit,
+		link:        link,
+		notes:       notes,
+		statuses:    statuses,
+		gitlabLater: src.gitlab != nil && !cfg.noGitLab,
+	})
 	if !cfg.noOpen && env.open != nil {
 		if err := env.open(link); err != nil {
 			_, _ = fmt.Fprintln(env.out, "sitboard: could not open the browser; open the link above")
@@ -391,7 +405,7 @@ func listen(port int, explicit bool) (net.Listener, string, error) {
 func openState(ctx context.Context, cfg config, env runEnv) (st state.Store, notes []string, unlock func(), err error) {
 	unlock = func() {}
 	if cfg.noState {
-		return state.Memory(), []string{"no state file (--no-state): seen marks, what Catch-up marked read and groupings last until sitboard stops"}, unlock, nil
+		return state.Memory(), []string{"no state file (--no-state): seen marks, what Catch-up marked read, pinned issues and groupings last until sitboard stops"}, unlock, nil
 	}
 	file := stateFile(env.home, env.goos, env.getenv)
 	if cfg.statePath != "" {
@@ -450,7 +464,7 @@ func openState(ctx context.Context, cfg config, env runEnv) (st state.Store, not
 }
 
 // memoryNote is the start line for a state file this run cannot write.
-const memoryNote = "warning: could not write the state file; seen marks, what Catch-up marks read and groupings last until sitboard stops"
+const memoryNote = "warning: could not write the state file; seen marks, what Catch-up marks read, pinned issues and groupings last until sitboard stops"
 
 // statePath makes a --state value absolute and clean; a leading "~/" is the
 // home folder, as in --roots, so "--state=~/x" works without the shell. The

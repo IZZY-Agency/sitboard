@@ -63,8 +63,7 @@ facts:
       request, merge request and issue numbers shown on the Board, in Lanes and
       in Teams link to GitHub or GitLab when sitboard has the repository's
       whole path (a GitLab path longer than 300 characters is left out) and
-      the link is the one for that forge, host, path and number (for GitLab,
-      on a host sitboard looked merge requests up on); otherwise the number
+      the link is the one for that forge, host, path and number (for GitLab, on a host the page may link to); otherwise the number
       shows without a link.
     keeps: [without a link]
     anchors:
@@ -325,23 +324,47 @@ facts:
   - id: issues
     text: >-
       **Issues.** An Issues chip in the header adds up the open issues of the
-      GitHub repositories of the projects on the board that GitHub has
-      answered for, and shows that number when it is above zero. It opens a
+      GitHub and GitLab repositories of the projects on the board that their
+      forge has answered for, and shows that number when it is above zero. It opens a
       panel that lists the open issues of the projects you picked, read only,
       grouped by milestone (with a filter when there is more than one group,
-      issues with no milestone being a group of their own): each issue's number, linked to GitHub, its title, labels and
+      issues with no milestone being a group of their own): each issue's number, linked to GitHub or GitLab, its title, labels and
       when it was last updated, up to 30 per repository and a link to the
-      rest. Project tiles and rail rows show the open counts GitHub has
-      given for a project's repositories (rail rows when above zero). GitHub only; off with `--no-github`.
+      rest. A repository its forge has not answered for yet says so. Each listed
+      issue also says which agents on the board are on it (an open pull or
+      merge request of theirs closes it) or looked at it (their own `gh` or
+      `glab` issue commands, from sessions sitboard does not take for
+      coordinators), or, once sitboard has judged it and found neither, "no
+      agent seen"; an Agent filter shows only the issues with no agent seen,
+      or only those with one. The project tiles count the listed issues with
+      no agent seen, and a card can name issues it looked at. A star pins an
+      issue to the top of its repository's list; pins are saved in sitboard's state file; when sitboard runs without a writable state (for example with `--no-state`) they last until it stops. A pinned issue that is
+      not among the 30 can show there too: on GitHub, sitboard asks for it by
+      number in the same lookup, and the row shows its title once GitHub has
+      answered, or that it was closed since you pinned it (such a pin goes 7
+      days after sitboard first saw it closed, unless GitHub reports it open
+      again first); nothing is asked of GitLab for one, so its row shows no
+      title. Project
+      tiles and rail rows show the open counts the forge has
+      given for a project's repositories (rail rows when above zero). GitLab
+      issues are asked through your own `glab`, for a host name whose glab
+      login check passed; glab sends them where its own configuration for
+      that name points. Off with
+      `--no-github` for GitHub and `--no-gitlab` for GitLab.
     brief: >-
-      The open GitHub issues of your projects' repositories, read only,
-      grouped by milestone, with a project's count on its tile once GitHub
-      has answered.
+      The open GitHub and GitLab issues of your projects' repositories, read
+      only, grouped by milestone, with a project's count on its tile once its
+      forge has answered, and which agents are on or looked at each; a star
+      pins an issue to the top of its list.
     anchors:
       - value: internal/model.MaxRepoIssues
         is: "30"
       - file: web/src/components/IssuesPanel.svelte
         has: aria-label="Milestone, counting the issues listed here"
+      - file: web/src/components/IssuesPanel.svelte
+        has: "{#if judged(i)}<span class=\"free\">{NO_AGENT_SEEN}</span>{/if}"
+      - file: web/src/data/words.ts
+        has: "export const NO_AGENT_SEEN = 'no agent seen';"
       - file: web/src/components/IssuesPanel.svelte
         has: "+{more} more on {forgeName(s.repo.forge)} ↗"
       - file: web/src/components/ProjectTiles.svelte
@@ -352,6 +375,28 @@ facts:
         has: "export function openIssuesOf(projects: readonly Project[]): number | null {"
       - file: cmd/sitboard/main.go
         has: "if l, ok := gh.(source.IssueLister); ok {"
+      - file: cmd/sitboard/main.go
+        has: "issues[model.ForgeGitLab] = gl"
+      - file: web/src/components/IssuesPanel.svelte
+        has: "Not asked yet: {forgeName(s.repo.forge)} has not answered about this repository."
+      - code: internal/adapters/gitlab.Provider.OpenIssues
+      - test: internal/core.TestGitLabIssuesAreAskedOnlyOnAHostThatPassedItsCheck
+      - file: web/src/components/IssuesPanel.svelte
+        has: aria-label="Agent, counting the issues listed here
+      - file: web/src/data/words.ts
+        has: "{ value: 'none', label: 'No agent seen' },"
+      - file: web/src/data/words.ts
+        has: "export const LOOKED_AT = 'looked at';"
+      - file: web/src/components/Card.svelte
+        has: "{LOOKED_AT}"
+      - file: web/src/data/words.ts
+        has: "export const PINNED_HEADING = 'Pinned';"
+      - code: internal/core.Board.SetIssuePin
+      - code: internal/core.Board.pinsToAskLocked
+      - test: internal/core.TestEveryPinIsAskedInOneLook
+      - test: internal/core.TestAGitLabPinIsNeverAskedNorReported
+      - code: internal/core.Board.pinnedRowsLocked
+      - code: internal/core.Board.linkIssuesLocked
 
   - id: jump
     text: >-
@@ -547,7 +592,9 @@ facts:
       No. sitboard only shows agents. Its actions are focusing a session in
       agterm or its tmux pane (or showing its details to copy), marking a card
       as seen, marking the catch-up read, turning notifications on or off, and
-      forgetting or setting a project grouping; it never types into, stops or
+      forgetting or setting a project grouping, and pinning or unpinning an
+      issue (which changes only sitboard's own state, nothing on GitHub
+      or GitLab); it never types into, stops or
       changes a session, and it lists leftovers but removes nothing.
     anchors:
       - file: internal/server/actions.go
@@ -633,37 +680,41 @@ facts:
   - id: sends-github
     sub: true
     text: >-
-      to GitHub, a check that `gh` is logged in, and read-only lookups for pull
-      request state and, for the Issues panel, for the open issues of the
+      to GitHub, a check that `gh` is logged in, and read-only lookups for pull request state (the repository's owner and name and the numbers of the pull requests a session created) and, for the Issues panel, for the open issues of the
       repositories of the projects on the board (their owner and name, at most
-      20 to a call and 100 to a look). The first look runs once sitboard
+      20 to a call and 100 to a look), and the numbers of the issues you
+      pinned in those repositories, all of them, in the same lookups. The
+      first look runs once sitboard
       knows a repository to ask about, then about every ten minutes; a
       repository new to the board or the panel reading the list can start
       one sooner, never within a minute of the latest one's start nor while
       one is under way. Once GitHub's rate limit stops a look, issue lookups,
       and pull request and Leftovers lookups for the repositories that look
       asked about, wait five minutes; one that had already passed that check
-      can still send its request. For Leftovers, these lookups include up to 100 branch
-      names from each clone on the board: its local branches (never-pushed
+      can still send its request. For Leftovers, these lookups include the repository's owner and name and up to 100 branch names a clone, from GitHub clones on the board: its local branches (never-pushed
       ones included) first, then its origin branches. `gh` runs with your
       environment and handles its own login: sitboard never asks for a GitHub
       token, and keeps, logs and serves none (a token in the environment of an
       agent's process it reads, below, is read past with the rest).
     short: >-
-      to GitHub, `gh` sends a check that it is logged in and read-only lookups
-      for pull request state and for the open issues of your projects'
-      repositories; for leftovers, these lookups include up to 100
-      branch names from each clone on the board, local ones (never-pushed ones
+      to GitHub, `gh` sends a check that it is logged in and read-only lookups for pull request state (a repository's owner and name and the numbers of the pull requests a session created) and for the open issues of your projects' repositories, and the numbers of the issues you pinned, in the same lookups; for leftovers, these lookups include the repository's owner and name and up to 100 branch names a clone, from GitHub clones on the board, local ones (never-pushed ones
       included) first, then origin ones. `gh` runs with your environment and
       handles its own login: sitboard never asks for a GitHub token, and
       keeps, logs and serves none.
     brief: >-
-      `gh` sends a check that it is logged in and read-only lookups (pull
-      requests, open issues), which for leftovers include branch names.
+      `gh` sends a check that it is logged in and read-only lookups (a repository's owner and name with pull request numbers, open issues and the numbers of the issues you pinned), which for leftovers include branch names with the repository's owner and name.
     anchors:
       - code: internal/adapters/github.provider.probeNow
       - code: internal/adapters/github.provider.Evidence
       - code: internal/adapters/github.provider.OpenIssues
+      - code: internal/adapters/github.buildIssuesQuery
+      - code: internal/core.Board.pinsToAskLocked
+      - value: internal/model.MaxPinsAsked
+        is: "200"
+      - value: internal/state.MaxPins
+        is: "200"
+      - test: internal/core.TestEveryPinIsAskedInOneLook
+      - test: internal/adapters/github.TestOpenIssuesReadsGitHubsRealPinnedAnswer
       - value: internal/adapters/github.issueReposPerCall
         is: "20"
       - value: internal/core.issuesEvery
@@ -695,23 +746,43 @@ facts:
       within the last ten minutes (gitlab.com included), which send the
       project's path or numeric id and the numbers of the merge requests a
       session created or a push of its named, and ask which issues such a
-      merge request closes. No branch name goes to GitLab. glab is asked
-      about a host by its name without a port, so it goes where its own
-      configuration for that name points.
+      merge request closes; and, for the Issues panel, read-only lookups for
+      the open issues of the GitLab projects of the projects on the board
+      (their path, at most 8 to a call), in the same looks as GitHub's
+      issue lookups and within their limit of 100 repositories a look; each
+      also asks for the address of the account glab is logged in with there
+      (`currentUser`), which sitboard keeps in memory only, per host name, to
+      notice a change of account. After glab reports that GitLab rate limited
+      a host, issue and merge request lookups to it wait for the time glab's
+      message gives, at least a minute, or five minutes when sitboard cannot
+      read a time from it. When an issue lookup finds that a host refused
+      glab's token, that host is not asked about issues for five minutes, on
+      any of its web ports, unless a login check made after the refusal
+      passes before. No branch name goes to GitLab.
+      glab is asked about a host by its name without a port, so it goes
+      where its own configuration for that name points; sitboard then leaves
+      out a project whose answer names another address than the one it asked
+      about.
     short: >-
       to GitLab, `glab` talks only about a GitLab host that a session inside
       `--roots` points to (the host of a merge request it created or a push of
       its named, or of its folder's origin when that is not on github.com):
       `glab auth status`, glab's own login check, contacts the host when glab
-      has a login stored for it; lookups go only to a host whose login check
-      passed within the last ten minutes (gitlab.com included) and send the
+      has a login stored for it; lookups are made only for a host name whose
+      login check passed within the last ten minutes (gitlab.com included),
+      go where glab's own configuration for that name points, and send the
       project's path or numeric id and the numbers of the merge requests a
       session created or a push of its named, and ask which issues such a
-      merge request closes. No branch name goes to GitLab.
+      merge request closes; issue lookups send the paths of your projects'
+      GitLab repositories and ask for the address of the account glab uses
+      there, kept in memory only. No branch name goes to GitLab.
     brief: >-
       `glab` sends its own login check, which contacts the host when glab has
-      a login stored for it, and, once that check has passed, read-only
-      lookups with a project's path or id and merge request numbers.
+      a login stored for it, and, once that check has passed for a host name,
+      read-only lookups with a project's path or id and merge request numbers,
+      and for open issues, which also ask for the address of the account glab
+      uses there; glab sends them where its own configuration for that name
+      points.
     anchors:
       - code: internal/core.Board.gitlabDemandLocked
       - code: internal/core.Board.lookupsLocked
@@ -723,6 +794,25 @@ facts:
         is: 10 * time.Minute
       - test: internal/core.TestOutsideRootsAsksNoGitLabHost
       - test: internal/adapters/gitlab.TestLookupAsksOnlyKnownHosts
+      - code: internal/adapters/gitlab.Provider.OpenIssues
+      - code: internal/adapters/gitlab.buildIssuesQuery
+      - code: internal/adapters/gitlab.issueFields
+      - value: internal/core.issuesRefusedHold
+        is: 5 * time.Minute
+      - code: internal/adapters/gitlab.Provider.hostIssues
+      - code: internal/adapters/gitlab.Provider.stillAsk
+      - code: internal/adapters/gitlab.Provider.admit
+      - code: internal/adapters/internal/runner.Admit
+      - code: internal/adapters/gitlab.rateLimitWait
+      - code: internal/adapters/gitlab.Provider.limited
+      - value: internal/adapters/gitlab.issueReposPerCall
+        is: "8"
+      - value: internal/adapters/gitlab.rateLimitBackoff
+        is: "5 * time.Minute"
+      - value: internal/adapters/gitlab.minRateLimitWait
+        is: "time.Minute"
+      - test: internal/adapters/gitlab.TestOpenIssuesAsksOnlyCheckedHosts
+      - test: internal/adapters/gitlab.TestOpenIssuesRateLimitBacksOff
 
   - id: no-traffic-flags
     text: >-
@@ -820,31 +910,29 @@ facts:
     text: >-
       **What it reads.** Claude Code's session files, the transcripts of
       running sessions and, at start, those changed in the last 8 days,
-      including ended sessions, to derive states, times, models, effort levels,
-      token counts, Claude Code's own cost estimates, pull requests, artifacts
-      and names. It keeps only those derived facts, in memory. From
+      including ended sessions, to derive session ids, folders, states, times, models, effort levels, subagent counts, token counts, Claude Code's own cost estimates, pull requests, the issues
+      their own `gh` and `glab` issue commands name, artifacts and names. It
+      keeps only those derived facts, in memory (never the command text). From
       `~/.claude.json` it reads only Claude Code's price table
       (`additionalModelCostsCache`); every other key in that file is read past
       and not kept.
     short: >-
       **What it reads.** Claude Code's session files, the transcripts of
       running sessions and, at start, those changed in the last 8 days, to
-      derive states, times, models, effort levels, token counts, cost
-      estimates, pull requests, artifacts and names; it keeps only those
-      derived facts, in memory. From `~/.claude.json` it reads only Claude
+      derive session ids, folders, states, times, models, effort levels, subagent counts, token counts, cost estimates, pull requests, the issues their own `gh` and `glab` issue
+      commands name, artifacts and names; it keeps only those derived facts,
+      in memory. From `~/.claude.json` it reads only Claude
       Code's price table; every other key in that file is read past and not
       kept.
     brief: >-
-      It reads what Claude Code already writes on your machine: a small file
-      for each live session, and the transcripts of running sessions and, at
-      start, of those changed in the last 8 days, for the pull requests they
-      opened, the artifacts they published, the workers they started, their
-      effort level and their token use.
+      It reads what Claude Code already writes on your machine: a small file for each live session, and the transcripts of running sessions and, at start, of those changed in the last 8 days, for session ids, folders, names, states, times, models, effort levels, token use and cost estimates, the pull requests they opened, the issues their own `gh` and `glab` commands named, the artifacts they published and the workers they started; from `~/.claude.json` it takes Claude Code's price table. This is a summary; the full list is under Privacy.
     anchors:
       - value: internal/adapters/claude.spendKeep
         is: 8 * 24 * time.Hour
       - code: internal/adapters/claude.readPrices
       - test: internal/adapters/claude.TestNoTranscriptTextInEmittedFacts
+      - test: internal/adapters/claude.TestIssueCommandsBecomeTouches
+      - test: internal/adapters/claude.TestIssueTouchesAreTheSessionsOwn
 
   - id: reads-process
     joins: true
@@ -886,8 +974,12 @@ facts:
   - id: reads-tools
     joins: true
     text: >-
-      It also asks `git` about each session's folder (repository, branch and
-      remote) and, for Leftovers, about the worktrees, local and origin
+      It also asks `git` about each session's folder and, for some of a
+      session's own `gh` or `glab` issue commands that named no repository,
+      about the folder they ran in (for at most 32 further folders named only by issue commands): which
+      repository, branch and remotes it is in, with the remotes' fetch and
+      push addresses, and whether `gh` has a default repository set there;
+      for Leftovers, about the worktrees, local and origin
       branches and stashes of the repositories on the board and the local
       status of the worktrees that could be leftovers and of a main checkout
       where an idle session sits (read only: no fetch, no lock), every 10
@@ -900,8 +992,8 @@ facts:
       works where and commit ids stay in memory: they are not served, written
       to disk or logged.
     short: >-
-      It also asks `git` about each session's folder (repository, branch and
-      remote) and, for leftovers, every 10 minutes or sooner, about the
+      It also asks `git` about each session's folder and some folders a
+      session's own issue commands ran in (repository, branch, the remotes' fetch and push addresses and `gh`'s default repository there); for leftovers, every 10 minutes or sooner, about the
       worktrees, branches and stashes of the repositories on the board and the
       local status of the worktrees that could be leftovers and of a main
       checkout where an idle session sits (read only: no fetch, no lock); `ps`
@@ -912,7 +1004,8 @@ facts:
       events. Stash messages, file names from `git status`, which process
       works where and commit ids stay in memory: they are not served, written
       to disk or logged.
-    brief: It asks git for each project's repository and branch.
+    brief: >-
+      It asks `git`, `ps`, `lsof` and, with agterm, `agtermctl` about your projects: each session's folder and the folders its issue commands ran in (repository, branch, the remotes' fetch and push addresses, `gh`'s default repository), the worktrees, branches and stashes behind Leftovers, when processes started and where they work, and agterm's windows, workspaces, sessions and events. This is a summary; the full list is under Privacy.
     anchors:
       - code: internal/adapters/gitsrc.gitVars
       - value: internal/core.leftoversEvery
@@ -922,6 +1015,12 @@ facts:
       - code: internal/adapters/internal/proc.PSStarts
       - code: internal/adapters/procs.lister.lsof
       - code: internal/adapters/procs.lister.Procs
+      - code: internal/adapters/gitsrc.resolver.resolve
+      - code: internal/adapters/gitsrc.resolver.ghResolved
+      - value: internal/core.maxTouchFolders
+        is: "32"
+      - code: internal/core.Board.touchFolderLocked
+      - code: internal/core.Board.linkIssuesLocked
 
   - id: tmux-reads
     text: >-
@@ -966,7 +1065,8 @@ facts:
       line of the recent ones (by modification time) and of those whose lock
       is held, to tell which kind of session it is; the rollouts of running and
       recently active sessions, for states, times, models, effort levels, pull
-      requests, the sessions they started and token counts; and, at start,
+      requests, the issues their own `gh` and `glab` issue commands name, the
+      sessions they started and token counts; and, at start,
       those of the last 7 days, including sessions that had already ended, for
       their folder, model and effort, finished turns, pull and merge requests
       and token counts. It reads Codex's session index for each
@@ -988,7 +1088,8 @@ facts:
       **Codex.** If Codex's folder exists, it reads the first line of Codex's
       recent session files (by modification time) and of those whose lock is
       held, the files of running and recently active sessions, for states,
-      times, models, effort levels, pull requests and token counts, and, at
+      times, models, effort levels, pull requests, the issues their own `gh`
+      and `glab` issue commands name and token counts, and, at
       start, those of the last 7 days, including sessions that had already
       ended, for their folder, model and effort, finished turns, pull and
       merge requests and token counts; Codex's session index for each
@@ -1012,6 +1113,8 @@ facts:
       - code: internal/adapters/codex.psList
       - test: internal/adapters/codex.TestNewUsesCodexHome
       - test: internal/adapters/codex.TestHeldLockFindsARolloutOutsideTheWindow
+      - test: internal/adapters/codex.TestIssueCommandsBecomeTouches
+      - test: internal/adapters/codex.TestTouchedIssuesReachTheFact
 
   - id: writes
     text: >-
@@ -1023,16 +1126,22 @@ facts:
       `$XDG_STATE_HOME/sitboard/state.json`, by default
       `~/.local/state/sitboard/state.json`; or the file given with `--state`)
       keeps which cards you have seen, the folders that group projects, the
-      groupings you forgot, the folders you set to always or never group, when
+      groupings you forgot, the folders you set to always or never group, the
+      issues you pinned (forge, host, repository and number, and when you
+      pinned each, and, once sitboard has learned from GitHub that one is
+      closed, when it first learned it), when
       the newest list you marked read with "Caught up" was made, and, for each
       catch-up item marked read whose own time is in the last 7 days, a hash
       of the item's identity (not the identity itself) and that time; an item
-      older than 7 days is dropped on the next save. A file of sitboard 0.4.0
-      or earlier loses its catch-up marker and the items it kept as unread
-      the first time this version opens it. While it holds items marked read,
-      the file is written as version 3, which sitboard 0.4.0 and earlier
-      refuse to open; the first save after the last of them is 7 days old
-      writes it as an older version again. A
+      older than 7 days is dropped on the next save, and so is a pinned issue
+      sitboard learned was closed more than 7 days before. A file of sitboard
+      0.4.0 or earlier loses its catch-up marker and the items it kept as
+      unread the first time this version opens it. The file's version follows
+      what it holds: while it holds a pin it is written as version 4, which
+      sitboard 0.5.x and earlier refuse to open; with no pin but items marked
+      read, as version 3, which sitboard 0.4.0 and earlier refuse to open;
+      with neither but a folder set to always or never group, as version 2;
+      otherwise as version 1. A
       running board that can write the lock file writes its process number and
       machine name there, and a clean stop empties it; when it can only read
       the lock file, it writes nothing there and leaves what was in it. With
@@ -1042,10 +1151,14 @@ facts:
       **Two small files of its own**: `state.json` (saved through a temporary
       file beside it), which keeps which cards you have seen, which folders
       group projects, which groupings you forgot, which folders you set to
-      always or never group, when the newest list you marked read with "Caught
+      always or never group, the issues you pinned (forge, host, repository
+      and number, when you pinned each, and when sitboard first learned from
+      GitHub that one is closed), when the newest list you marked read with "Caught
       up" was made, and, for each catch-up item marked read whose own time is
       in the last 7 days, a hash of the item's identity (not the identity
-      itself) and that time; and beside it `state.json.lock`, which
+      itself) and that time (while it holds a pin it is written as version 4,
+      which sitboard 0.5.x and earlier refuse to open); and beside it
+      `state.json.lock`, which
       keeps one board per state file: a running sitboard that can write it
       writes only its process number and machine name there, and a clean stop
       empties it; one that can only read it writes nothing there and leaves
@@ -1060,12 +1173,18 @@ facts:
     anchors:
       - code: internal/state.document
       - code: internal/state.CatchupKey
+      - code: internal/state.PinKey
+      - value: internal/state.fileVersion
+        is: "4"
+      - code: internal/state.prunePins
       - code: internal/state.writeAtomic
       - code: internal/state.CheckWritable
       - code: internal/state.Lock
       - code: internal/state.FileLock.Release
       - code: cmd/sitboard.stateFile
       - test: internal/state.TestWriteIsAtomic
+      - test: internal/state.TestVersionIsFourOnlyWhileAPinIsStored
+      - test: internal/state.TestPinRetention
       - test: internal/state.TestLockNamesNoOneWhenTheHolderCannotWrite
       - test: cmd/sitboard.TestNoStateWritesNothing
 
@@ -1077,14 +1196,16 @@ facts:
       them), repository names with their owner ("owner/name") or GitLab group
       path, agterm workspace names, pull request and merge request numbers,
       titles and links with their state, checks, review or approval and draft
-      flag, the numbers and links of the issues they close in their own
-      repository or project, the GitLab status line, the links and titles of
+      flag, the issues they close in their own
+      repository or project and the listed issues their own `gh` or `glab`
+      issue commands looked at (each with its forge, host, repository, number,
+      link and whether they close it or looked at it, never the command), the GitLab status line, the links and titles of
       the artifacts a session published, and, for Leftovers, the home-relative
       worktree and clone paths and branch names of merged work still on the
       machine, counts of held-back items by reason and when that list was
-      made, each card's id (the tool's name and the session's own id, such as
+      made, the project each card belongs to, each card's id (the tool's name and the session's own id, such as
       `claude:` and Claude Code's session id) and, with agterm, the agterm
-      session id of its terminal, plus derived fields such as states, times,
+      session id of its terminal, plus derived fields such as states, whether a session is live, its parent session, seen and attention marks, times,
       model ids and effort levels, token counts and the estimated cost at API
       list price, subagent counts, the versions of the tools it reads, and
       sitboard's own version, commit, operating system and architecture. It
@@ -1099,18 +1220,10 @@ facts:
       never served. The page gets names (of sessions, of repositories with
       their owner or GitLab group, of agterm workspaces), titles (of sessions,
       pull and merge requests and artifacts), which hold whatever words they
-      were given, home-relative folder paths, pull request, merge request,
-      issue and artifact links, each card's id (the tool and the session's own
-      id) and, with agterm, its terminal's session id, and derived fields such
-      as states, checks, times, model ids, effort levels, token counts,
-      estimated costs, counts and versions; for leftovers, the home-relative
-      paths and branch names of merged work still on the machine.
+      were given, home-relative folder paths, pull request and merge request checks, review or approval and draft flags, the GitLab status line, pull request, merge request and artifact links, the issues they close or looked at (each with its forge, host, repository, number, link and which of the two), each card's id (the tool and the session's own id), the project it belongs to and, with agterm, its terminal's session id, and derived fields such as states, whether a session is live, its parent session, seen and attention marks, checks, times, model ids, effort levels, token counts,
+      estimated costs, counts and versions; for leftovers, the home-relative paths and branch names of merged work still on the machine, counts of held-back items by reason and when that list was made.
     brief: >-
-      The page gets names, titles, folder paths, states, pull and merge request
-      titles and links, the links of the issues they close, and artifact titles
-      and links, never the text of prompts and replies, file contents or whole
-      tool results. A name or a title holds whatever words it was given: an
-      artifact's title, for one, is what the session's publish reported.
+      The page gets names, titles, folder paths, states, times, models, effort levels, token counts and cost estimates, card and terminal ids, the project a card belongs to, parent sessions and attention marks, pull and merge request titles, links, checks and review states, the issues they close or looked at (forge, host, repository, number, link and which), the GitLab status line, artifact titles and links, Leftovers paths, branch names and hold counts, and the versions of the tools it reads; never the text of prompts and replies, file contents or whole tool results. A name or a title holds whatever words it was given: an artifact's title, for one, is what the session's publish reported. This is a summary; the full list is under Privacy.
     anchors:
       - value: internal/state.MaxGroupingSettings
         is: "200"
@@ -1146,6 +1259,7 @@ facts:
       - field: Issue.number
       - field: Issue.repo
       - field: Issue.url
+      - field: Issue.kind
       - field: Artifact.title
       - field: Artifact.url
       - field: SourceStatus.kind
@@ -1315,12 +1429,10 @@ facts:
   - id: page-codex
     joins: true
     text: >-
-      From a Codex rollout the page gets only derived fields (model, effort,
-      folder, pull requests, finished turns' times, token counts), no text from the conversation; the
+      From a Codex rollout the page gets only derived fields (session id, model, effort, folder, status and when it started, last changed status and was last active, number of in-process subagents, pull and merge requests and the issues they close, which sessions it started (from the rollout's spawn records), the listed issues its own `gh` or `glab` issue commands named, finished turns' times, token counts), no text from the conversation; the
       only free text from Codex's files is the session's title.
     short: >-
-      From a Codex rollout the page gets only derived fields (model, effort,
-      folder, pull requests, finished turns' times, token counts); the only free text from Codex's
+      From a Codex rollout the page gets only derived fields (session id, model, effort, folder, status and when it started, last changed status and was last active, number of in-process subagents, pull and merge requests and the issues they close, which sessions it started (from the rollout's spawn records), the listed issues its own `gh` or `glab` issue commands named, finished turns' times, token counts); the only free text from Codex's
       files is a session's title, which Codex recorded for it.
     anchors:
       - code: internal/adapters/codex.names.update
@@ -1333,31 +1445,56 @@ facts:
       For the Issues panel, the page gets the open issues of the repositories
       of the projects on the board, read only: for each repository its open
       count and up to 30 issues with their number, title, link, milestone and
-      its due date, up to 5 labels and when each was last updated, plus each
-      project's open count. A title, a milestone and a label hold whatever
+      its due date, up to 5 labels and when each was last updated, and which
+      cards are on each issue or looked at it, plus each project's and the board's open count and how many of its listed issues have no agent seen. A title, a milestone and a label hold whatever
       words they were given on the forge; sitboard cleans them and shortens
       long ones before serving them. They are
-      kept in memory only, never written anywhere. When an issue look finds
-      the GitHub login gone, they leave the page.
+      kept in memory only, never written anywhere. The page also gets which
+      of them you pinned (listed first), and the pinned issues that are not
+      among them, with their number, link and the cards whose open pull or
+      merge request closes them: on GitHub, "closed" once sitboard has
+      learned that one is, and, once GitHub has answered for one, what it answered (title, milestone and
+      its due date, labels, when it was last updated, and whether it is open
+      or closed); on GitLab nothing more, as nothing is asked of GitLab for
+      them.
+      It also gets whether the pins are
+      kept only for this run (as with `--no-state`). When an issue look finds
+      the GitHub login, or a GitLab host's login, gone, they leave the page.
     short: >-
       For the Issues panel, the page gets the open issues of your projects'
       repositories, read only: up to 30 per repository with their number,
-      title, link, milestone, labels and when each was last updated. A title
+      title, link, milestone and its due date, labels, when each was last updated, whether you pinned it and which agents are on it or looked at it, each repository's open count, for each project and the board how many listed issues have no agent seen, whether the pins are saved, plus the issues you pinned that are not among them: their number and link, the agents whose open pull or merge request closes them, and on GitHub whether it is closed, as last recorded, and, once it has answered for one, its title, milestone and due date, labels and when it was last updated. A title
       holds whatever words it was given, cleaned and shortened; they are kept
       in memory only, and they leave the page when an issue look finds the
-      GitHub login gone.
+      GitHub login, or a GitLab host's login, gone.
     brief: >-
-      The Issues panel lists the open issues of your projects' repositories,
-      read only, kept in memory only.
+      The Issues panel lists the open issues of your projects' repositories (number, title, link, milestone, labels, update time, which agents are on or looked at each, your pin marks) with counts, and the issues you pinned outside the list, with what GitHub answered for them and whether pins are saved. It keeps them in memory and changes nothing on the forge. This is a summary; the full list is under Privacy.
     anchors:
       - value: internal/model.MaxRepoIssues
         is: "30"
       - value: internal/model.MaxIssueLabels
         is: "5"
       - code: internal/core.pageRepoIssues
+      - code: internal/core.Board.linkIssuesLocked
+      - code: internal/core.Board.touchRepoLocked
+      - test: internal/core.TestALookedAtIssueLinksTheCardAndCountsAsSeen
+      - test: internal/core.TestACoordinatorGivesNoLookedAt
+      - test: internal/core.TestAForkWithItsUpstreamIsUnknownForAFolderTouch
+      - code: internal/core.Board.pinnedRowsLocked
+      - code: internal/core.Board.pinReportsLocked
+      - test: internal/core.TestPinThroughTheServer
+      - test: internal/core.TestPinnedNumbersAreAskedInTheLookAndFillTheirRows
+      - test: internal/core.TestTheForgesAnswerIsReportedToThePins
+      - test: internal/core.TestAGitLabPinIsNeverAskedNorReported
+      - code: internal/state.closedMarkCounts
+      - test: internal/state.TestAGitLabPinsClosedMarkGoesAndItsPinStays
       - test: internal/core.TestALostLoginShowsOnTheGitHubLineUntilALookAnswersAgain
+      - test: internal/core.TestGitLabIssuesLoginLostOnOneHostDeniesOnlyThatHost
       - field: Snapshot.issues
       - field: Project.openIssues
+      - field: Project.issuesNoAgent
+      - field: Project.issuesKey
+      - field: RepoIssues.key
       - field: IssueCount.known
       - field: IssueCount.open
       - field: IssuesSummary.state
@@ -1365,17 +1502,20 @@ facts:
       - field: IssuesSummary.open
       - field: IssuesSummary.rev
       - field: IssuesSummary.purged
+      - field: IssuesSummary.noAgent
       - field: Issues.state
       - field: Issues.asOf
       - field: Issues.repos
       - field: Issues.rev
       - field: Issues.freshMs
+      - field: Issues.unsaved
       - field: RepoIssues.forge
       - field: RepoIssues.host
       - field: RepoIssues.repo
       - field: RepoIssues.state
       - field: RepoIssues.open
       - field: RepoIssues.issues
+      - field: RepoIssues.pinned
       - field: OpenIssue.number
       - field: OpenIssue.title
       - field: OpenIssue.url
@@ -1383,6 +1523,11 @@ facts:
       - field: OpenIssue.milestoneDue
       - field: OpenIssue.labels
       - field: OpenIssue.updatedAt
+      - field: OpenIssue.agents
+      - field: OpenIssue.pinned
+      - field: OpenIssue.state
+      - field: IssueAgent.cardId
+      - field: IssueAgent.kind
 
   - id: notifications
     text: >-
@@ -1412,7 +1557,8 @@ facts:
       `--no-gitlab` (run no `glab`; with both, nothing goes to GitHub or
       GitLab), `--roots` (only agents working under these folders), `--stale-after` (default `20m`), `--state <file>` (use
       this state file instead of the default one), `--no-state` (keep seen
-      marks, what Catch-up marked read and groupings in memory only), `--version`,
+      marks, what Catch-up marked read, pinned issues and groupings in memory
+      only), `--version`,
       `--licenses` (sitboard's licence and the third-party notices).
     anchors:
       - code: cmd/sitboard.parseArgs
@@ -1449,7 +1595,7 @@ facts:
   - id: req-gh
     text: >-
       Optional: [`gh`](https://cli.github.com), logged in, for pull request
-      state and Leftovers.
+      state, issues and Leftovers.
     anchors:
       - code: internal/adapters/github.provider.probeNow
 
@@ -1457,7 +1603,7 @@ facts:
     text: >-
       Optional: [`glab`](https://gitlab.com/gitlab-org/cli) (tested with
       1.131.0), logged in with `glab auth login` to each GitLab host,
-      gitlab.com included, for GitLab merge requests.
+      gitlab.com included, for GitLab merge requests and issues.
     anchors:
       - value: internal/adapters/gitlab.testedVersions
         is: '[]string{"1.131.0"}'
@@ -1487,11 +1633,14 @@ facts:
     anchors:
       - code: internal/core.onlyGitHub
 
-  - id: not-yet-gitlab-issues
-    text: "GitLab in the Issues panel: it lists GitHub issues only."
+  - id: not-yet-gitlab-pins
+    text: >-
+      Pinned GitLab issues that are not among the 30 listed, read from GitLab:
+      nothing is asked for them, so their rows show no title and no closed
+      state.
     anchors:
-      - file: cmd/sitboard/main.go
-        has: "if l, ok := gh.(source.IssueLister); ok {"
+      - test: internal/core.TestAGitLabPinIsNeverAskedNorReported
+      - code: internal/core.Board.pinnedRowsLocked
 
   - id: not-yet-ce-approval
     text: Approval on GitLab Community Edition, which has no approval fields.
@@ -1611,7 +1760,7 @@ sections:
   readme-run: [flags]
   readme-lock: [one-board]
   readme-requirements: [req-agents, req-gh, req-glab, req-agterm, req-tmux]
-  readme-not-yet: [not-yet-removal, not-yet-gitlab-leftovers, not-yet-gitlab-issues, not-yet-ce-approval, not-yet-codex, not-yet-codex-apps]
+  readme-not-yet: [not-yet-removal, not-yet-gitlab-leftovers, not-yet-gitlab-pins, not-yet-ce-approval, not-yet-codex, not-yet-codex-apps]
 
 # The board's columns in the board's order (internal/contract.Columns), with
 # the words the page uses for them; the facts test checks both.

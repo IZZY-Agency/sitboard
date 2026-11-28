@@ -55,6 +55,8 @@ func enumList() []enumDef {
 		enumOf(GroupingModes...),
 		enumOf(IssuesStates...),
 		enumOf(RepoIssuesStates...),
+		enumOf(IssueKinds...),
+		enumOf(OpenIssueStates...),
 	}
 }
 
@@ -87,10 +89,12 @@ func structList() []reflect.Type {
 		reflect.TypeFor[Issues](),
 		reflect.TypeFor[RepoIssues](),
 		reflect.TypeFor[OpenIssue](),
+		reflect.TypeFor[IssueAgent](),
 		reflect.TypeFor[CardRequest](),
 		reflect.TypeFor[ProjectRequest](),
 		reflect.TypeFor[GroupingSetting](),
 		reflect.TypeFor[GroupingRequest](),
+		reflect.TypeFor[IssuePinRequest](),
 		reflect.TypeFor[CatchupReadRequest](),
 	}
 }
@@ -106,6 +110,7 @@ var paths = []struct{ name, path string }{
 	{"catchupRead", PathCatchupRead},
 	{"forgetGrouping", PathForgetGrouping},
 	{"groupingSetting", PathGroupingSetting},
+	{"issuePin", PathIssuePin},
 }
 
 // TypeScript returns the content of web/src/contract.gen.ts. It panics when a

@@ -31,6 +31,12 @@
 // newer sitboard"). A file with no setting is written as version 1, as before,
 // so those builds still open it. This build reads both.
 //
+// Pinned issues ("pins", 0.6.0) are the owner's choice too: forge, host,
+// repository path and number of each, with when it was pinned, and when the
+// forge first reported it closed ("pinsClosed"; the pin goes 7 days later).
+// While the file holds a pin it is written as version 4, which 0.5.x and
+// earlier refuse to open; with none it is written as before.
+//
 // The file is JSON, written atomically (temp file, then rename) with mode 0600.
 // It is created on the first write, not on Open. Memory gives a store with no
 // file at all, for throwaway runs.
@@ -166,6 +172,26 @@ type Store interface {
 	// ForgetGrouping removes a folder's setting (back to auto, held).
 	SetGrouping(path, mode string, at time.Time) error
 
+	// Pins returns a copy of the pinned issues (key -> when pinned), without
+	// those reported closed more than SeenRetention ago. A key has the form
+	// PinKey gives. Pins never expire otherwise.
+	Pins() map[string]time.Time
+	// PinsClosed returns a copy of when each pinned issue was first reported
+	// closed (ReportPins), for the pins Pins returns.
+	PinsClosed() map[string]time.Time
+	// SetPin pins (pinned true) or unpins the issue named by key at at, in
+	// one write; nothing is written when nothing changes (pinning a pinned
+	// issue keeps its first time). A new pin past MaxPins is ErrTooManyPins,
+	// a key not in PinKey's form an error. After Close it returns ErrClosed.
+	SetPin(key string, pinned bool, at time.Time) error
+	// ReportPins records what the forge said about pinned issues, in one
+	// write (none when nothing changes): PinClosed marks a pin closed now (a
+	// pin marked already keeps its first time), PinOpen clears that mark (a
+	// reopened issue), PinGone drops the pin at once (not found). Keys that
+	// are not pinned are ignored. A pin marked closed more than
+	// SeenRetention ago is dropped on the next write.
+	ReportPins(reports map[string]PinReport) error
+
 	// Close stops saving: a write in progress finishes first, later changes
 	// stay in memory only. Call it before the state file's lock is released,
 	// so nothing is written once another sitboard may hold the file. The
@@ -176,11 +202,13 @@ type Store interface {
 }
 
 // fileVersion is the newest file version this build reads. It writes
-// versionPlain when the file holds no grouping setting and no catch-up
-// acknowledgement, versionGrouping when it holds a grouping setting and no
-// acknowledgement, and fileVersion while it holds an acknowledgement
-// ("catchupRead"): older builds would drop it on their next write, so they
-// must refuse the file instead (0.4.0: "written by a newer sitboard").
+// versionPlain when the file holds no grouping setting, no catch-up
+// acknowledgement and no pin, versionGrouping when it holds a grouping
+// setting and neither of the others, versionCatchup while it holds an
+// acknowledgement ("catchupRead") and no pin, and fileVersion while it holds
+// a pin: older builds would drop what they do not know on their next write,
+// so they must refuse the file instead (0.4.0: "written by a newer
+// sitboard").
 //
 // This build reads a version 2 file's "grouping" leniently: a mode it does
 // not know is dropped with a log line, and the next write saves the file
@@ -188,11 +216,88 @@ type Store interface {
 // setting the owner chose, MUST write version 3 (or higher) while the file
 // holds one; otherwise this build, run after it (a downgrade), drops that
 // setting silently.
+//
+// Pins (0.6.0) are such a setting: while the file holds one it is written as
+// version 4 (fileVersion), which 0.5.x (it reads up to 3) refuses instead of
+// dropping the pins. A file with no pin is written as before (3, 2 or 1), so
+// 0.5.x still opens it.
 const (
-	fileVersion     = 3
+	fileVersion     = 4
+	versionCatchup  = 3
 	versionGrouping = 2
 	versionPlain    = 1
 )
+
+// MaxPins caps how many issues can be pinned. A new pin past it is refused,
+// never one dropped.
+const MaxPins = 200
+
+// ErrTooManyPins is what SetPin returns for a new pin past MaxPins.
+var ErrTooManyPins = errors.New("state: too many issues are pinned")
+
+// PinReport is what the forge said about a pinned issue (ReportPins).
+type PinReport int
+
+const (
+	PinOpen   PinReport = iota + 1 // open: a closed mark goes
+	PinClosed                      // closed: kept SeenRetention from the first report
+	PinGone                        // not found: the pin goes at once
+)
+
+// The forges a pin key names (model.ForgeGitHub, model.ForgeGitLab; state
+// does not import model).
+const (
+	pinForgeGitHub = "github"
+	pinForgeGitLab = "gitlab"
+)
+
+// maxPinKey caps a pin key's length: a host (253) and a path, with room.
+const maxPinKey = 1024
+
+// PinKey is how a pinned issue is kept: "forge|host|path#number", for
+// example "github|github.com|owner/name#145". The caller gives the
+// repository as the board names it for issues (lowercased GitHub owner and
+// name), so one issue has one key.
+func PinKey(forge, host, path string, number int) string {
+	return forge + "|" + host + "|" + path + "#" + strconv.Itoa(number)
+}
+
+// ParsePinKey splits a key PinKey made; ok is false for any other string:
+// an unknown forge, an empty or "|"-holding host, an empty path, a number
+// outside 1..2^31-1 or not written plainly.
+func ParsePinKey(key string) (forge, host, path string, number int, ok bool) {
+	if len(key) > maxPinKey {
+		return "", "", "", 0, false
+	}
+	forge, rest, ok1 := strings.Cut(key, "|")
+	host, rest, ok2 := strings.Cut(rest, "|")
+	hash := strings.LastIndexByte(rest, '#')
+	if !ok1 || !ok2 || hash <= 0 || (forge != pinForgeGitHub && forge != pinForgeGitLab) || host == "" {
+		return "", "", "", 0, false
+	}
+	path, num := rest[:hash], rest[hash+1:]
+	n, err := strconv.Atoi(num)
+	if err != nil || n < 1 || n > math.MaxInt32 || strconv.Itoa(n) != num || strings.ContainsAny(path, "|") ||
+		strings.ContainsFunc(key, func(r rune) bool { return r < 0x21 || r == 0x7f }) {
+		return "", "", "", 0, false
+	}
+	return forge, host, path, n, true
+}
+
+// canonicalPinKey spells a valid key as the board does: a GitHub host and
+// owner/name in lower case (GitHub ignores their case); a GitLab key as it
+// is (paths and ports are kept exactly).
+func canonicalPinKey(key string) string {
+	if forge, host, path, n, ok := ParsePinKey(key); ok && forge == pinForgeGitHub {
+		return PinKey(forge, strings.ToLower(host), strings.ToLower(path), n)
+	}
+	return key
+}
+
+func validPinKey(key string) bool {
+	_, _, _, _, ok := ParsePinKey(key)
+	return ok
+}
 
 // The values of a grouping setting. A folder with no setting is on auto:
 // it groups as sitboard sees it (umbrellas, forget).
@@ -225,6 +330,12 @@ type document struct {
 	// those items then count as unread, nothing is lost.
 	CatchupRead     map[string]time.Time `json:"catchupRead,omitempty"`
 	CatchupMarkedAt time.Time            `json:"catchupMarkedAt,omitzero"`
+	// Pins: pinned issue (PinKey) -> when pinned. While it holds one the
+	// file is version 4 (see fileVersion).
+	Pins map[string]time.Time `json:"pins,omitempty"`
+	// PinsClosed: pinned issue -> when the forge first reported it closed.
+	// Only keys of Pins; the pin goes SeenRetention after.
+	PinsClosed map[string]time.Time `json:"pinsClosed,omitempty"`
 }
 
 type fileStore struct {
@@ -277,6 +388,8 @@ func openAt(file string, clock func() time.Time) (Store, error) {
 		Marker    json.RawMessage `json:"catchupMarker"`
 		Unread    json.RawMessage `json:"catchupUnread"`
 		Read      json.RawMessage `json:"catchupRead"`
+		Pins      json.RawMessage `json:"pins"`
+		Closed    json.RawMessage `json:"pinsClosed"`
 	}
 	if err := json.Unmarshal(data, &disk); err != nil {
 		return nil, fmt.Errorf("state: %s is not a valid state file (move it aside to start fresh): %w", file, err)
@@ -299,6 +412,7 @@ func openAt(file string, clock func() time.Time) (Store, error) {
 	doc.Forgotten = readForgotten(disk.Forgotten)
 	doc.Grouping = readGrouping(disk.Grouping)
 	doc.CatchupRead = readCatchupSet(disk.Read, s.now())
+	doc.Pins, doc.PinsClosed = readPins(disk.Pins, disk.Closed, s.now())
 	// The catch-up marker and unread items an older build (0.4.0) left are
 	// dropped at the first open, whatever they hold, and the drop saved at
 	// once: what the marker covered is unread again, never read on a guess.
@@ -629,13 +743,16 @@ func pruneCatchup(m map[string]time.Time, now time.Time, limit int) map[string]t
 	return out
 }
 
-// versionOf is the version a document is written as: 2 while it holds a
-// grouping setting, so older builds refuse it instead of dropping the
-// setting; 1 otherwise.
+// versionOf is the version a document is written as: 4 while it holds a
+// pin, 3 while it holds a catch-up acknowledgement, 2 while it holds a
+// grouping setting, so older builds refuse it instead of dropping what they
+// do not know; 1 otherwise.
 func versionOf(doc document) int {
 	switch {
-	case len(doc.CatchupRead) > 0:
+	case len(doc.Pins) > 0:
 		return fileVersion
+	case len(doc.CatchupRead) > 0:
+		return versionCatchup
 	case len(doc.Grouping) > 0:
 		return versionGrouping
 	}
@@ -916,6 +1033,7 @@ func (s *fileStore) commit(next document) error {
 	next.Umbrellas = PruneUmbrellas(next.Umbrellas, s.now())
 	next.Forgotten = PruneUmbrellas(next.Forgotten, s.now())
 	next.CatchupRead = pruneCatchup(next.CatchupRead, s.now(), MaxCatchupRead)
+	next.Pins, next.PinsClosed = prunePins(next.Pins, next.PinsClosed, s.now())
 	next.Version = versionOf(next) // an empty "grouping" is left out (omitempty)
 	data, err := json.MarshalIndent(next, "", "  ")
 	if err != nil {
@@ -1008,4 +1126,188 @@ func writeAtomic(path string, data []byte) (os.FileInfo, error) {
 		return renamed, nil
 	}
 	return closed, nil
+}
+
+func (s *fileStore) Pins() map[string]time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	pins, _ := prunePins(s.doc.Pins, s.doc.PinsClosed, s.now())
+	return maps.Clone(pins)
+}
+
+func (s *fileStore) PinsClosed() map[string]time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, closed := prunePins(s.doc.Pins, s.doc.PinsClosed, s.now())
+	return maps.Clone(closed)
+}
+
+func (s *fileStore) SetPin(key string, pinned bool, at time.Time) error {
+	if !validPinKey(key) {
+		return fmt.Errorf("state: %d-byte pin key is not forge|host|path#number", len(key))
+	}
+	key = canonicalPinKey(key)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed && s.path != "" {
+		return ErrClosed
+	}
+	pins, _ := prunePins(s.doc.Pins, s.doc.PinsClosed, s.now())
+	_, had := pins[key]
+	if had == pinned {
+		return nil // nothing changes: a pin keeps its first time
+	}
+	if pinned && len(pins) >= MaxPins {
+		return ErrTooManyPins
+	}
+	next := s.doc
+	next.Pins = maps.Clone(s.doc.Pins)
+	next.PinsClosed = maps.Clone(s.doc.PinsClosed)
+	if pinned {
+		if next.Pins == nil {
+			next.Pins = map[string]time.Time{}
+		}
+		next.Pins[key] = at.UTC()
+	} else {
+		delete(next.Pins, key)
+	}
+	delete(next.PinsClosed, key) // a new pin starts open; an unpinned one has none
+	return s.commit(next)
+}
+
+func (s *fileStore) ReportPins(reports map[string]PinReport) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now().UTC()
+	// Pruned first: a late "open" never revives a pin whose 7 days are over.
+	pins, closed := prunePins(s.doc.Pins, s.doc.PinsClosed, now)
+	next := s.doc
+	next.Pins, next.PinsClosed = maps.Clone(pins), maps.Clone(closed)
+	changed := false
+	for key, r := range reports {
+		key = canonicalPinKey(key)
+		if _, ok := next.Pins[key]; !ok {
+			continue
+		}
+		_, closed := next.PinsClosed[key]
+		switch {
+		case r == PinGone:
+			delete(next.Pins, key)
+			delete(next.PinsClosed, key)
+		case r == PinOpen && closed:
+			delete(next.PinsClosed, key)
+		case r == PinClosed && !closed:
+			if next.PinsClosed == nil {
+				next.PinsClosed = map[string]time.Time{}
+			}
+			next.PinsClosed[key] = now
+		default:
+			continue
+		}
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	return s.commit(next)
+}
+
+// readPins decodes the optional "pins" and "pinsClosed" keys leniently, like
+// "grouping": an entry that is not a pin key and a time is dropped with one
+// log line that names no key, and the rest of the file is kept. Past
+// MaxPins, the newest pins are kept (prunePins).
+func readPins(rawPins, rawClosed json.RawMessage, now time.Time) (map[string]time.Time, map[string]time.Time) {
+	// newer: of two spellings of one key the newer time wins, else the earlier.
+	read := func(raw json.RawMessage, what string, newer bool) map[string]time.Time {
+		if !present(raw) {
+			return nil
+		}
+		var entries map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &entries); err != nil {
+			log.Printf("state: the %s in the state file are not readable; dropped them", what)
+			return nil
+		}
+		out := make(map[string]time.Time, len(entries))
+		bad := 0
+		for k, v := range entries {
+			var at time.Time
+			// null decodes as the zero time: no time at all, so malformed.
+			if err := json.Unmarshal(v, &at); err != nil || at.IsZero() || !validPinKey(k) {
+				bad++
+				continue
+			}
+			// One issue, one key: a hand-edited "Org/Repo" is the board's
+			// "org/repo". Of two spellings the newer time is kept for a pin,
+			// the earlier for a closed mark (the first report).
+			k = canonicalPinKey(k)
+			if prev, ok := out[k]; ok && (prev.After(at) == newer) {
+				continue
+			}
+			out[k] = at
+		}
+		if bad > 0 {
+			log.Printf("state: dropped %d unreadable %s from the state file", bad, what)
+		}
+		return out
+	}
+	pins := read(rawPins, "pinned issue(s)", true)
+	closed := read(rawClosed, "closed marks of pinned issues", false)
+	for k, at := range closed {
+		if at.After(now) {
+			closed[k] = now.UTC() // a wrong clock: it still ages out
+		}
+	}
+	if n := len(pins); n > MaxPins {
+		log.Printf("state: dropped %d pinned issue(s) past %d from the state file", n-MaxPins, MaxPins)
+	}
+	return prunePins(pins, closed, now)
+}
+
+// closedMarkCounts: a closed mark of pin key counts, kept and aged out
+// after SeenRetention, only for a GitHub pin.
+func closedMarkCounts(key string) bool {
+	forge, _, _, _, ok := ParsePinKey(key)
+	return ok && forge == "github"
+}
+
+// prunePins drops pins marked closed more than SeenRetention before now,
+// closed marks of keys not pinned, closed marks of pins not on GitHub (only
+// GitHub is asked about a pin by number, #182: a GitLab pin's mark from an
+// earlier build goes and its pin stays), and, past MaxPins, the pins pinned
+// earliest (a hand-edited file: SetPin never passes it). It returns new maps
+// when it changes one (nil when empty), else the ones given.
+func prunePins(pins, closed map[string]time.Time, now time.Time) (map[string]time.Time, map[string]time.Time) {
+	cutoff := now.Add(-SeenRetention)
+	keep := make([]string, 0, len(pins))
+	for k := range pins {
+		if at, ok := closed[k]; ok && at.Before(cutoff) && closedMarkCounts(k) {
+			continue
+		}
+		keep = append(keep, k)
+	}
+	marks := 0
+	for k := range closed {
+		if _, ok := pins[k]; ok && closedMarkCounts(k) {
+			marks++
+		}
+	}
+	if len(keep) == len(pins) && len(keep) <= MaxPins && marks == len(closed) {
+		return pins, closed
+	}
+	slices.SortFunc(keep, func(a, b string) int { return cmp.Or(pins[b].Compare(pins[a]), cmp.Compare(a, b)) })
+	keep = keep[:min(len(keep), MaxPins)]
+	var outPins, outClosed map[string]time.Time
+	for _, k := range keep {
+		if outPins == nil {
+			outPins = make(map[string]time.Time, len(keep))
+		}
+		outPins[k] = pins[k]
+		if at, ok := closed[k]; ok && closedMarkCounts(k) {
+			if outClosed == nil {
+				outClosed = map[string]time.Time{}
+			}
+			outClosed[k] = at
+		}
+	}
+	return outPins, outClosed
 }

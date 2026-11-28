@@ -50,7 +50,7 @@ func TestOpenIssuesAsksTwentyRepositoriesPerCallWithNamesAsVariables(t *testing.
 		return issuesAnswer(strings.Count(q, "repository(")), nil
 	}}
 	p := newTestProvider(f, &clock{t: issuesAt})
-	got, err := p.OpenIssues(context.Background(), repos)
+	got, err := p.OpenIssues(context.Background(), repos, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestOpenIssuesReadsEachRepositorysAnswer(t *testing.T) {
 	}}
 	p := newTestProvider(f, &clock{t: issuesAt})
 	a, b, c := model.GitHubRepo("sample-org/alpha"), model.GitHubRepo("sample-org/gone"), model.GitHubRepo("sample-org/quiet")
-	got, err := p.OpenIssues(context.Background(), []model.ForgeRepo{a, b, c})
+	got, err := p.OpenIssues(context.Background(), []model.ForgeRepo{a, b, c}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,16 +136,16 @@ func TestOpenIssuesBacksOffAfterARateLimit(t *testing.T) {
 	c := &clock{t: issuesAt}
 	p := newTestProvider(f, c)
 	repos := []model.ForgeRepo{model.GitHubRepo("sample-org/alpha")}
-	if _, err := p.OpenIssues(context.Background(), repos); !errors.Is(err, source.ErrRateLimited) {
+	if _, err := p.OpenIssues(context.Background(), repos, nil); !errors.Is(err, source.ErrRateLimited) {
 		t.Fatalf("err = %v, want rate limited", err)
 	}
 	limited = false
 	c.t = c.t.Add(rateLimitBackoff - time.Second)
-	if _, err := p.OpenIssues(context.Background(), repos); !errors.Is(err, source.ErrRateLimited) || f.apiCalls() != 1 {
+	if _, err := p.OpenIssues(context.Background(), repos, nil); !errors.Is(err, source.ErrRateLimited) || f.apiCalls() != 1 {
 		t.Fatalf("during the backoff: err %v, %d calls; want no gh call", err, f.apiCalls())
 	}
 	c.t = c.t.Add(time.Second)
-	if got, err := p.OpenIssues(context.Background(), repos); err != nil || len(got) != 1 || f.apiCalls() != 2 {
+	if got, err := p.OpenIssues(context.Background(), repos, nil); err != nil || len(got) != 1 || f.apiCalls() != 2 {
 		t.Fatalf("after the backoff: %+v, %v, %d calls", got, err, f.apiCalls())
 	}
 }
@@ -159,7 +159,8 @@ func TestOpenIssuesSkipsOtherForgesAndBadSlugs(t *testing.T) {
 		model.GitHubRepo("-flag/alpha"),
 		model.GitHubRepo("sample-org/alpha"),
 		model.GitHubRepo("sample-org/alpha"),
-	})
+	}, nil)
+
 	if err != nil || len(got) != 1 || got[0].Repo != model.GitHubRepo("sample-org/alpha") {
 		t.Fatalf("got %+v, %v", got, err)
 	}
@@ -172,7 +173,7 @@ func TestOpenIssuesSwitchedOffRunsNoGh(t *testing.T) {
 	f := &fakeGh{reply: func([]string) ([]byte, error) { return issuesAnswer(1), nil }}
 	p := newTestProvider(f, &clock{t: issuesAt})
 	p.off = true
-	got, err := p.OpenIssues(context.Background(), []model.ForgeRepo{model.GitHubRepo("sample-org/alpha")})
+	got, err := p.OpenIssues(context.Background(), []model.ForgeRepo{model.GitHubRepo("sample-org/alpha")}, nil)
 	if err != nil || got != nil || len(f.calls) != 0 {
 		t.Fatalf("got %+v, %v, calls %v", got, err, f.calls)
 	}
@@ -183,7 +184,7 @@ func TestOpenIssuesFailureIsAnError(t *testing.T) {
 		return nil, &runner.ExitError{Code: 1, Stderr: []byte("gh: something broke")}
 	}}
 	p := newTestProvider(f, &clock{t: issuesAt})
-	got, err := p.OpenIssues(context.Background(), []model.ForgeRepo{model.GitHubRepo("sample-org/alpha")})
+	got, err := p.OpenIssues(context.Background(), []model.ForgeRepo{model.GitHubRepo("sample-org/alpha")}, nil)
 	if err == nil || got != nil {
 		t.Fatalf("got %+v, %v; want an error", got, err)
 	}
@@ -200,7 +201,7 @@ func TestOpenIssuesLeavesOutARepositoryWhoseAnswerFailedForAnotherReason(t *test
 	}}
 	p := newTestProvider(f, &clock{t: issuesAt})
 	a := model.GitHubRepo("sample-org/alpha")
-	got, err := p.OpenIssues(context.Background(), []model.ForgeRepo{a, model.GitHubRepo("sample-org/beta"), model.GitHubRepo("sample-org/gamma")})
+	got, err := p.OpenIssues(context.Background(), []model.ForgeRepo{a, model.GitHubRepo("sample-org/beta"), model.GitHubRepo("sample-org/gamma")}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,11 +221,11 @@ func TestOpenIssuesHonoursARateLimitThatCameWithData(t *testing.T) {
 	p := newTestProvider(f, &clock{t: issuesAt})
 	a := model.GitHubRepo("sample-org/alpha")
 	repos := []model.ForgeRepo{a, model.GitHubRepo("sample-org/beta")}
-	got, err := p.OpenIssues(context.Background(), repos)
+	got, err := p.OpenIssues(context.Background(), repos, nil)
 	if !errors.Is(err, source.ErrRateLimited) || len(got) != 1 || got[0].Repo != a {
 		t.Fatalf("got %+v, %v; want alpha kept and a rate limit", got, err)
 	}
-	if _, err := p.OpenIssues(context.Background(), repos); !errors.Is(err, source.ErrRateLimited) || f.apiCalls() != 1 {
+	if _, err := p.OpenIssues(context.Background(), repos, nil); !errors.Is(err, source.ErrRateLimited) || f.apiCalls() != 1 {
 		t.Fatalf("after: %v, %d calls; want no gh call during the backoff", err, f.apiCalls())
 	}
 }
@@ -238,7 +239,7 @@ func TestIssuesAndPullRequestLookupsShareTheRateLimitBackoff(t *testing.T) {
 	// An issue list that hit the limit holds pull request lookups of its repositories.
 	f := &fakeGh{reply: limit}
 	p := newTestProvider(f, &clock{t: issuesAt})
-	if _, err := p.OpenIssues(context.Background(), []model.ForgeRepo{repo}); !errors.Is(err, source.ErrRateLimited) {
+	if _, err := p.OpenIssues(context.Background(), []model.ForgeRepo{repo}, nil); !errors.Is(err, source.ErrRateLimited) {
 		t.Fatalf("issues: %v", err)
 	}
 	_, _ = p.Lookup(context.Background(), repo, []int{12}, nil)
@@ -253,7 +254,7 @@ func TestIssuesAndPullRequestLookupsShareTheRateLimitBackoff(t *testing.T) {
 	if g.apiCalls() != 1 {
 		t.Fatalf("lookup calls %d", g.apiCalls())
 	}
-	if _, err := q.OpenIssues(context.Background(), []model.ForgeRepo{repo}); !errors.Is(err, source.ErrRateLimited) || g.apiCalls() != 1 {
+	if _, err := q.OpenIssues(context.Background(), []model.ForgeRepo{repo}, nil); !errors.Is(err, source.ErrRateLimited) || g.apiCalls() != 1 {
 		t.Fatalf("issues during the lookup's backoff: %v, %d calls", err, g.apiCalls())
 	}
 }
@@ -263,7 +264,7 @@ func TestOpenIssuesSaysALostLogin(t *testing.T) {
 		return nil, &runner.ExitError{Code: 4, Stderr: []byte("To get started with GitHub CLI, please run:  gh auth login")}
 	}}
 	p := newTestProvider(f, &clock{t: issuesAt})
-	if _, err := p.OpenIssues(context.Background(), []model.ForgeRepo{model.GitHubRepo("sample-org/alpha")}); !errors.Is(err, source.ErrNotLoggedIn) {
+	if _, err := p.OpenIssues(context.Background(), []model.ForgeRepo{model.GitHubRepo("sample-org/alpha")}, nil); !errors.Is(err, source.ErrNotLoggedIn) {
 		t.Fatalf("err = %v, want not logged in", err)
 	}
 }
@@ -288,7 +289,7 @@ func TestALimitThatArrivesBetweenChunksHoldsTheRestOfTheLook(t *testing.T) {
 		return issuesAnswer(strings.Count(q, "repository(")), nil
 	}}
 	p = newTestProvider(f, &clock{t: issuesAt})
-	got, err := p.OpenIssues(context.Background(), manyRepos(25))
+	got, err := p.OpenIssues(context.Background(), manyRepos(25), nil)
 	if f.apiCalls() != 2 {
 		t.Fatalf("gh calls = %d, want 2: chunk two asks only for the repositories not in a backoff", f.apiCalls())
 	}
@@ -310,7 +311,7 @@ func TestALimitOnALaterChunkHoldsPullRequestLookupsOfEarlierRepositories(t *test
 	}}
 	p := newTestProvider(f, &clock{t: issuesAt})
 	repos := manyRepos(25)
-	got, err := p.OpenIssues(context.Background(), repos)
+	got, err := p.OpenIssues(context.Background(), repos, nil)
 	if !errors.Is(err, source.ErrRateLimited) || len(got) != 20 {
 		t.Fatalf("got %d rows, %v; want the first 20 and a rate limit", len(got), err)
 	}
@@ -332,7 +333,7 @@ func TestAnAliasWithAnErrorUnderItIsNotAnAnswer(t *testing.T) {
 	}}
 	p := newTestProvider(f, &clock{t: issuesAt})
 	a := model.GitHubRepo("sample-org/alpha")
-	got, err := p.OpenIssues(context.Background(), []model.ForgeRepo{a, model.GitHubRepo("sample-org/beta"), model.GitHubRepo("sample-org/gamma")})
+	got, err := p.OpenIssues(context.Background(), []model.ForgeRepo{a, model.GitHubRepo("sample-org/beta"), model.GitHubRepo("sample-org/gamma")}, nil)
 	if err != nil || len(got) != 1 || got[0].Repo != a {
 		t.Fatalf("got %+v, %v; want only the complete alias: a nested error, and a NOT_FOUND below the repository, are no answers", got, err)
 	}
@@ -351,7 +352,7 @@ func TestARepositoryThatIsNotFoundAndHurtAtOnceIsNotAnAnswer(t *testing.T) {
 	}}
 	p := newTestProvider(f, &clock{t: issuesAt})
 	b := model.GitHubRepo("sample-org/beta")
-	got, err := p.OpenIssues(context.Background(), []model.ForgeRepo{model.GitHubRepo("sample-org/alpha"), b})
+	got, err := p.OpenIssues(context.Background(), []model.ForgeRepo{model.GitHubRepo("sample-org/alpha"), b}, nil)
 	if err != nil || len(got) != 1 || got[0].Repo != b {
 		t.Fatalf("got %+v, %v; want only the complete alias: a NOT_FOUND with another error on the same repository is no verdict that it is gone", got, err)
 	}
@@ -368,7 +369,7 @@ func TestALostLoginAfterAGoodChunkReturnsNoRows(t *testing.T) {
 		return issuesAnswer(strings.Count(q, "repository(")), nil
 	}}
 	p := newTestProvider(f, &clock{t: issuesAt})
-	got, err := p.OpenIssues(context.Background(), manyRepos(25))
+	got, err := p.OpenIssues(context.Background(), manyRepos(25), nil)
 	if !errors.Is(err, source.ErrNotLoggedIn) || len(got) != 0 {
 		t.Fatalf("got %d rows, %v; want none: the rows of a login that is gone are dropped", len(got), err)
 	}
@@ -388,7 +389,7 @@ func TestAChunkWhoseRepositoriesAllCoolDownDoesNotEndTheLook(t *testing.T) {
 		p.backoff[backoffKey(r.Path)] = issuesAt.Add(time.Hour)
 	}
 	p.mu.Unlock()
-	got, err := p.OpenIssues(context.Background(), repos)
+	got, err := p.OpenIssues(context.Background(), repos, nil)
 	if err != nil || len(got) != 1 || got[0].Repo != repos[20] || f.apiCalls() != 1 {
 		t.Fatalf("got %d rows, %v, %d gh calls; want repository 21 asked and answered once", len(got), err, f.apiCalls())
 	}
@@ -425,7 +426,7 @@ func TestALaterGoodChunkDoesNotHideAnEarlierIncompleteOne(t *testing.T) {
 			}}
 			p := newTestProvider(f, &clock{t: issuesAt})
 			repos := manyRepos(25)
-			got, err := p.OpenIssues(context.Background(), repos)
+			got, err := p.OpenIssues(context.Background(), repos, nil)
 			if err != nil || f.apiCalls() != 2 {
 				t.Fatalf("%v, %d gh calls; want both chunks asked and the rows kept", err, f.apiCalls())
 			}

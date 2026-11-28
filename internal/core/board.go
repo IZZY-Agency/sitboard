@@ -55,80 +55,90 @@ type Board struct {
 	roots []string
 	build contract.Build // read once: build info does not change while it runs
 
-	mu              sync.Mutex
-	sessions        map[model.SessionKey]model.SessionFact
-	terminals       map[string]model.TerminalFact
-	repos           map[string]model.Repo // by folder; a folder absent here is still being resolved
-	repoGen         map[string]uint64     // by folder: the latest git lookup started; older answers are dropped
-	plain           map[string]bool       // by folder: git answered that it is in no repository (see isPlain)
-	repoFailed      map[string]bool       // by folder: git gave no answer at the latest lookup (repos holds the folder as its own project)
-	umbrellas       map[string]time.Time  // umbrella folder -> last time an agent sat in it (live or remembered)
-	umbrellaTo      map[string]time.Time  // umbrella times to write to the state file on the next tick
-	liveSince       map[string]time.Time  // live umbrella -> when it became live, until it is remembered
-	missing         map[string]int        // remembered umbrella -> checks in a row that found it gone
-	forgotten       map[string]time.Time  // folder whose grouping the owner forgot -> last time an agent sat in it
-	forgotTo        map[string]time.Time  // forgotten times to write to the state file on the next tick
-	vacantFrom      map[string]time.Time  // forgotten folder -> since when no agent sits in it
-	release         map[string]time.Time  // forgotten folders to drop from the state file on the next tick -> their time when released
-	settings        map[string]string     // folder -> state.GroupingAlways or state.GroupingNever; absent: auto
-	goneAt          time.Time             // when the gone check last started
-	goneBusy        bool                  // a gone check's worker is running
-	closed          bool                  // Run returned: no more state writes from checks, no more publishes
-	prs             map[model.PRRef]model.PullRequest
-	lookedUp        map[model.ForgeRepo]time.Time // repo -> last lookup on its forge (wall clock)
-	pending         map[model.ForgeRepo]bool      // repos with pull request refs never looked up
-	asked           map[model.PRRef]bool          // pull request refs its forge was asked about
-	resolved        time.Time                     // last time live folders were resolved again
-	memSeen         map[string]time.Time          // used when no state store is given
-	selected        map[string]time.Time          // terminal id -> last selection in agterm
-	seenWrites      map[string]time.Time          // seen marks to write once b.mu is released
-	writeMu         sync.Mutex                    // orders state file writes; taken after b.mu, never before
-	lastTick        time.Time
-	resumedAt       time.Time
-	sources         []contract.SourceStatus
-	ready           map[contract.SourceKind]bool         // watchers that sent model.SourceReady
-	backfilled      map[contract.SourceKind]bool         // watchers that sent model.BackfillDone
-	backfillCut     map[contract.SourceKind]bool         // those whose BackfillDone said the read was cut by a bound
-	lastAsOf        time.Time                            // the newest catch-up list's AsOf
-	learned         map[string]learnedItem               // catch-up item -> its time, key and whether it is read
-	shownLists      []shownList                          // the newest catch-up lists of this run, with the items each showed
-	listRun         string                               // this run's part of a list id: a list of another run is never this one's
-	listSeq         int                                  // the last list's number in this run
-	readSet         map[string]time.Time                 // the acknowledged catch-up items, as the state file holds them (state key -> own time)
-	markedAt        time.Time                            // when the newest list marked read was made
-	missingRefs     map[model.PRRef]bool                 // pull requests a lookup did not find: ended sessions stop asking
-	goneRepos       map[model.ForgeRepo]bool             // repos their forge did not find: ended sessions stop asking
-	leftovers       contract.Leftovers                   // the latest leftovers list; State "" before the first
-	leftoverAt      time.Time                            // when the latest look started
-	leftoverBusy    bool                                 // a look is under way
-	leftoverSaw     map[model.PRRef]bool                 // the merged pull requests the board knew when the latest look started
-	leftoverScope   []string                             // leftoverScopeLocked when the latest look started
-	issues          map[model.ForgeRepo]model.RepoIssues // the latest answer per repository (issues.go)
-	issuesTried     map[model.ForgeRepo]time.Time        // by issueKey: when each repository was last asked about
-	issuesAt        time.Time                            // when the latest look started (throttling)
-	issuesListAt    time.Time                            // when the list last changed (Issues.AsOf)
-	issuesRev       uint64                               // counts changes of the list
-	issuesPurged    uint64                               // the rev at which listed rows last went (IssuesSummary.Purged)
-	issuesSeenState contract.IssuesState                 // the state and repositories the summary last named
-	issuesSeenRepos []model.ForgeRepo
-	issuesPage      *issuesPage                   // the latest list as the page gets it
-	issuesBusy      bool                          // a look is under way
-	issuesWant      bool                          // the page asked for the list since the latest look started
-	issuesDone      bool                          // a look answered, or there was nothing to ask
-	issuesCh        chan struct{}                 // the page asks for a look
-	glHosts         map[string]hostDecision       // GitLab host -> may lookups go there (forges.go)
-	glBase          contract.SourceStatus         // the GitLab source line as glab's probe gave it
-	ghBase          contract.SourceStatus         // the GitHub source line as gh's probe gave it
-	ghLogin         loginSeen                     // what the latest issue look said about gh's login (refreshGitHubLineLocked)
-	glAsking        map[string]context.CancelFunc // GitLab hosts being checked now, each with what calls its check off (forges.go)
-	glGen           map[string]uint64             // GitLab host -> its generation: what was learned there before it changed is dropped (hostStamp)
-	glEpoch         uint64                        // the generation of every GitLab host at once (hostStamp)
-	glSrc           uint64                        // times the GitLab source line was set; a probe that started before is dropped
-	glDemand        map[string]bool               // the GitLab hosts sessions needed at the last rebuild (noteGitLabDemandLocked)
-	glScans         int                           // times the sessions were scanned for GitLab hosts; tests read it
-	glDecided       int                           // host checks answered so far; tests wait on it
-	glProbed        time.Time                     // when glab was last probed
-	glProbing       bool                          // a probe runs in the background
+	mu               sync.Mutex
+	sessions         map[model.SessionKey]model.SessionFact
+	terminals        map[string]model.TerminalFact
+	repos            map[string]model.Repo // by folder; a folder absent here is still being resolved
+	repoGen          map[string]uint64     // by folder: the latest git lookup started; older answers are dropped
+	touchFolders     map[string]bool       // folders only an issue command's working directory named, whose lookup the touch started (at most maxTouchFolders)
+	plain            map[string]bool       // by folder: git answered that it is in no repository (see isPlain)
+	repoFailed       map[string]bool       // by folder: git gave no answer at the latest lookup (repos holds the folder as its own project)
+	umbrellas        map[string]time.Time  // umbrella folder -> last time an agent sat in it (live or remembered)
+	umbrellaTo       map[string]time.Time  // umbrella times to write to the state file on the next tick
+	liveSince        map[string]time.Time  // live umbrella -> when it became live, until it is remembered
+	missing          map[string]int        // remembered umbrella -> checks in a row that found it gone
+	forgotten        map[string]time.Time  // folder whose grouping the owner forgot -> last time an agent sat in it
+	forgotTo         map[string]time.Time  // forgotten times to write to the state file on the next tick
+	vacantFrom       map[string]time.Time  // forgotten folder -> since when no agent sits in it
+	release          map[string]time.Time  // forgotten folders to drop from the state file on the next tick -> their time when released
+	settings         map[string]string     // folder -> state.GroupingAlways or state.GroupingNever; absent: auto
+	goneAt           time.Time             // when the gone check last started
+	goneBusy         bool                  // a gone check's worker is running
+	closed           bool                  // Run returned: no more state writes from checks, no more publishes
+	prs              map[model.PRRef]model.PullRequest
+	lookedUp         map[model.ForgeRepo]time.Time // repo -> last lookup on its forge (wall clock)
+	pending          map[model.ForgeRepo]bool      // repos with pull request refs never looked up
+	asked            map[model.PRRef]bool          // pull request refs its forge was asked about
+	resolved         time.Time                     // last time live folders were resolved again
+	memSeen          map[string]time.Time          // used when no state store is given
+	selected         map[string]time.Time          // terminal id -> last selection in agterm
+	seenWrites       map[string]time.Time          // seen marks to write once b.mu is released
+	writeMu          sync.Mutex                    // orders state file writes; taken after b.mu, never before
+	lastTick         time.Time
+	resumedAt        time.Time
+	sources          []contract.SourceStatus
+	ready            map[contract.SourceKind]bool         // watchers that sent model.SourceReady
+	backfilled       map[contract.SourceKind]bool         // watchers that sent model.BackfillDone
+	backfillCut      map[contract.SourceKind]bool         // those whose BackfillDone said the read was cut by a bound
+	lastAsOf         time.Time                            // the newest catch-up list's AsOf
+	learned          map[string]learnedItem               // catch-up item -> its time, key and whether it is read
+	shownLists       []shownList                          // the newest catch-up lists of this run, with the items each showed
+	listRun          string                               // this run's part of a list id: a list of another run is never this one's
+	listSeq          int                                  // the last list's number in this run
+	readSet          map[string]time.Time                 // the acknowledged catch-up items, as the state file holds them (state key -> own time)
+	markedAt         time.Time                            // when the newest list marked read was made
+	missingRefs      map[model.PRRef]bool                 // pull requests a lookup did not find: ended sessions stop asking
+	goneRepos        map[model.ForgeRepo]bool             // repos their forge did not find: ended sessions stop asking
+	leftovers        contract.Leftovers                   // the latest leftovers list; State "" before the first
+	leftoverAt       time.Time                            // when the latest look started
+	leftoverBusy     bool                                 // a look is under way
+	leftoverSaw      map[model.PRRef]bool                 // the merged pull requests the board knew when the latest look started
+	leftoverScope    []string                             // leftoverScopeLocked when the latest look started
+	issues           map[model.ForgeRepo]model.RepoIssues // the latest answer per repository (issues.go)
+	issuesTried      map[model.ForgeRepo]time.Time        // by issueKey: when each repository was last asked about
+	issuesDenied     map[model.ForgeRepo]uint64           // by issueKey: how many times a lookup found each repository gone (deniedLocked)
+	issuesPicked     map[model.ForgeRepo]time.Time        // by issueKey: when each repository was last picked for a look, whether its answer counted or not (the order past maxIssueRepos)
+	issuesReadAt     map[model.ForgeRepo]time.Time        // by issueKey: when the look that read each listed answer started
+	issuesHold       map[string]time.Time                 // GitLab host name (every web port of it) -> no issue calls before this: it refused glab's token
+	ghGen            uint64                               // GitHub's generation for issues (issueGen): a logout, a repository lost or issues switched off
+	issuesAt         time.Time                            // when the latest look started (throttling)
+	issuesListAt     time.Time                            // when the list last changed (Issues.AsOf)
+	issuesRev        uint64                               // counts changes of the list
+	issueLinks       issueLinks                           // the cards on each issue, at the last rebuild (linkIssuesLocked)
+	issueNoAgent     map[string]int                       // by issueKey(r).Key(): listed rows with no link, at the last rebuild
+	issuesSeenServed string                               // what Issues serves, as noteServedLocked last counted it into issuesRev
+	issuesSeenPurge  uint64                               // issuesPurged as noteServedLocked last saw it
+	issuesPurged     uint64                               // the rev at which listed rows last went (IssuesSummary.Purged)
+	issuesSeenState  contract.IssuesState                 // the state and repositories the summary last named
+	issuesSeenRepos  []model.ForgeRepo
+	issuesPage       *issuesPage                   // the latest list as the page gets it
+	issuesBusy       bool                          // a look is under way
+	issuesWant       bool                          // the page asked for the list since the latest look started
+	issuesDone       bool                          // a look answered, or there was nothing to ask
+	issuesCh         chan struct{}                 // the page asks for a look
+	glHosts          map[string]hostDecision       // GitLab host -> may lookups go there (forges.go)
+	glBase           contract.SourceStatus         // the GitLab source line as glab's probe gave it
+	ghBase           contract.SourceStatus         // the GitHub source line as gh's probe gave it
+	ghLogin          loginSeen                     // what the latest issue look said about gh's login (refreshGitHubLineLocked)
+	glAsking         map[string]context.CancelFunc // GitLab hosts being checked now, each with what calls its check off (forges.go)
+	glGen            map[string]uint64             // GitLab host -> its generation: what was learned there before it changed is dropped (hostStamp)
+	glEpoch          uint64                        // the generation of every GitLab host at once (hostStamp)
+	glSrc            uint64                        // times the GitLab source line was set; a probe that started before is dropped
+	glDemand         map[string]bool               // the GitLab hosts sessions needed at the last rebuild (noteGitLabDemandLocked)
+	glScans          int                           // times the sessions were scanned for GitLab hosts; tests read it
+	glDecided        int                           // host checks answered so far; tests wait on it
+	glProbed         time.Time                     // when glab was last probed
+	glProbing        bool                          // a probe runs in the background
 	// notOwn: per session, merge requests a push announced that GitLab says
 	// none of its pushes created (forges.go, creditPushedLocked).
 	notOwn map[model.SessionKey]map[model.PRRef]bool
@@ -146,6 +156,13 @@ type Board struct {
 	// the changes and writing them, where a ForgetGrouping can fall. Set it
 	// before the board ticks; a tick reads it without a lock.
 	flushGap func()
+
+	// Pins asked of the forge (pinlookup.go), all under b.mu.
+	pinSerial     uint64                        // moves at every pin or unpin (SetIssuePin)
+	pinChanged    map[string]uint64             // pin key -> pinSerial when it was pinned last, while it is pinned
+	issuesVer     map[model.ForgeRepo]uint64    // by issueKey: the version of the answer kept in issues (noteAnswerLocked)
+	issuesAnswers uint64                        // the latest version given
+	issuesServed  map[model.ForgeRepo]servedSig // by the repository on the board: the signature of its served rows (servedSigLocked)
 }
 
 // view is the derived board. It is replaced, never changed in place.
@@ -173,48 +190,53 @@ func New(opts Options) *Board {
 	}
 	home, _ := os.UserHomeDir()
 	b := &Board{
-		opts:        opts,
-		home:        filepath.Clean(home),
-		build:       buildOf(buildinfo.Version, buildinfo.Commit),
-		sessions:    map[model.SessionKey]model.SessionFact{},
-		terminals:   map[string]model.TerminalFact{},
-		repos:       map[string]model.Repo{},
-		repoGen:     map[string]uint64{},
-		plain:       map[string]bool{},
-		repoFailed:  map[string]bool{},
-		umbrellas:   map[string]time.Time{},
-		umbrellaTo:  map[string]time.Time{},
-		liveSince:   map[string]time.Time{},
-		missing:     map[string]int{},
-		forgotten:   map[string]time.Time{},
-		forgotTo:    map[string]time.Time{},
-		vacantFrom:  map[string]time.Time{},
-		release:     map[string]time.Time{},
-		settings:    map[string]string{},
-		prs:         map[model.PRRef]model.PullRequest{},
-		lookedUp:    map[model.ForgeRepo]time.Time{},
-		pending:     map[model.ForgeRepo]bool{},
-		asked:       map[model.PRRef]bool{},
-		memSeen:     map[string]time.Time{},
-		selected:    map[string]time.Time{},
-		seenWrites:  map[string]time.Time{},
-		sources:     []contract.SourceStatus{},
-		ready:       map[contract.SourceKind]bool{},
-		backfilled:  map[contract.SourceKind]bool{},
-		backfillCut: map[contract.SourceKind]bool{},
-		cardKeys:    map[string]model.SessionKey{},
-		subs:        map[chan contract.Snapshot]struct{}{},
-		refreshCh:   make(chan struct{}, 1),
-		issuesCh:    make(chan struct{}, 1),
-		issues:      map[model.ForgeRepo]model.RepoIssues{},
-		issuesTried: map[model.ForgeRepo]time.Time{},
-		learned:     map[string]learnedItem{},
-		missingRefs: map[model.PRRef]bool{},
-		goneRepos:   map[model.ForgeRepo]bool{},
-		glHosts:     map[string]hostDecision{},
-		glAsking:    map[string]context.CancelFunc{},
-		glGen:       map[string]uint64{},
-		notOwn:      map[model.SessionKey]map[model.PRRef]bool{},
+		opts:         opts,
+		home:         filepath.Clean(home),
+		build:        buildOf(buildinfo.Version, buildinfo.Commit),
+		sessions:     map[model.SessionKey]model.SessionFact{},
+		terminals:    map[string]model.TerminalFact{},
+		repos:        map[string]model.Repo{},
+		repoGen:      map[string]uint64{},
+		touchFolders: map[string]bool{},
+		plain:        map[string]bool{},
+		repoFailed:   map[string]bool{},
+		umbrellas:    map[string]time.Time{},
+		umbrellaTo:   map[string]time.Time{},
+		liveSince:    map[string]time.Time{},
+		missing:      map[string]int{},
+		forgotten:    map[string]time.Time{},
+		forgotTo:     map[string]time.Time{},
+		vacantFrom:   map[string]time.Time{},
+		release:      map[string]time.Time{},
+		settings:     map[string]string{},
+		prs:          map[model.PRRef]model.PullRequest{},
+		lookedUp:     map[model.ForgeRepo]time.Time{},
+		pending:      map[model.ForgeRepo]bool{},
+		asked:        map[model.PRRef]bool{},
+		memSeen:      map[string]time.Time{},
+		selected:     map[string]time.Time{},
+		seenWrites:   map[string]time.Time{},
+		sources:      []contract.SourceStatus{},
+		ready:        map[contract.SourceKind]bool{},
+		backfilled:   map[contract.SourceKind]bool{},
+		backfillCut:  map[contract.SourceKind]bool{},
+		cardKeys:     map[string]model.SessionKey{},
+		subs:         map[chan contract.Snapshot]struct{}{},
+		refreshCh:    make(chan struct{}, 1),
+		issuesCh:     make(chan struct{}, 1),
+		issues:       map[model.ForgeRepo]model.RepoIssues{},
+		issuesTried:  map[model.ForgeRepo]time.Time{},
+		issuesPicked: map[model.ForgeRepo]time.Time{},
+		issuesDenied: map[model.ForgeRepo]uint64{},
+		issuesReadAt: map[model.ForgeRepo]time.Time{},
+		issuesHold:   map[string]time.Time{},
+		learned:      map[string]learnedItem{},
+		missingRefs:  map[model.PRRef]bool{},
+		goneRepos:    map[model.ForgeRepo]bool{},
+		glHosts:      map[string]hostDecision{},
+		glAsking:     map[string]context.CancelFunc{},
+		glGen:        map[string]uint64{},
+		notOwn:       map[model.SessionKey]map[model.PRRef]bool{},
 	}
 	b.listRun = newListRun()
 	if opts.State != nil {
@@ -322,13 +344,20 @@ var resolveSlots = make(chan struct{}, maxResolves)
 // startResolveLocked asks git about folder with no lock held. Only the answer
 // to the latest lookup of a folder is kept. Callers hold b.mu.
 func (b *Board) startResolveLocked(folder string) {
+	b.startResolveAsLocked(folder, false)
+}
+
+// startResolveAsLocked is startResolveLocked; touch asks as a folder only an
+// issue command named (source.TouchResolver, no filesystem probe of its own).
+// Callers hold b.mu.
+func (b *Board) startResolveAsLocked(folder string, touch bool) {
 	b.repoGen[folder]++
 	gen := b.repoGen[folder]
 	b.resolving.Add(1)
 	go func() {
 		defer b.resolving.Done()
 		resolveSlots <- struct{}{} // at most maxResolves git lookups at once
-		repo, plain, failed := b.resolve(folder)
+		repo, plain, failed := b.resolve(folder, touch)
 		<-resolveSlots
 		defer b.flushSeen()
 		b.mu.Lock()
@@ -358,14 +387,18 @@ func (b *Board) startResolveLocked(folder string) {
 // no .git entry (a repository root with a detached HEAD and no remote would
 // otherwise look the same). Without an answer from git it is false. failed:
 // git was asked and gave no answer (the folder may be in any repo).
-func (b *Board) resolve(folder string) (repo model.Repo, plain, failed bool) {
+func (b *Board) resolve(folder string, touch bool) (repo model.Repo, plain, failed bool) {
 	fallback := model.Repo{Root: folder, MainRoot: folder}
 	if b.opts.Repos == nil {
 		return fallback, false, false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	repo, err := b.opts.Repos.Resolve(ctx, folder)
+	resolve := b.opts.Repos.Resolve
+	if tr, ok := b.opts.Repos.(source.TouchResolver); ok && touch {
+		resolve = tr.ResolveTouch
+	}
+	repo, err := resolve(ctx, folder)
 	if err != nil {
 		return fallback, false, true
 	}

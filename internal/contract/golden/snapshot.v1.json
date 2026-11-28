@@ -1,5 +1,5 @@
 {
-  "version": 20,
+  "version": 24,
   "seq": 42,
   "generatedAt": "2026-11-17T10:00:00Z",
   "sources": [
@@ -71,7 +71,9 @@
       "openIssues": {
         "known": true,
         "open": 12
-      }
+      },
+      "issuesKey": "example-org/example-repo",
+      "issuesNoAgent": 5
     },
     {
       "id": "p_563eb325a545",
@@ -91,7 +93,8 @@
       "openIssues": {
         "known": false,
         "open": 0
-      }
+      },
+      "issuesKey": "gitlab:gitlab.example.com/example-group/example-project"
     }
   ],
   "cards": [
@@ -286,7 +289,8 @@
           "host": "github.com",
           "repo": "example-org/example-repo",
           "number": 7,
-          "url": "https://github.com/example-org/example-repo/issues/7"
+          "url": "https://github.com/example-org/example-repo/issues/7",
+          "kind": ""
         }
       ],
       "artifacts": [],
@@ -408,7 +412,8 @@
           "host": "gitlab.example.com",
           "repo": "example-group/example-project",
           "number": 3,
-          "url": "https://gitlab.example.com/example-group/example-project/-/issues/3"
+          "url": "https://gitlab.example.com/example-group/example-project/-/issues/3",
+          "kind": ""
         }
       ],
       "artifacts": [
@@ -627,6 +632,7 @@
     "state": "ready",
     "asOf": "2026-11-17T10:00:00Z",
     "open": 12,
-    "rev": 4
+    "rev": 4,
+    "noAgent": 0
   }
 }

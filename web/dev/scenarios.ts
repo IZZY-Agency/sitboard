@@ -3,6 +3,7 @@
 import goldenJson from '../../internal/contract/golden/snapshot.v1.json';
 import type { Card, Snapshot, Spend } from '../src/contract.gen';
 import { addSpend, addTokens, localDay, noTokens } from '../src/data/spend';
+import { sampleIssuesKey } from './issues';
 
 export const SCENARIOS = [
   'golden',
@@ -27,6 +28,7 @@ export const SCENARIOS = [
   'loading',
   'unreachable',
   'reconnecting',
+  'stopped',
   'unauthorized',
   'outdated',
 ] as const;
@@ -57,7 +59,7 @@ function group(s: Snapshot, id: string, area: string, parentId = ''): void {
   if (p) Object.assign(p, { area, parentId });
 }
 function addProject(s: Snapshot, id: string, name: string, area = '', parentId = ''): void {
-  s.projects.push({ id, name, path: `~/projects/${name}`, repo: '', repoForge: '', repoHost: '', counts: { working: 0, needsYou: 0, inReview: 0, stale: 0 }, openIssues: { known: false, open: 0 }, area, parentId });
+  s.projects.push({ id, name, path: `~/projects/${name}`, repo: '', repoForge: '', repoHost: '', counts: { working: 0, needsYou: 0, inReview: 0, stale: 0 }, openIssues: { known: false, open: 0 }, issuesKey: '', area, parentId });
 }
 
 export function golden(): Snapshot {
@@ -140,6 +142,7 @@ function crowd(): Snapshot {
     area: 'projects',
     counts: { working: 0, needsYou: 0, inReview: 0, stale: 0 },
     openIssues: { known: false, open: 0 },
+    issuesKey: '',
   }));
   s.projects.push(...projects);
   group(s, projects[0].id, 'area-one');
@@ -281,6 +284,7 @@ function site(): Snapshot {
     p.repo = p.id === 'p_site00000004' ? 'example-org/lumen-docs' : p.id === 'p_site00000005' ? 'example-org/pixel-kit' : repo;
     p.repoForge = 'github';
     p.repoHost = 'github.com';
+    p.issuesKey = sampleIssuesKey(p);
   }
   const pr = (number: number, state: 'open' | 'merged', checks: 'passing' | 'running' | 'failing' | 'none' = 'passing') => ({
     forge: 'github' as const, host: 'github.com', repo,
@@ -333,7 +337,7 @@ function site(): Snapshot {
     c.subagents = x.id === lead ? 3 : 0;
     c.pullRequests = x.prs ?? [];
     c.artifacts = (x.arts ?? []).map(art);
-    c.issues = (x.issues ?? []).map((n) => ({ forge: 'github' as const, host: 'github.com', repo, number: n, url: `https://github.com/${repo}/issues/${n}` }));
+    c.issues = (x.issues ?? []).map((n) => ({ forge: 'github' as const, kind: 'closes' as const, host: 'github.com', repo, number: n, url: `https://github.com/${repo}/issues/${n}` }));
     c.agent.name = x.name;
     c.agent.model = x.model ?? 'claude-opus-5-5';
     c.agent.effort = x.effort ?? '';
@@ -348,6 +352,17 @@ function site(): Snapshot {
     c.agent.workspace = 'studio';
     return c;
   });
+  // ---- 0.6.0 stream 4: sample issue links (kept apart for easy merging) ----
+  // web-checkout's open pull request closes #148 ("on it"); api-auth ran a gh
+  // issue command on #139 ("looked at"). Both are in the Issues panel's
+  // sample list (web/dev/issues.ts), which takes its links from these cards.
+  {
+    const link = (id: string, n: number, kind: 'closes' | 'looked') =>
+      s.cards.find((c) => c.id === id)?.issues.push({ forge: 'github', kind, host: 'github.com', repo, number: n, url: `https://github.com/${repo}/issues/${n}` });
+    link('claude:site-w1', 148, 'closes');
+    link('claude:site-w2', 139, 'looked');
+  }
+  // ---- end of 0.6.0 stream 4 block ----
   // The project counts the way the server counts them.
   for (const p of s.projects) {
     const mine = s.cards.filter((c) => c.projectId === p.id);
@@ -370,6 +385,13 @@ function site(): Snapshot {
 /** The sample GitLab host and group of the "gitlab" scenario (invented). */
 export const SAMPLE_GITLAB_HOST = 'gitlab.example';
 export const SAMPLE_GITLAB_PATH = 'example-group/harbor-api';
+/**
+ * A second sample GitLab host, with a web port and GitLab under a subfolder
+ * (#147), as Snapshot.gitlabHosts lists it, and the pixel-kit project's
+ * path there (the subfolder in front).
+ */
+export const SAMPLE_GITLAB_MOUNT = 'code.example:8443/tools';
+export const SAMPLE_GITLAB_MOUNTED_PATH = 'tools/design/pixel-kit';
 /** Its merge requests' titles, shared with the "gitlab" catch-up list. */
 export const SAMPLE_MR_TITLES: Record<number, string> = {
   27: 'Refresh tokens without a second login',
@@ -380,7 +402,9 @@ export const SAMPLE_MR_TITLES: Record<number, string> = {
 /**
  * The "site" board with its API part on a GitLab host: merge requests beside
  * pull requests, one waiting for an approval, one merged, an issue it closes,
- * and the GitLab source read through glab. Invented names only.
+ * and the GitLab source read through glab; pixel-kit sits on a second GitLab
+ * host with a web port and a subfolder, so the Issues panel lists issues of
+ * both forges. Invented names only.
  */
 function gitlabScenario(): Snapshot {
   const s = site();
@@ -388,6 +412,11 @@ function gitlabScenario(): Snapshot {
   const path = SAMPLE_GITLAB_PATH;
   const api = s.projects.find((p) => p.id === 'p_site00000003')!;
   Object.assign(api, { repo: path, repoForge: 'gitlab', repoHost: host });
+  api.issuesKey = sampleIssuesKey(api);
+  const kit = s.projects.find((p) => p.id === 'p_site00000005')!;
+  const mountSite = SAMPLE_GITLAB_MOUNT.slice(0, SAMPLE_GITLAB_MOUNT.indexOf('/'));
+  Object.assign(kit, { repo: SAMPLE_GITLAB_MOUNTED_PATH, repoForge: 'gitlab', repoHost: mountSite });
+  kit.issuesKey = sampleIssuesKey(kit);
   const mr = (number: number, state: 'open' | 'merged', review: Card['pullRequests'][number]['review'], checks: Card['pullRequests'][number]['checks'] = 'passing') => ({
     forge: 'gitlab' as const, host, repo: path,
     number,
@@ -401,11 +430,11 @@ function gitlabScenario(): Snapshot {
   const byId = (id: string) => s.cards.find((c) => c.id === id)!;
   const payments = byId('claude:site-w4');
   payments.pullRequests = [mr(31, 'open', 'review_required')];
-  payments.issues = [{ forge: 'gitlab', host, repo: path, number: 12, url: `https://${host}/${path}/-/issues/12` }];
+  payments.issues = [{ forge: 'gitlab', kind: 'closes', host, repo: path, number: 12, url: `https://${host}/${path}/-/issues/12` }];
   const auth = byId('claude:site-w2');
   auth.pullRequests = [mr(29, 'open', 'approved', 'running'), mr(27, 'merged', 'approved')];
   auth.titleSource = 'pr';
-  s.gitlabHosts = [host];
+  s.gitlabHosts = [host, SAMPLE_GITLAB_MOUNT];
   s.sources = [...s.sources, { kind: 'gitlab', state: 'ok', version: '1.46.0', detail: '', tested: true, ready: true }];
   return s;
 }
@@ -631,6 +660,7 @@ export function initial(sc: Scenario): Snapshot | null {
   switch (sc) {
     case 'golden':
     case 'reconnecting':
+    case 'stopped':
       return golden();
     case 'spend':
       return spendWeek('mixed');

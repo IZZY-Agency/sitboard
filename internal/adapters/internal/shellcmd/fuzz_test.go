@@ -492,3 +492,84 @@ func FuzzAddMergeRequests(f *testing.F) {
 		}
 	})
 }
+
+// FuzzIssueCommands: any command line yields at most maxIDsCall issues, each
+// once, of the tool that named it, with a number in range, a repository that
+// is valid and written in one word of the command (as the lexer reads it),
+// and an address only in a shape the page's patterns accept. A call that
+// changes folder first gives only the issues that name their repository; one
+// that runs env, sudo or the like, or assigns a GH_/GLAB_/GITLAB_ variable,
+// first gives none.
+func FuzzIssueCommands(f *testing.F) {
+	for _, s := range testLiterals(f) {
+		f.Add(s)
+	}
+	f.Add("echo create " + strings.Repeat("[", 1<<20)) // one word of brackets
+	f.Add("gh issue view 7 || gh issue view 8; gh repo set-default x/y; gh issue view 9")
+	f.Add("git diff --quiet && gh issue view 7; (true && { gh issue view 8; })")
+	f.Add("gh issue view 7 |\\\n| gh issue view 8")
+	f.Add(strings.Repeat("glab mr create;", 13000))
+	f.Add(strings.Repeat("gh issue view 7;", 13000))                                                  // the longest line of a transcript, one command over and over
+	f.Add("true " + strings.Repeat("x ", 65530) + "; gh issue view 7 -R github.com/example-org/tool") // a lexer cap behind the invocation
+	for _, in := range []string{`gh issue view $'\067'`, `QUERY='.number -R github.com/example-org/other'; gh issue view -q $QUERY 7 --json number`, `bash -n -c 'gh issue view 7'`, `printf -v GH_REPO %s github.com/example-org/other; export GH_REPO; gh issue view 7`, `GIT_DIR=/repo-b/.git gh issue view 7`, `glab issue view 7 -R group/project`} {
+		f.Add(in)
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		c := Parse(s)
+		got := c.IssueCommands()
+		if len(got) > maxIDsCall {
+			t.Fatalf("%d issues, cap %d", len(got), maxIDsCall)
+		}
+		for i, ic := range got {
+			if ic.Number < 1 || ic.Number > math.MaxInt32 {
+				t.Fatalf("%+v: number out of range", ic)
+			}
+			if !ic.Repo.IsZero() {
+				if !ic.Repo.Valid() || ic.Repo.Forge != ic.Forge || !slices.ContainsFunc(c.words, func(w string) bool { return strings.Contains(w, ic.Repo.Path) }) {
+					t.Fatalf("%+v: not a valid repository written in the command", ic)
+				}
+				if ic.Repo.Forge == model.ForgeGitHub && ic.Repo.Host != model.GitHubHost {
+					t.Fatalf("%+v: a GitHub repository on another host", ic)
+				}
+				if ic.Repo.Forge == model.ForgeGitLab && model.GitLabHostname(ic.Repo.Host) == model.GitHubHost {
+					t.Fatalf("%+v: a GitLab repository on github.com", ic)
+				}
+			}
+			if ic.Forge != model.ForgeGitHub && ic.Forge != model.ForgeGitLab {
+				t.Fatalf("%+v: no tool", ic)
+			}
+			if slices.ContainsFunc(got[:i], func(o IssueCommand) bool {
+				return sameIssue(o.Forge, o.Repo, o.Number, ic.Forge, ic.Repo, ic.Number)
+			}) {
+				t.Fatalf("%+v twice", ic)
+			}
+		}
+		if !reflect.DeepEqual(got, Parse(s).IssueCommands()) {
+			t.Fatal("not deterministic")
+		}
+		for _, ic := range Parse("cd /x; " + s).IssueCommands() {
+			if ic.Repo.IsZero() {
+				t.Fatalf("a cd in front still gave an issue left to the folder: %+v", ic)
+			}
+		}
+		// Whatever the line, these in front of it make the whole line unread.
+		for _, pre := range []string{"GH_REPO=example-org/other ", "GIT_DIR=/x/.git ", "FOO=1 ", "export GITLAB_HOST=gitlab.example.com\n", "env -C /x ", "sudo -D /x ",
+			"printf -v GH_REPO %s x; ", "true || ", "gh repo set-default x/y; ", "eval x; ", "read GH_REPO; ", "set -n; ", "bash -n -c true; ", "bash -c ' ' $* ; echo $HOME; "} {
+			if got := Parse(pre + s).IssueCommands(); len(got) != 0 {
+				t.Fatalf("%q in front still gave %+v", pre, got)
+			}
+		}
+		// What is read leaves no assignment, no cut and no expansion before
+		// the last invocation behind: the arguments of what it gave are known.
+		if len(got) > 0 {
+			if c.inexact {
+				t.Fatalf("a line a cap cut still gave %+v", got)
+			}
+			for k, w := range c.words {
+				if !c.sep[k] && assignRe.MatchString(w) {
+					t.Fatalf("an assignment word %q, and still %+v", w, got)
+				}
+			}
+		}
+	})
+}

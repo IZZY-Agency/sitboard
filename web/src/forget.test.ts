@@ -186,6 +186,7 @@ describe('forget grouping, tiles', () => {
       jump: async () => ({ ok: true }) as ActionResult,
       seen: async () => ({ ok: true }) as ActionResult,
       setGrouping: async () => ({ ok: true }) as ActionResult,
+      pinIssue: async () => ({ ok: true }) as ActionResult,
       forgetGrouping: (id: string) => {
         calls.push(id);
         return new Promise<ActionResult>((res) => (answer = res));

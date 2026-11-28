@@ -70,6 +70,7 @@ type derived struct {
 	spend              *spendData // with the subagents', counted, not priced; set by the indexer
 	CreatedPRs         []model.PRRef
 	PushedPRs          []model.PushedRef   // those of CreatedPRs a creating push announced, with the call's window
+	TouchedIssues      []model.IssueTouch  // the issues the session's own gh/glab issue commands named
 	Artifacts          []model.ArtifactRef // one per address, in the order first seen
 	SpawnedNames       []string
 	SpawnedTerminalIDs []string
@@ -510,10 +511,18 @@ func (t *tailer) consume(line []byte, now time.Time) {
 			t.d.Effort = model.KnownEffort(h.Effort)
 		}
 		t.spendReply(&h, at, now)
-		if bytes.Contains(line, []byte(`"tool_use"`)) &&
-			(bytes.Contains(line, []byte("create")) || bytes.Contains(line, []byte("agtermctl")) ||
-				bytes.Contains(line, []byte(`"Artifact"`))) {
-			t.toolUses(line, at)
+		toolUse := bytes.Contains(line, []byte(`"tool_use"`))
+		prGate := toolUse && (bytes.Contains(line, []byte("create")) || bytes.Contains(line, []byte("agtermctl")) ||
+			bytes.Contains(line, []byte(`"Artifact"`)))
+		// The issues a call names are read from its decoded command, so the
+		// gate is only a cheap filter for a Bash call that mentions gh or
+		// glab. The line must be the session's own, as for spend: not a line
+		// of another session, and not one copied into a fork.
+		issueGate := toolUse && bytes.Contains(line, []byte("Bash")) &&
+			(bytes.Contains(line, []byte("gh")) || bytes.Contains(line, []byte("glab"))) &&
+			(h.SessionID == "" || h.SessionID == t.usageOwner) && !h.forked()
+		if prGate || issueGate {
+			t.toolUses(line, at, h.Cwd, prGate, issueGate)
 		}
 	case "user":
 		if !h.Sidechain && h.Origin != nil && h.Origin.Kind == "peer" && h.Origin.Name != "" && len(h.Origin.Name) <= 256 {
@@ -537,8 +546,14 @@ func (t *tailer) consume(line []byte, now time.Time) {
 
 // toolUses records the calls whose results carry a fact: the session's own
 // `gh pr create`, its `agtermctl session new` spawns, and its Artifact
-// publishes.
-func (t *tailer) toolUses(line []byte, at time.Time) {
+// publishes. A call's command line alone carries the issues its `gh issue`
+// and `glab issue` commands name (touches): they need no result, and cwd is
+// the folder the line says the call ran in.
+//
+// prGate and issueGate say which of the two a line is read for: a line the
+// issue gate alone let in is read for touches only, so the pull request,
+// spawn and artifact rules see exactly the lines they always did.
+func (t *tailer) toolUses(line []byte, at time.Time, cwd string, prGate, issueGate bool) {
 	var c lineContent
 	if !decode(line, &c) {
 		return
@@ -549,7 +564,7 @@ func (t *tailer) toolUses(line []byte, at time.Time) {
 			continue
 		}
 		if b.Name == "Artifact" {
-			if isPublish(b.Input) {
+			if prGate && isPublish(b.Input) { // a line only the issue gate let in is no publish's
 				t.addPending(b.ID, pendingPublish, at)
 			}
 			continue
@@ -564,6 +579,18 @@ func (t *tailer) toolUses(line []byte, at time.Time) {
 			continue
 		}
 		cmd := shellcmd.Parse(in.Command)
+		if issueGate {
+			if cmds := cmd.IssueCommands(); len(cmds) > 0 {
+				folder := ""
+				if len(cwd) <= 4096 {
+					folder, _ = validFolder(cwd)
+				}
+				t.d.TouchedIssues = shellcmd.AddIssueTouches(t.d.TouchedIssues, cmds, folder, at, maxPRs)
+			}
+		}
+		if !prGate {
+			continue
+		}
 		var kind pendingKind
 		if len(cmd.Runs("gh", "pr", "create")) > 0 {
 			kind |= pendingPR

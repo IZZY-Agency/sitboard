@@ -29,7 +29,7 @@ type gatedIssues struct {
 	withErr bool
 }
 
-func (g *gatedIssues) OpenIssues(_ context.Context, repos []model.ForgeRepo) ([]model.RepoIssues, error) {
+func (g *gatedIssues) OpenIssues(_ context.Context, repos []model.ForgeRepo, _ map[model.ForgeRepo][]int) ([]model.RepoIssues, error) {
 	g.mu.Lock()
 	gate := g.gate
 	g.asked = append(g.asked, slices.Clone(repos))
@@ -299,7 +299,7 @@ func TestALateGitLabAnswerAfterTheHostWasDeniedIsDropped(t *testing.T) {
 	close(gate)
 	e.board.resolving.Wait()
 	e.board.mu.Lock()
-	_, kept := e.board.issues[issueKey(model.GitLabRepo(glHost, glPath))]
+	_, kept := e.board.issues[e.board.issueKey(model.GitLabRepo(glHost, glPath))]
 	e.board.mu.Unlock()
 	if kept {
 		t.Fatal("an answer for a host denied meanwhile was kept")
@@ -318,6 +318,7 @@ func TestAGitLabHostDeniedDuringALookIsNotAsked(t *testing.T) {
 	}
 	gate := make(chan struct{})
 	gh.set(func(g *gatedIssues) { g.gate = gate })
+	oneAtATime(t) // GitLab's batch waits for GitHub's, which is held
 	e.clock.Set(tNow.Add(contract.IssuesFreshFor + issuesEvery))
 	e.board.mu.Lock()
 	e.board.startIssuesLocked(context.Background(), e.board.now())
@@ -374,7 +375,7 @@ func TestAnAnswerForAProjectThatLeftDuringTheLookIsNotKept(t *testing.T) {
 // might that lost its login after a good chunk.
 type rowsAndLost struct{}
 
-func (rowsAndLost) OpenIssues(_ context.Context, repos []model.ForgeRepo) ([]model.RepoIssues, error) {
+func (rowsAndLost) OpenIssues(_ context.Context, repos []model.ForgeRepo, _ map[model.ForgeRepo][]int) ([]model.RepoIssues, error) {
 	var out []model.RepoIssues
 	for _, r := range repos {
 		out = append(out, model.RepoIssues{Repo: r, State: model.RepoIssuesOK, Open: 9, List: []model.OpenIssue{{Number: 1, Title: "private"}}})
@@ -442,7 +443,7 @@ func TestAProjectTakesItsRepositoryFromTheMainCheckoutEveryTime(t *testing.T) {
 		e.board.rebuildLocked()
 		repos := e.board.view.issueRepos
 		e.board.mu.Unlock()
-		if len(repos) != 1 || issueKey(repos[0]) != issueKey(want) {
+		if len(repos) != 1 || e.board.issueKey(repos[0]) != e.board.issueKey(want) {
 			t.Fatalf("rebuild %d: asks about %v, want only the main checkout's %v", i, repos, want)
 		}
 		if p := projectNamed(t, e.board, "alpha"); p.Repo != want.Path {
@@ -500,7 +501,7 @@ func TestAHostDeniedAndAllowedAgainDuringALookDropsTheAnswerStagedBefore(t *test
 	close(gate)
 	e.board.resolving.Wait()
 	e.board.mu.Lock()
-	_, kept := e.board.issues[issueKey(model.GitLabRepo(glHost, glPath))]
+	_, kept := e.board.issues[e.board.issueKey(model.GitLabRepo(glHost, glPath))]
 	e.board.mu.Unlock()
 	if kept {
 		t.Fatal("an answer asked for under an earlier login of the host was kept")
@@ -513,7 +514,7 @@ func TestADeniedHostLosesTheIssuesListedFromIt(t *testing.T) {
 	e.clock.Set(tNow.Add(contract.IssuesFreshFor))
 	e.board.tick()
 	e.board.mu.Lock()
-	_, had := e.board.issues[issueKey(repo)]
+	_, had := e.board.issues[e.board.issueKey(repo)]
 	e.board.mu.Unlock()
 	if !had {
 		t.Fatal("the GitLab repository was never listed")
@@ -521,7 +522,7 @@ func TestADeniedHostLosesTheIssuesListedFromIt(t *testing.T) {
 	before := e.board.Snapshot().Issues
 	e.board.mu.Lock()
 	e.board.noteHostLocked(glHost, source.ErrNotLoggedIn)
-	_, kept := e.board.issues[issueKey(repo)]
+	_, kept := e.board.issues[e.board.issueKey(repo)]
 	e.board.rebuildLocked() // the check's caller does
 	e.board.mu.Unlock()
 	if kept {
@@ -551,7 +552,7 @@ func TestAProjectWithNoSessionInTheMainCheckoutTakesTheLowestKeysRepository(t *t
 		e.board.rebuildLocked()
 		repos := e.board.view.issueRepos
 		e.board.mu.Unlock()
-		if len(repos) != 1 || issueKey(repos[0]) != issueKey(want) {
+		if len(repos) != 1 || e.board.issueKey(repos[0]) != e.board.issueKey(want) {
 			t.Fatalf("rebuild %d: asks about %v, want the lowest key's %v", i, repos, want)
 		}
 	}
@@ -571,7 +572,7 @@ func TestAStateThatChangesWithNoRowsChangingIsANewRevision(t *testing.T) {
 	}
 }
 
-func TestAnAnswerStagedBeforeAHostWasDeniedAndAllowedAgainIsDropped(t *testing.T) {
+func TestAnAnswerListedBeforeAHostWasDeniedAndAllowedAgainStaysGone(t *testing.T) {
 	gl := &gatedIssues{title: "earlier login's title", open: 3}
 	gh := &gatedIssues{title: "t", open: 1}
 	e, repo := gitlabIssuesEnv(t, gl, gh)
@@ -582,7 +583,7 @@ func TestAnAnswerStagedBeforeAHostWasDeniedAndAllowedAgainIsDropped(t *testing.T
 	before := len(gh.calls())
 	e.board.mu.Lock()
 	clear(e.board.issues)
-	delete(e.board.issuesTried, issueKey(repo)) // never asked: GitLab goes first and GitHub is the one still out
+	delete(e.board.issuesTried, e.board.issueKey(repo)) // never asked: GitLab goes first and GitHub is the one still out
 	e.board.mu.Unlock()
 	e.clock.Set(tNow.Add(contract.IssuesFreshFor + issuesEvery))
 	e.board.mu.Lock()
@@ -591,16 +592,17 @@ func TestAnAnswerStagedBeforeAHostWasDeniedAndAllowedAgainIsDropped(t *testing.T
 	for len(gh.calls()) == before {
 		time.Sleep(time.Millisecond)
 	}
-	// GitLab's answer is staged; GitHub's is still out. The host goes and a
-	// later login brings it back before the look ends.
-	denyHost(e.board, glHost)
+	// GitLab's answer is listed the moment it came; GitHub's is still out.
+	// The host's login goes (its rows with it) and a later login brings the
+	// host back before the look ends: nothing of the earlier login returns.
 	e.board.mu.Lock()
-	e.board.glHosts[glHost] = hostDecision{at: e.board.now(), ok: true}
+	e.board.noteHostLocked(glHost, source.ErrNotLoggedIn)
+	e.board.noteHostLocked(glHost, nil)
 	e.board.mu.Unlock()
 	close(gate)
 	e.board.resolving.Wait()
 	e.board.mu.Lock()
-	_, kept := e.board.issues[issueKey(repo)]
+	_, kept := e.board.issues[e.board.issueKey(repo)]
 	e.board.mu.Unlock()
 	if kept {
 		t.Fatal("an answer staged under an earlier login of the host was installed")
@@ -636,7 +638,7 @@ func TestAForgeThatLostItsLoginDoesNotTakeAnotherForgesRowsWithIt(t *testing.T) 
 	e.clock.Set(tNow.Add(contract.IssuesFreshFor))
 	e.board.tick()
 	e.board.mu.Lock()
-	_, had := e.board.issues[issueKey(repo)]
+	_, had := e.board.issues[e.board.issueKey(repo)]
 	e.board.mu.Unlock()
 	if !had {
 		t.Fatal("the GitLab repository was never listed")
@@ -647,8 +649,8 @@ func TestAForgeThatLostItsLoginDoesNotTakeAnotherForgesRowsWithIt(t *testing.T) 
 	e.board.tick()
 	e.board.resolving.Wait()
 	e.board.mu.Lock()
-	_, glKept := e.board.issues[issueKey(repo)]
-	_, ghKept := e.board.issues[issueKey(model.GitHubRepo(betaRepo))]
+	_, glKept := e.board.issues[e.board.issueKey(repo)]
+	_, ghKept := e.board.issues[e.board.issueKey(model.GitHubRepo(betaRepo))]
 	e.board.mu.Unlock()
 	if !glKept {
 		t.Fatal("GitLab's rows went with GitHub's login")
@@ -770,7 +772,7 @@ func TestASessionInASubfolderOfTheMainCheckoutDecidesTheRepository(t *testing.T)
 		t.Fatalf("project shows %q, want %q", p.Repo, want.Path)
 	}
 	calls := g.calls()
-	if len(calls) == 0 || len(calls[len(calls)-1]) != 1 || issueKey(calls[len(calls)-1][0]) != issueKey(want) {
+	if len(calls) == 0 || len(calls[len(calls)-1]) != 1 || e.board.issueKey(calls[len(calls)-1][0]) != e.board.issueKey(want) {
 		t.Fatalf("asked about %v, want only %v", calls, want)
 	}
 }
@@ -807,8 +809,8 @@ func TestAHostCacheClearedDuringALookDropsTheAnswer(t *testing.T) {
 			e.board.mu.Lock()
 			clear(e.board.issues)
 			// GitLab's repository is asked first, GitHub's after it.
-			e.board.issuesTried[issueKey(repo)] = time.Time{}
-			e.board.issuesTried[issueKey(model.GitHubRepo(betaRepo))] = e.board.now()
+			e.board.issuesTried[e.board.issueKey(repo)] = time.Time{}
+			e.board.issuesTried[e.board.issueKey(model.GitHubRepo(betaRepo))] = e.board.now()
 			e.board.mu.Unlock()
 			e.clock.Set(tNow.Add(contract.IssuesFreshFor + issuesEvery))
 			glAsked, ghAsked := len(gl.calls()), len(gh.calls())
@@ -834,8 +836,8 @@ func TestAHostCacheClearedDuringALookDropsTheAnswer(t *testing.T) {
 			close(ghGate)
 			e.board.resolving.Wait()
 			e.board.mu.Lock()
-			_, kept := e.board.issues[issueKey(repo)]
-			_, ghKept := e.board.issues[issueKey(model.GitHubRepo(betaRepo))]
+			_, kept := e.board.issues[e.board.issueKey(repo)]
+			_, ghKept := e.board.issues[e.board.issueKey(model.GitHubRepo(betaRepo))]
 			e.board.mu.Unlock()
 			if len(gl.calls()) != glAsked+1 || !ghKept {
 				t.Fatalf("GitLab asked %d times, GitHub's answer kept %v: the look did not run as ordered", len(gl.calls())-glAsked, ghKept)
@@ -955,7 +957,7 @@ func TestAHostCacheClearDropsTheGitLabRowsListed(t *testing.T) {
 	e.clock.Set(tNow.Add(contract.IssuesFreshFor))
 	e.board.tick()
 	e.board.mu.Lock()
-	_, listed := e.board.issues[issueKey(repo)]
+	_, listed := e.board.issues[e.board.issueKey(repo)]
 	e.board.mu.Unlock()
 	if !listed {
 		t.Fatal("setup: GitLab rows not listed")
@@ -964,9 +966,9 @@ func TestAHostCacheClearDropsTheGitLabRowsListed(t *testing.T) {
 	fillHostCache(e.board, 256)
 	e.board.mu.Lock()
 	e.board.noteHostLocked(glHost, nil)
-	_, kept := e.board.issues[issueKey(repo)]
-	_, tried := e.board.issuesTried[issueKey(repo)]
-	_, ghKept := e.board.issues[issueKey(model.GitHubRepo(betaRepo))]
+	_, kept := e.board.issues[e.board.issueKey(repo)]
+	_, tried := e.board.issuesTried[e.board.issueKey(repo)]
+	_, ghKept := e.board.issues[e.board.issueKey(model.GitHubRepo(betaRepo))]
 	e.board.rebuildLocked()
 	e.board.mu.Unlock()
 	if kept || tried || !ghKept {
@@ -980,7 +982,7 @@ func TestAHostCacheClearDropsTheGitLabRowsListed(t *testing.T) {
 func listedFor(b *Board, r model.ForgeRepo) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	_, ok := b.issues[issueKey(r)]
+	_, ok := b.issues[b.issueKey(r)]
 	return ok
 }
 
@@ -1093,4 +1095,12 @@ func TestSwitchingOffDuringALookClearsAtOnceAndKeepsItsAnswerOut(t *testing.T) {
 	if listedFor(e.board, model.GitHubRepo(exRepo)) {
 		t.Fatal("the look from before the switch-off brought its rows back")
 	}
+}
+
+// oneAtATime makes a look run its batches one after another for the test.
+func oneAtATime(t *testing.T) {
+	t.Helper()
+	was := issueBatchSlots
+	issueBatchSlots = 1
+	t.Cleanup(func() { issueBatchSlots = was })
 }

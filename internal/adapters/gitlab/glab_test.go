@@ -58,13 +58,33 @@ type fakeGlab struct {
 	authGate func(host string)
 	inAuth   int // `auth status` calls running now
 	maxAuth  int // the most at once
+	// beforeStart, when set, runs in every call before it is admitted
+	// (runner.Admit): a test pauses a call there, between the caller's last
+	// check and the start of the process.
+	beforeStart func(args []string)
+	// inStart, when set, runs inside every admitted call's start, with the
+	// gate's hold taken: a test stalls a start there.
+	inStart func(args []string)
 }
 
-func (f *fakeGlab) run(_ context.Context, bin string, args ...string) ([]byte, error) {
-	f.mu.Lock()
-	f.bins = append(f.bins, bin)
-	f.calls = append(f.calls, slices.Clone(args))
-	f.mu.Unlock()
+// run is a glab call: like a real one it starts through the caller's gate
+// (runner.Admit), and only a call the gate admits is recorded and answered.
+func (f *fakeGlab) run(ctx context.Context, bin string, args ...string) ([]byte, error) {
+	if f.beforeStart != nil {
+		f.beforeStart(args)
+	}
+	if err := runner.Admit(ctx, func() error {
+		if f.inStart != nil {
+			f.inStart(args)
+		}
+		f.mu.Lock()
+		f.bins = append(f.bins, bin)
+		f.calls = append(f.calls, slices.Clone(args))
+		f.mu.Unlock()
+		return nil
+	}); err != nil {
+		return nil, err
+	}
 	switch {
 	case args[0] == "version":
 		return fixtureBytes["version.txt"], nil
@@ -2149,13 +2169,17 @@ func TestOlderAnswersDoNotOutliveALogout(t *testing.T) {
 		return fixture(t, "closes-issues.json"), nil
 	}
 	rest := f.count("rest")
-	if _, err := p.Lookup(ctx, selfHosted, project, []int{101}, nil); err != nil {
+	// The calls after the logout do not start (admit): the lookup ends with it.
+	if _, err := p.Lookup(ctx, selfHosted, project, []int{101}, nil); !errors.Is(err, source.ErrNotLoggedIn) {
 		t.Fatalf("the older lookup: %v", err)
 	}
 	asks := f.count("rest") - rest
+	if asks != 1 {
+		t.Fatalf("closing calls after the logout started: %d", asks)
+	}
 	relogin(t, p, selfHosted) // at once: a cached answer would still be served
 	gq, rest := f.count("graphql"), f.count("rest")
-	if _, err := p.Lookup(ctx, selfHosted, project, []int{101}, nil); err != nil || f.count("graphql") != gq+1 || f.count("rest") != rest+asks {
+	if _, err := p.Lookup(ctx, selfHosted, project, []int{101}, nil); err != nil || f.count("graphql") != gq+1 || f.count("rest") < rest+asks {
 		t.Fatalf("served what a lookup older than the logout learned: %v, %d graphql and %d rest calls", err, f.count("graphql")-gq, f.count("rest")-rest)
 	}
 
@@ -2390,5 +2414,48 @@ func TestCalledOffAtItsTurnRunsNoGlab(t *testing.T) {
 	}
 	if n := f.count("auth"); n != 0 {
 		t.Fatalf("%d auth calls after the call-off", n)
+	}
+}
+
+// A merge request lookup starts each glab process under the provider's lock
+// after the login and the backoff are looked at once more: a logout (or a
+// 429) recorded while its GraphQL call or a closing-issues call is about to
+// start keeps that call from starting.
+func TestLookupAChangeRecordedAsACallStartsKeepsItIn(t *testing.T) {
+	for _, c := range []struct {
+		name, kind string // the call paused: "graphql" or "rest"
+		record     func(p *Provider)
+		want       error
+	}{
+		{"logged out before the query", "graphql", func(p *Provider) { p.loggedOut(selfHosted) }, source.ErrNotLoggedIn},
+		{"rate limited before the query", "graphql", func(p *Provider) { p.limited(selfHosted, errors.New("429")) }, source.ErrRateLimited},
+		{"logged out before a closing call", "rest", func(p *Provider) { p.loggedOut(selfHosted) }, source.ErrNotLoggedIn},
+	} {
+		p, f, _ := newAdapter(t, Options{})
+		paused, release := make(chan struct{}), make(chan struct{})
+		var once sync.Once
+		f.beforeStart = func(args []string) {
+			rest := len(args) > 1 && args[0] == "api" && args[1] != "graphql"
+			if (c.kind == "rest") == rest && (rest || args[1] == "graphql") {
+				once.Do(func() {
+					close(paused)
+					<-release
+				})
+			}
+		}
+		done := make(chan error, 1)
+		go func() {
+			_, err := p.Lookup(context.Background(), selfHosted, project, []int{101}, nil)
+			done <- err
+		}()
+		<-paused
+		c.record(p)
+		close(release)
+		if err := <-done; !errors.Is(err, c.want) {
+			t.Errorf("%s: %v", c.name, err)
+		}
+		if f.count(c.kind) != 0 {
+			t.Errorf("%s: the %s call started", c.name, c.kind)
+		}
 	}
 }

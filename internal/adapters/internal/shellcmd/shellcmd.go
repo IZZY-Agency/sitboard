@@ -34,7 +34,35 @@ type Command struct {
 	// position of the wrapper, so the order of commands across those points
 	// is not known.
 	scripts []int
+	// dyn[i]: words[i] depends on the shell at run time: it holds an expansion
+	// ($ or a backtick outside single quotes, $'..', $".."), a glob or brace
+	// (an unquoted * ? [..] {), or stands for a substitution. The issue reader
+	// refuses a line in which one stands before an invocation or in it.
+	dyn []bool
+	// inexact: the line was not read whole. A cap cut it (words, scripts,
+	// script size, nesting), or a shell that only checks syntax (-n) was
+	// opened. The issue reader refuses such a line; the others read what is
+	// there, as they always did.
+	inexact bool
+	// orList: a || stands in the line, unquoted: what follows it may not run.
+	// The issue reader refuses such a line; for the others || is a separator.
+	orList bool
+	// joined: an unquoted backslash-newline stands in the line. It may join
+	// the halves of an operator (| and |), which are not modelled: the issue
+	// reader refuses such a line.
+	joined bool
+	// skind[i], for a separator word, is the set of the operators merged into
+	// it (kAnd ... kParen); 0 for a word. For the issue reader only.
+	skind []uint8
 }
+
+// The operators a separator word stands for.
+const (
+	kAnd   uint8 = 1 << iota // &&: what follows runs only if what precedes succeeded
+	kSemi                    // ; & or a newline: what follows runs on its own
+	kPipe                    // |
+	kParen                   // ( or ): a group
+)
 
 // shells are the shells whose -c script is read.
 var shells = []string{"bash", "sh", "zsh"}
@@ -52,19 +80,27 @@ func Parse(s string) Command {
 	c.lex(s)
 	c.positions(0)
 	top := len(c.words)
-	for i, n := 0, 0; i < top && n < maxShellScripts; i++ {
+	n := 0
+	for i := 0; i < top; i++ {
 		if !c.at[i] {
 			continue
 		}
 		var script string
-		var ok bool
+		var ok, noExec bool
 		switch base := filepath.Base(c.words[i]); {
 		case slices.Contains(shells, base):
-			script, ok = c.shellScript(i + 1)
+			script, ok, noExec = c.shellScript(i + 1)
 		case base == "env":
 			script, ok = c.envScript(i + 1)
 		}
-		if !ok || script == "" || len(script) > maxShellScript {
+		if !ok || script == "" {
+			continue
+		}
+		if noExec {
+			c.inexact = true // the script is only checked, never run
+		}
+		if len(script) > maxShellScript || n >= maxShellScripts {
+			c.inexact = true // a script that is not read
 			continue
 		}
 		from := len(c.words)
@@ -206,15 +242,14 @@ func (c *Command) positions(from int) {
 // option or an option's argument. An option cluster with o or O (-o NAME,
 // -euo NAME), --rcfile and --init-file take the next word. It never reads
 // past a separator.
-func (c Command) shellScript(from int) (string, bool) {
-	hasC := false
+func (c Command) shellScript(from int) (script string, hasC, noExec bool) {
 	for j := from; j < len(c.words) && !c.sep[j]; j++ {
 		switch a := c.words[j]; {
 		case a == "--":
 			if hasC && j+1 < len(c.words) && !c.sep[j+1] {
-				return c.words[j+1], true
+				return c.words[j+1], true, noExec
 			}
-			return "", false
+			return "", false, false
 		case a == "--rcfile" || a == "--init-file":
 			if j+1 < len(c.words) && !c.sep[j+1] {
 				j++ // its argument; a separator is never one
@@ -224,14 +259,20 @@ func (c Command) shellScript(from int) (string, bool) {
 			if a[0] == '-' && strings.IndexByte(a[1:], 'c') >= 0 {
 				hasC = true
 			}
+			if a[0] == '-' && strings.IndexByte(a[1:], 'n') >= 0 {
+				noExec = true // -n: read the commands, run none
+			}
 			if strings.ContainsAny(a[1:], "oO") && j+1 < len(c.words) && !c.sep[j+1] {
 				j++
+				if a[0] == '-' && c.words[j] == "noexec" && strings.IndexByte(a[1:], 'o') >= 0 {
+					noExec = true // -o noexec
+				}
 			}
 		default:
-			return a, hasC
+			return a, hasC, noExec
 		}
 	}
-	return "", false
+	return "", false, false
 }
 
 // envScript returns the string of an `env -S STRING` (also -SSTRING and
@@ -275,29 +316,50 @@ type lexer struct {
 	left int       // words still allowed under maxWords
 	docs []heredoc // heredocs waiting for the end of their line
 	subs []*Command
+	over bool  // a cap or the depth limit cut the text: see Command.inexact
+	bits uint8 // the operators of the separator add makes next
 }
 
 // lex appends the words of s to c, then the commands of its substitutions,
 // each after a separator.
 func (c *Command) lex(s string) {
 	l := lexer{s: s, left: maxWords - len(c.words)}
-	l.add(c, "", true)
+	l.op(c, kSemi)
 	l.run(c, 0, 0, 0)
+	c.inexact = c.inexact || l.over
 	for _, sub := range l.subs { // its words were counted against maxWords when read
+		c.orList = c.orList || sub.orList
+		c.joined = c.joined || sub.joined
 		if len(sub.words) == 0 {
 			continue
 		}
 		if n := len(c.sep); n > 0 && !c.sep[n-1] {
-			c.words, c.sep = append(c.words, ""), append(c.sep, true)
+			c.words, c.sep, c.dyn, c.skind = append(c.words, ""), append(c.sep, true), append(c.dyn, false), append(c.skind, kSemi)
 		}
-		c.words, c.sep = append(c.words, sub.words...), append(c.sep, sub.sep...)
+		c.words, c.sep, c.dyn, c.skind = append(c.words, sub.words...), append(c.sep, sub.sep...), append(c.dyn, sub.dyn...), append(c.skind, sub.skind...)
 	}
 	if len(c.words) > maxWords {
-		c.words, c.sep = c.words[:maxWords], c.sep[:maxWords]
+		c.words, c.sep, c.dyn, c.skind = c.words[:maxWords], c.sep[:maxWords], c.dyn[:maxWords], c.skind[:maxWords]
 	}
 }
 
-func (l *lexer) add(c *Command, w string, sep bool) {
+// op notes the operators bits at the end of the words so far: they merge into
+// the separator that stands there, or make one.
+func (l *lexer) op(c *Command, bits uint8) {
+	if n := len(c.sep); n > 0 && c.sep[n-1] {
+		if c.skind[n-1]&kAnd != 0 {
+			bits &^= kSemi | kPipe // a newline after && does not end what && guards
+		}
+		c.skind[n-1] |= bits
+		return
+	}
+	l.bits = bits
+	l.add(c, "", true, false)
+}
+
+func (l *lexer) add(c *Command, w string, sep, dyn bool) {
+	bits := l.bits
+	l.bits = 0
 	if l.left <= 0 {
 		return
 	}
@@ -306,6 +368,11 @@ func (l *lexer) add(c *Command, w string, sep bool) {
 	}
 	c.words = append(c.words, w)
 	c.sep = append(c.sep, sep)
+	c.dyn = append(c.dyn, dyn && !sep)
+	if !sep {
+		bits = 0
+	}
+	c.skind = append(c.skind, bits)
 	l.left--
 }
 
@@ -321,15 +388,17 @@ func (l *lexer) run(c *Command, i int, stop byte, depth int) int {
 	var cur strings.Builder
 	inWord := false
 	parens := 0
+	dyn := false // the word being read depends on the shell at run time
 	flush := func() {
 		if inWord {
-			l.add(c, cur.String(), false)
+			l.add(c, cur.String(), false, dyn)
 			cur.Reset()
-			inWord = false
+			inWord, dyn = false, false
 		}
 	}
 	for ; i < len(s) && l.left > 0; i++ {
 		ch := s[i]
+		l.deep(i, depth)
 		switch {
 		case ch == stop && stop != 0 && parens == 0:
 			flush()
@@ -339,6 +408,8 @@ func (l *lexer) run(c *Command, i int, stop byte, depth int) int {
 			if s[i] != '\n' { // backslash-newline continues the line
 				cur.WriteByte(s[i])
 				inWord = true
+			} else {
+				c.joined = true
 			}
 		case ch == '\'':
 			end := strings.IndexByte(s[i+1:], '\'')
@@ -350,22 +421,25 @@ func (l *lexer) run(c *Command, i int, stop byte, depth int) int {
 			i += end + 1
 		case ch == '$' && i+1 < len(s) && s[i+1] == '\'':
 			i = ansiC(s, i+2, &cur)
-			inWord = true
+			inWord, dyn = true, true // its escapes are not decoded here
 		case ch == '"':
-			i = l.dquote(i+1, &cur, depth)
+			i = l.dquote(i+1, &cur, depth, &dyn)
 			inWord = true
 		case strings.HasPrefix(s[i:], "$(("):
 			i = l.arith(i+3, depth) - 1
 			cur.WriteByte('$')
-			inWord = true
+			inWord, dyn = true, true
 		case ch == '$' && i+1 < len(s) && s[i+1] == '(' && depth < maxDepth:
 			i = l.subst(i+2, ')', depth) - 1
 			cur.WriteByte('$')
-			inWord = true
+			inWord, dyn = true, true
 		case ch == '`' && depth < maxDepth:
 			i = l.backtick(i+1, depth, false) - 1
 			cur.WriteByte('$')
-			inWord = true
+			inWord, dyn = true, true
+		case ch == '$' || ch == '`': // a variable, $"..", or a substitution past the depth limit
+			cur.WriteByte(ch)
+			inWord, dyn = true, true
 		case ch == '#' && !inWord:
 			end := strings.IndexByte(s[i:], '\n')
 			if end < 0 {
@@ -374,7 +448,7 @@ func (l *lexer) run(c *Command, i int, stop byte, depth int) int {
 			}
 			i += end - 1 // the newline is read next
 		case ch == '(' && !inWord && i+1 < len(s) && s[i+1] == '(': // (( arithmetic ))
-			l.add(c, "((", false)
+			l.add(c, "((", false, false)
 			i = l.arith(i+2, depth) - 1
 		case strings.HasPrefix(s[i:], "<<<"): // a here-string, not a here-document
 			cur.WriteString("<<<")
@@ -404,7 +478,7 @@ func (l *lexer) run(c *Command, i int, stop byte, depth int) int {
 			i = l.redirect(i, depth) - 1
 		case ch == '\n':
 			flush()
-			l.add(c, "", true)
+			l.op(c, kSemi)
 			if len(l.docs) > 0 {
 				i = skipBodies(s, i+1, l.docs) - 1
 				l.docs = l.docs[:0]
@@ -413,22 +487,59 @@ func (l *lexer) run(c *Command, i int, stop byte, depth int) int {
 			flush()
 		case ch == ';' || ch == '&' || ch == '|':
 			flush()
-			l.add(c, "", true)
+			bits := kSemi
+			switch {
+			case ch == '&' && i+1 < len(s) && s[i+1] == '&':
+				bits = kAnd
+				i++
+			case ch == '|':
+				bits = kPipe
+				if i+1 < len(s) && s[i+1] == '|' {
+					c.orList = true
+				}
+			}
+			l.op(c, bits)
 		case ch == '(' || ch == ')':
 			flush()
-			l.add(c, "", true)
+			l.op(c, kParen)
 			if ch == '(' {
 				parens++
 			} else if parens > 0 {
 				parens--
 			}
 		default:
+			if isGlob(s, i, inWord) {
+				dyn = true // an unquoted glob or brace: the shell makes any number of words of it
+			}
 			cur.WriteByte(ch)
 			inWord = true
 		}
 	}
+	if i < len(s) {
+		l.over = true // the word cap stopped the read
+	}
 	flush()
 	return len(s)
+}
+
+// isGlob says whether the unquoted byte s[i] starts a pattern or a brace
+// expansion: * ? [ (any of them, with no look-ahead, so a word of any length
+// is one pass), and { that is not a word of its own (the keyword).
+func isGlob(s string, i int, inWord bool) bool {
+	switch s[i] {
+	case '*', '?', '[':
+		return true
+	case '{':
+		return inWord || i+1 < len(s) && strings.IndexByte(" \t\n;&|()", s[i+1]) < 0
+	}
+	return false
+}
+
+// deep notes a substitution that the depth limit leaves unread.
+func (l *lexer) deep(i, depth int) {
+	if depth >= maxDepth && (l.s[i] == '`' || l.s[i] == '$' && i+1 < len(l.s) && l.s[i+1] == '(') {
+		l.over = true
+	}
 }
 
 // subst reads a $(...) substitution from s[i:] into a command of its own and
@@ -436,6 +547,7 @@ func (l *lexer) run(c *Command, i int, stop byte, depth int) int {
 func (l *lexer) subst(i int, stop byte, depth int) int {
 	// Each substitution counts as a word, so empty ones are bounded too.
 	if l.left--; l.left < 0 {
+		l.over = true
 		return len(l.s)
 	}
 	sub := &Command{}
@@ -452,6 +564,7 @@ func (l *lexer) subst(i int, stop byte, depth int) int {
 func (l *lexer) backtick(i int, depth int, inDQ bool) int {
 	s := l.s
 	if l.left--; l.left < 0 { // counted as a word, as in subst
+		l.over = true
 		return len(s)
 	}
 	end := i // the closing backtick; a backslash always escapes the next byte
@@ -477,6 +590,7 @@ func (l *lexer) backtick(i int, depth int, inDQ bool) int {
 	inner := lexer{s: b.String(), left: l.left}
 	inner.run(sub, 0, 0, depth+1)
 	l.left = inner.left
+	l.over = l.over || inner.over
 	l.subs = append(l.subs, inner.subs...)
 	return min(end+1, len(s))
 }
@@ -484,9 +598,10 @@ func (l *lexer) backtick(i int, depth int, inDQ bool) int {
 // dquote reads a double-quoted string from s[i:] into cur and returns the
 // index of its closing quote. A $(...) or backtick inside is a substitution:
 // its own quotes do not end the string.
-func (l *lexer) dquote(i int, cur *strings.Builder, depth int) int {
+func (l *lexer) dquote(i int, cur *strings.Builder, depth int, dyn *bool) int {
 	s := l.s
 	for ; i < len(s); i++ {
+		l.deep(i, depth)
 		switch ch := s[i]; {
 		case ch == '"':
 			return i
@@ -498,14 +613,20 @@ func (l *lexer) dquote(i int, cur *strings.Builder, depth int) int {
 		case strings.HasPrefix(s[i:], "$(("):
 			i = l.arith(i+3, depth) - 1
 			cur.WriteByte('$')
+			*dyn = true
 		case ch == '$' && i+1 < len(s) && s[i+1] == '(' && depth < maxDepth:
 			i = l.subst(i+2, ')', depth) - 1
 			cur.WriteByte('$')
+			*dyn = true
 		case ch == '`' && depth < maxDepth:
 			i = l.backtick(i+1, depth, true) - 1
 			cur.WriteByte('$')
+			*dyn = true
 		default:
 			cur.WriteByte(ch)
+			if ch == '$' || ch == '`' { // a variable, or a substitution past the depth limit
+				*dyn = true
+			}
 		}
 	}
 	return len(s)
@@ -519,6 +640,7 @@ func (l *lexer) dquote(i int, cur *strings.Builder, depth int) int {
 func (l *lexer) arith(i int, depth int) int {
 	s := l.s
 	for open := 2; i < len(s); i++ {
+		l.deep(i, depth)
 		switch ch := s[i]; {
 		case ch == '(':
 			open++

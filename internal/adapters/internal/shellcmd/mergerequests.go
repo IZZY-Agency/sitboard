@@ -71,7 +71,8 @@ var quietPrograms = []string{"cd", "pushd", "popd", "git", "export", "unset", "s
 // programs and shell wrappers are not printers; the commands inside $(...)
 // and shell -c scripts are read as the commands they are.
 func (c Command) printers() (mixed, first bool) {
-	creates := c.Runs("glab", "mr", "create")
+	creates := c.Runs("glab", "mr", "create") // ascending word indexes
+	next := 0                                 // the first of them not before the word being read
 	seen := false
 	for i, w := range c.words {
 		if !c.at[i] || c.sep[i] {
@@ -81,11 +82,15 @@ func (c Command) printers() (mixed, first bool) {
 		if slices.Contains(quietPrograms, base) || slices.Contains(shells, base) {
 			continue
 		}
+		for next < len(creates) && creates[next] < i {
+			next++
+		}
+		isCreate := next < len(creates) && creates[next] == i
 		if !seen {
-			first = slices.Contains(creates, i)
+			first = isCreate
 			seen = true
 		}
-		if !slices.Contains(creates, i) {
+		if !isCreate {
 			mixed = true
 		}
 	}

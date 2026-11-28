@@ -657,10 +657,32 @@ export function closesParts(
   };
 }
 
-/** The closes line for a card in parts, measured against its own project's repository. */
+/**
+ * The closes line for a card in parts, measured against its own project's
+ * repository: only the issues its pull requests close (kind "closes"; a
+ * server before 0.6.0 sends no kind, and every issue it sends is one).
+ */
 export function cardClosesParts(card: Card, ix: Index): { items: ClosesItem[]; extra: number } | null {
   const p = ix.projects.get(card.projectId);
-  return closesParts(card.issues, p ? repoKey({ forge: p.repoForge, host: p.repoHost, repo: p.repo }) : '', ix.gitlabHosts);
+  return closesParts(
+    card.issues.filter((i) => i.kind !== 'looked'),
+    p ? repoKey({ forge: p.repoForge, host: p.repoHost, repo: p.repo }) : '',
+    ix.gitlabHosts,
+  );
+}
+
+/**
+ * The "looked at #N" line for a card in parts: the issues its session's own
+ * gh or glab commands named, labelled and linked as the closes line does.
+ * null when there is none.
+ */
+export function cardLookedParts(card: Card, ix: Index): { items: ClosesItem[]; extra: number } | null {
+  const p = ix.projects.get(card.projectId);
+  return closesParts(
+    card.issues.filter((i) => i.kind === 'looked'),
+    p ? repoKey({ forge: p.repoForge, host: p.repoHost, repo: p.repo }) : '',
+    ix.gitlabHosts,
+  );
 }
 
 /** The closes part of a row line: "closes #7 #8 +1", each number with its issue's link. */

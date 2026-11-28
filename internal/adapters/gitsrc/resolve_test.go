@@ -942,3 +942,125 @@ func writeScript(t *testing.T, body string) string {
 	}
 	return p
 }
+
+// Resolve reads the remotes besides origin, one fetch address each, for the
+// core to compare; remotes it cannot read one address of, or too many, are
+// unclear.
+func TestResolveSecondaryRemotes(t *testing.T) {
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	origin := []string{"remote.origin.url", "git@github.com:example-org/app.git"}
+	many := [][]string{origin}
+	for _, n := range []string{"a", "b", "c", "d", "e"} {
+		many = append(many, []string{"remote." + n + ".url", "https://github.com/example-org/app-" + n})
+	}
+	cases := []struct {
+		name    string
+		config  [][]string
+		want    []model.RemoteAddr
+		unclear bool
+	}{
+		{"origin only", [][]string{origin}, nil, false},
+		{"no remote", nil, nil, false},
+		{"another address of the same repository", [][]string{origin, {"remote.mirror.url", "https://github.com/Example-Org/app"}},
+			[]model.RemoteAddr{{Repo: model.GitHubRepo("Example-Org/app")}}, false},
+		{"fork and upstream", [][]string{origin, {"remote.upstream.url", "git@github.com:other-org/app.git"}},
+			[]model.RemoteAddr{{Repo: model.GitHubRepo("other-org/app")}}, false},
+		{"a GitLab ssh address is bare", [][]string{origin, {"remote.up.url", "gitlab.example.com:group/app.git"}},
+			[]model.RemoteAddr{{Repo: model.GitLabRepo("gitlab.example.com", "group/app"), Bare: true}}, false},
+		{"a remote on no forge", [][]string{origin, {"remote.backup.url", "/srv/git/app.git"}}, []model.RemoteAddr{{}}, false},
+		{"a remote with two addresses", [][]string{origin, {"remote.upstream.url", "git@github.com:example-org/app.git"},
+			{"--add", "remote.upstream.url", "git@github.com:other-org/app.git"}}, nil, true},
+		{"a remote with two addresses off every forge", [][]string{origin, {"remote.x.url", "/srv/a.git"}, {"--add", "remote.x.url", "/srv/b.git"}}, nil, true},
+		{"origin pushes to another repository", [][]string{origin, {"remote.origin.pushurl", "git@github.com:other-org/app.git"}}, nil, true},
+		{"origin pushes to the same repository by https", [][]string{origin, {"remote.origin.pushurl", "https://github.com/Example-Org/app.git"}}, nil, false},
+		{"a secondary remote pushes to another repository", [][]string{origin, {"remote.up.url", "https://github.com/example-org/up"},
+			{"remote.up.pushurl", "https://github.com/example-org/elsewhere"}}, nil, true},
+		{"four other remotes", many[:5], nil, false}, // checked below
+		{"five other remotes", many, nil, true},
+		{"a remote named like an option", [][]string{origin, {"remote.-x.url", "https://github.com/example-org/app"}}, nil, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			repo := newRepo(t)
+			for _, kv := range c.config {
+				git(t, repo, append([]string{"config"}, kv...)...)
+			}
+			got, err := New(Options{}).Resolve(context.Background(), repo)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.RemotesUnclear != c.unclear {
+				t.Fatalf("RemotesUnclear %v, want %v (remotes %+v)", got.RemotesUnclear, c.unclear, got.Remotes)
+			}
+			if c.name == "four other remotes" {
+				if len(got.Remotes) != model.MaxSecondaryRemotes {
+					t.Fatalf("remotes %+v, want %d", got.Remotes, model.MaxSecondaryRemotes)
+				}
+				return
+			}
+			if !slices.Equal(got.Remotes, c.want) {
+				t.Fatalf("Remotes %+v, want %+v", got.Remotes, c.want)
+			}
+		})
+	}
+}
+
+// gh reads remote.<name>.gh-resolved (`gh repo set-default`) before the
+// remotes: any such setting is told to the core.
+func TestResolveGHResolved(t *testing.T) {
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	origin := []string{"remote.origin.url", "git@github.com:example-org/app.git"}
+	for name, c := range map[string]struct {
+		config [][]string
+		want   bool
+	}{
+		"none":                 {[][]string{origin}, false},
+		"set on origin":        {[][]string{origin, {"remote.origin.gh-resolved", "base"}}, true},
+		"set to a repository":  {[][]string{origin, {"remote.upstream.url", "https://github.com/other-org/app"}, {"remote.upstream.gh-resolved", "other-org/app"}}, true},
+		"another remote.* key": {[][]string{origin, {"remote.origin.tagopt", "--no-tags"}}, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			repo := newRepo(t)
+			for _, kv := range c.config {
+				git(t, repo, append([]string{"config"}, kv...)...)
+			}
+			got, err := New(Options{}).Resolve(context.Background(), repo)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.GHResolved != c.want {
+				t.Fatalf("GHResolved %v, want %v", got.GHResolved, c.want)
+			}
+		})
+	}
+}
+
+// A touch folder is asked of git alone: a missing folder is an error, one
+// outside git is its own root, one in a repository is that repository.
+func TestResolveTouch(t *testing.T) {
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	r := New(Options{}).(source.TouchResolver)
+	ctx := context.Background()
+	repo := newRepo(t)
+	git(t, repo, "config", "remote.origin.url", "git@github.com:example-org/app.git")
+	sub := filepath.Join(repo, "web")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := r.ResolveTouch(ctx, sub); err != nil || got.Remote != model.GitHubRepo("example-org/app") {
+		t.Fatalf("a subfolder of a repository: %+v, %v", got, err)
+	}
+	outside := t.TempDir()
+	if got, err := r.ResolveTouch(ctx, outside); err != nil || !got.Remote.IsZero() || got.Root != outside {
+		t.Fatalf("a folder outside git: %+v, %v", got, err)
+	}
+	if _, err := r.ResolveTouch(ctx, filepath.Join(outside, "missing")); err == nil {
+		t.Fatal("a missing folder gave an answer")
+	}
+	if _, err := r.ResolveTouch(ctx, "relative/dir"); err == nil {
+		t.Fatal("a relative folder gave an answer")
+	}
+}

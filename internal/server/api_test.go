@@ -259,6 +259,7 @@ func TestStatusOnlyPathsSendNoBody(t *testing.T) {
 		contract.PathCatchupRead:     {newHarness, `{"upTo":"2026-11-17T09:55:00Z"}`},
 		contract.PathForgetGrouping:  {newForgetHarness, projectBody(groupP)},
 		contract.PathGroupingSetting: {newForgetHarness, settingBody(groupP, string(contract.GroupingNever))},
+		contract.PathIssuePin:        {newPinHarness, pinBody("acme/widgets", 1, true)},
 	}
 	for path, rt := range routes(Options{}) {
 		if rt.sends != nil {

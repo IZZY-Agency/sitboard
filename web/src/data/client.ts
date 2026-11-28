@@ -9,6 +9,7 @@ export type Conn =
   | 'connecting' // first load, nothing shown yet
   | 'live' // following events
   | 'reconnecting' // had a snapshot, the stream dropped, retrying
+  | 'stopped' // had a snapshot, the stream stayed lost for STOP_AFTER, still retrying
   | 'unreachable' // never got a snapshot, retrying
   | 'unauthorized' // 401 or 403: open the link sitboard printed again
   | 'outdated'; // the server speaks another contract version: reload
@@ -40,6 +41,15 @@ export interface FeedDeps {
   now: () => number;
 }
 
+/**
+ * How long the stream has to stay lost before the board is called stopped, not
+ * reconnecting. A restart, a laptop waking up or a proxy hiccup is over well
+ * inside it; the server's heartbeat is 15 s, so this is two of them. The
+ * check runs when an attempt fails, so the word changes at the first failed
+ * attempt after it (the backoff is 15 s by then): 30 to 45 s after the loss.
+ */
+export const STOP_AFTER = 30_000;
+
 /** Waits between attempts: 1 s, 2 s, 4 s, 8 s, then 15 s. */
 export const BACKOFF = [1000, 2000, 4000, 8000, 15000];
 
@@ -51,6 +61,7 @@ export function createFeed(deps: FeedDeps): Feed {
       let timer: unknown = null;
       let attempt = 0;
       let stopped = false;
+      let lostSince: number | null = null; // when the stream was first lost, until a snapshot arrives
 
       const emit = (conn: Conn, retryAt?: number) => {
         if (!stopped) onState({ conn, snapshot, retryAt });
@@ -71,6 +82,7 @@ export function createFeed(deps: FeedDeps): Feed {
         }
         // The one list of hosts a GitLab link may point at is checked here, as the snapshot arrives.
         snapshot = { ...s, gitlabHosts: readGitlabHosts(s.gitlabHosts) };
+        lostSince = null;
         emit('live');
         return true;
       };
@@ -80,7 +92,10 @@ export function createFeed(deps: FeedDeps): Feed {
         es = null;
         const wait = BACKOFF[Math.min(attempt, BACKOFF.length - 1)];
         attempt++;
-        emit(snapshot ? 'reconnecting' : 'unreachable', deps.now() + wait);
+        const t = deps.now();
+        if (snapshot && lostSince === null) lostSince = t;
+        const gone = snapshot && lostSince !== null && t - lostSince >= STOP_AFTER;
+        emit(snapshot ? (gone ? 'stopped' : 'reconnecting') : 'unreachable', t + wait);
         timer = deps.setTimeout(connect, wait);
       };
 

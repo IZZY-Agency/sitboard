@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"math"
 	"mime"
 	"net/http"
 	"regexp"
@@ -206,6 +207,52 @@ func groupingSetting(opts Options) http.HandlerFunc {
 			http.Error(w, "too many folders have a grouping setting", http.StatusConflict)
 		default:
 			log.Printf("server: grouping setting: %v", err)
+			http.Error(w, "could not save the change", http.StatusInternalServerError)
+		}
+	}
+}
+
+// issuePin pins or unpins an issue of a repository the board asks issues
+// about. The repository is matched against the board's own list; nothing
+// else in the body is read.
+func issuePin(opts Options) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !isJSON(w, r) {
+			return
+		}
+		body, ok := readBody(w, r)
+		if !ok {
+			return
+		}
+		var req contract.IssuePinRequest
+		// pinned must be said: missing or null would read as false, an unpin.
+		var said struct {
+			Pinned *bool `json:"pinned"`
+		}
+		if json.Unmarshal(body, &req) != nil || json.Unmarshal(body, &said) != nil || said.Pinned == nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		if req.Number < 1 || req.Number > math.MaxInt32 {
+			http.Error(w, "bad issue number", http.StatusBadRequest)
+			return
+		}
+		if (req.Forge != contract.ForgeGitHub && req.Forge != contract.ForgeGitLab) || req.Host == "" || req.Repo == "" {
+			http.Error(w, "bad repository", http.StatusBadRequest)
+			return
+		}
+		repo := model.ForgeRepo{Forge: model.Forge(req.Forge), Host: req.Host, Path: req.Repo}
+		switch err := opts.Board.SetIssuePin(repo, req.Number, req.Pinned); {
+		case err == nil:
+			w.WriteHeader(http.StatusNoContent)
+		case errors.Is(err, app.ErrUnknownRepo):
+			http.Error(w, "unknown repository", http.StatusNotFound)
+		case errors.Is(err, app.ErrBadIssue):
+			http.Error(w, "bad issue number", http.StatusBadRequest)
+		case errors.Is(err, app.ErrTooManyPins):
+			http.Error(w, "too many issues are pinned", http.StatusConflict)
+		default:
+			log.Printf("server: issue pin: %v", err)
 			http.Error(w, "could not save the change", http.StatusInternalServerError)
 		}
 	}
