@@ -2,7 +2,7 @@
 
 // Package cpucost measures what a piece of work costs this process in CPU
 // time, for tests that compare the cost of the same work at two sizes (is it
-// linear?). Unlike wall time, CPU time does not grow while the process waits
+// linear? see Linear). Unlike wall time, CPU time does not grow while the process waits
 // for a core, so a loaded machine does not fail such a test. sitboard runs on
 // macOS and Linux only.
 package cpucost

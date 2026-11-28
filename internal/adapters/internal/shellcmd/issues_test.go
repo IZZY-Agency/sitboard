@@ -498,14 +498,19 @@ func TestIssueCommandsOwnTheirStrings(t *testing.T) {
 
 // One line of a transcript may hold the same command thousands of times (up
 // to the word cap): reading it costs a linear amount, not a scan of the whole
-// line for every command.
+// line for every command. 8,000 of the longest unit stay under that cap; a
+// line over it is not read at all and would measure nothing.
 func TestIssueCommandsOneLongLine(t *testing.T) {
 	for _, unit := range []string{"gh issue view 7;", "gh issue view 7 -R example-org/tool; ", "glab issue view 7\n", "gh issue view 7 && "} {
-		line := strings.Repeat(unit, 13000)
-		cost := cpucost.Of(3, func() { _ = Parse(line).IssueCommands() })
-		if cost > 400*time.Millisecond {
-			t.Errorf("%q x 13000 took %s of CPU", unit, cost)
+		read := func(n int) func() {
+			line := strings.Repeat(unit, n)
+			return func() {
+				if got := Parse(line).IssueCommands(); len(got) != 1 {
+					t.Fatalf("%q x %d: read %v, want one issue", unit, n, got)
+				}
+			}
 		}
+		cpucost.Linear(t, 3, fmt.Sprintf("%q x 2,000, then x 8,000", unit), read(2000), read(8000))
 	}
 }
 

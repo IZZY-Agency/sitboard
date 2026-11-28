@@ -4,7 +4,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/IZZY-Agency/sitboard/internal/cpucost"
 )
@@ -163,7 +162,7 @@ func TestParsingIsLinear(t *testing.T) {
 		"wrapper options":             func(k int) string { return "sudo " + rep("--user x ", k*words/2) },
 		"redirections":                func(k int) string { return "echo " + rep("2>&1 ", k*words) },
 		"many scripts":                func(k int) string { return rep(`bash -c 'agtermctl session new --name w'; `, k*words/6) },
-		"substitutions":               func(k int) string { return rep(`"$(echo "x")" `, k*words/3) },
+		"substitutions":               func(k int) string { return rep(`"$(echo "x")" `, k*words/5) },
 		"many heredocs":               func(k int) string { return "cat " + rep("<<A ", k*words/2) + "\n" + rep("A\n", k*words/2) },
 		"heredoc body": func(k int) string {
 			return "cat <<EOF\n" + rep("agtermctl session new --name w \"x\"\n", k*bytes/40) + "EOF"
@@ -177,32 +176,33 @@ func TestParsingIsLinear(t *testing.T) {
 		"bracket word":    func(k int) string { return "echo create " + rep("[", k*bytes) },
 		"glob word":       func(k int) string { return "echo create " + rep("*?[", k*bytes/3) },
 		"merge requests":  func(k int) string { return rep("glab mr create;", k*words/4) },
-		"and lists":       func(k int) string { return rep("gh issue view 7 && x; (", k*words/6) },
+		"and lists":       func(k int) string { return rep("gh issue view 7 && x; (", k*words/8) },
 		"continuations":   func(k int) string { return rep("gh issue view 7 \\\n", k*words/5) },
 		"or lists":        func(k int) string { return rep("gh issue view 7 || ", k*words/5) },
 		"issue commands":  func(k int) string { return rep("gh issue view 7; ", k*words/5) },
-		"issue repos":     func(k int) string { return rep("gh issue view 7 -R a/b; ", k*words/6) },
+		"issue repos":     func(k int) string { return rep("gh issue view 7 -R a/b; ", k*words/8) },
 		"issue scripts":   func(k int) string { return rep("bash -c 'gh issue view 7'; ", k*words/6) },
 	}
-	timeOf := func(in string) time.Duration {
-		return cpucost.Of(5, func() {
+	// These reach a cap on scripts or nesting: that bounded work is theirs.
+	capped := []string{"many scripts", "issue scripts", "deep nesting"}
+	work := func(in string) func() {
+		return func() {
 			c := Parse(in)
 			_ = c.Runs("gh", "pr", "create")
 			_ = c.Runs("agtermctl", "session", "new")
 			_ = c.SpawnNames()
 			_ = c.MRCreation()
 			_ = c.IssueCommands()
-		})
+		}
 	}
 	for name, gen := range inputs {
-		t1, t4 := timeOf(gen(1)), timeOf(gen(4))
-		t.Logf("%s: %s at n, %s at 4n", name, t1, t4)
-		if t4 > 8*t1+5*time.Millisecond {
-			t.Errorf("%s grows faster than linear: %s at n, %s at 4n", name, t1, t4)
+		large := gen(4)
+		// A cut line is not all read, and IssueCommands reads none of it:
+		// its cost at 4n would say nothing about growth.
+		if !slices.Contains(capped, name) && Parse(large).inexact {
+			t.Errorf("%s: a cap cuts the input at 4n", name)
 		}
-		if t4 > 10*time.Second {
-			t.Errorf("%s took %s", name, t4)
-		}
+		cpucost.Linear(t, 5, name, work(gen(1)), work(large))
 	}
 }
 

@@ -526,24 +526,20 @@ func TestDeadlineFires(t *testing.T) {
 // step 16 times.
 func TestUpdateIsLinear(t *testing.T) {
 	pr := staticProber(t)
-	cost := func(n int) time.Duration {
+	update := func(n int) func() {
 		var buf bytes.Buffer
 		for i := range n {
 			cwdLines(&buf, fmt.Sprintf("/w/f%03d", i%300), 1, false)
 		}
 		p := filepath.Join(t.TempDir(), "s.jsonl")
 		writeFile(t, p, buf.Bytes())
-		return cpucost.Of(3, func() {
+		return func() {
 			if _, err := newTailer(p, pr).update(context.Background(), fixedNow); err != nil {
 				t.Fatal(err)
 			}
-		})
+		}
 	}
-	t1, t4 := cost(25000), cost(100000)
-	t.Logf("one update: %s at 25,000 records, %s at 100,000", t1, t4)
-	if t4 > 8*t1+5*time.Millisecond {
-		t.Fatalf("reading grows faster than linear: %s at n, %s at 4n", t1, t4)
-	}
+	cpucost.Linear(t, 3, "one update of 25,000 records, then 100,000", update(25000), update(100000))
 }
 
 // Item 4: a folder missing at lookup time that comes back is looked up again.
